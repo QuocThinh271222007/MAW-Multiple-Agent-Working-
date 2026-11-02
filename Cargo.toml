@@ -1,0 +1,47 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/maw-core",
+    "crates/maw-storage",
+    "crates/maw-orchestrator",
+    "crates/maw-mcp",
+    "crates/maw-provider-codex",
+    "crates/maw-provider-claude",
+    "crates/maw-tui",
+    "crates/maw-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.85"
+
+[workspace.dependencies]
+anyhow = "1"
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
+crossterm = { version = "0.28", features = ["event-stream"] }
+futures = "0.3"
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+ratatui = "0.29"
+directories = "5"
+schemars = "0.8"
+rand = "0.8"
+
+maw-core = { path = "crates/maw-core" }
+maw-storage = { path = "crates/maw-storage" }
+maw-orchestrator = { path = "crates/maw-orchestrator" }
+maw-mcp = { path = "crates/maw-mcp" }
+maw-provider-codex = { path = "crates/maw-provider-codex" }
+maw-provider-claude = { path = "crates/maw-provider-claude" }
+maw-tui = { path = "crates/maw-tui" }

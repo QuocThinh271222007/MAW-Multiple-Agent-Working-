@@ -1,0 +1,4 @@
+[package]
+name = "maw-mcp"
+version.workspace = true
+edition.workspace = true

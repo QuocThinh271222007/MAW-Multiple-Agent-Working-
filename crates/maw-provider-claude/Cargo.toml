@@ -1,0 +1,4 @@
+[package]
+name = "maw-provider-claude"
+version.workspace = true
+edition.workspace = true

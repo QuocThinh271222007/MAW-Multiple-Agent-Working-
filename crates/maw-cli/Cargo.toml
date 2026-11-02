@@ -1,0 +1,4 @@
+[package]
+name = "maw-cli"
+version.workspace = true
+edition.workspace = true

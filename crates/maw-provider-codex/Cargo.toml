@@ -1,0 +1,4 @@
+[package]
+name = "maw-provider-codex"
+version.workspace = true
+edition.workspace = true
