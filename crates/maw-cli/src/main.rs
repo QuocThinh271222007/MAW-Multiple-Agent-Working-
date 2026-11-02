@@ -722,6 +722,7 @@ async fn cmd_demo(headless_mode: bool, fast: bool) -> Result<()> {
         } else {
             Duration::from_millis(900)
         },
+        ..Default::default()
     };
     println!("MAW demo with SCRIPTED mock agents in {} — this exercises MAW itself, not Claude or Codex.", repo.display());
     let rt = boot(&ctx, &p, Providers::Mock(script), false).await?;

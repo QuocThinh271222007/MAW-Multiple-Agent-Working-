@@ -75,6 +75,7 @@ async fn main() -> anyhow::Result<()> {
             reject_first_review: true,
             approval_demo: true,
             step_delay: Duration::from_millis(900),
+            ..Default::default()
         },
     ));
     sup.connect_all().await;
