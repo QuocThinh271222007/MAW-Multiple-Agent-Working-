@@ -40,6 +40,8 @@ pub(crate) struct Shared {
     approvals: StdMutex<HashMap<String, PendingApproval>>,
     shutting_down: AtomicBool,
     stderr_tail: StdMutex<VecDeque<String>>,
+    stderr_done: AtomicBool,
+    stderr_notify: tokio::sync::Notify,
     capture: Option<PathBuf>,
     request_timeout: Duration,
 }
@@ -69,6 +71,8 @@ impl Shared {
             approvals: StdMutex::new(HashMap::new()),
             shutting_down: AtomicBool::new(false),
             stderr_tail: StdMutex::new(VecDeque::new()),
+            stderr_done: AtomicBool::new(false),
+            stderr_notify: tokio::sync::Notify::new(),
             capture,
             request_timeout,
         })
@@ -248,6 +252,17 @@ impl Shared {
                 lock(&self.approvals).insert(request_id, pending);
                 self.emit(event).await;
             }
+            ServerRequestOutcome::Respond { result, notice } => {
+                tracing::debug!(method, "declining unrepresentable server request");
+                if let Err(e) = self.respond(id, result).await {
+                    tracing::debug!("failed to answer request: {e}");
+                }
+                self.emit(ProviderEvent::Error {
+                    message: notice,
+                    fatal: false,
+                })
+                .await;
+            }
             ServerRequestOutcome::Reject { code, message } => {
                 tracing::debug!(method, "rejecting unsupported server request");
                 if let Err(e) = self.respond_error(id, code, &message).await {
@@ -308,6 +323,27 @@ impl Shared {
         t.push_back(line);
     }
 
+    /// Called by the stderr drain task when the child's stderr reaches EOF.
+    pub(crate) fn mark_stderr_done(&self) {
+        self.stderr_done.store(true, Ordering::SeqCst);
+        self.stderr_notify.notify_waiters();
+    }
+
+    /// Give the stderr drain a moment to consume the child's last words before we report them.
+    async fn wait_stderr_done(&self) {
+        let waited = async {
+            loop {
+                // register interest before checking the flag so a wake-up cannot be missed
+                let notified = self.stderr_notify.notified();
+                if self.stderr_done.load(Ordering::SeqCst) {
+                    return;
+                }
+                notified.await;
+            }
+        };
+        let _ = tokio::time::timeout(Duration::from_millis(750), waited).await;
+    }
+
     /// Reap the child and tell the supervisor the session is gone.
     async fn finish(&self) {
         let status = {
@@ -325,6 +361,7 @@ impl Shared {
             }
         };
         *self.stdin.lock().await = None;
+        self.wait_stderr_done().await;
         let reason = if self.shutting_down.load(Ordering::SeqCst) {
             "shutdown".to_string()
         } else {

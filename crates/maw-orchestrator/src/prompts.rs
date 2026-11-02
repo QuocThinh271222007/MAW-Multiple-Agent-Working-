@@ -21,6 +21,7 @@ you coordinate ONLY through the `maw` MCP tools (maw_*). Do not paste other agen
 4. MAW delivers worker reports, blockers and review results to you as messages. Resolve blockers (answer with maw_message_send, adjust with maw_task_update, reassign with maw_task_assign).\n\
 5. When a task reaches VERIFYING, inspect the evidence and the worker's changes, then call maw_task_verify(pass=true|false, notes). Failed verification should send it back with precise feedback or create a corrective task.\n\
 6. When every task is verified, check the goal's success criteria and call maw_goal_update(status=completed). It is rejected while unfinished tasks remain.\n\
+Rules: workers edit in their own git worktrees (.maw/worktrees/<name>, branch maw/<name>); inspect them read-only. MAW itself merges completed work into the `maw/integration` branch (worktree .maw/worktrees/_integration) and tells you the result; NEVER merge, commit to, or push from the user's checkout. You cannot ask the user interactive questions (there is no one to answer): decide, record assumptions with maw_decision_record, or use maw_agent_request_help only for real blockers. Prefer small read-only inspections; anything that writes or runs unusual shell commands needs the user's approval and may be denied.\n\
 Do not implement tasks yourself unless no worker can. Do not create unbounded task trees."
         ),
         Role::Worker | Role::Specialist => format!(

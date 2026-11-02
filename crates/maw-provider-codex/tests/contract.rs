@@ -17,6 +17,10 @@ struct Fx {
 }
 
 fn fixture(injection: McpInjection) -> Fx {
+    fixture_with(injection, true)
+}
+
+fn fixture_with(injection: McpInjection, preapprove: bool) -> Fx {
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("received.log");
     let provider = CodexProvider::new(CodexConfig {
@@ -24,6 +28,7 @@ fn fixture(injection: McpInjection) -> Fx {
         capture_path: None,
         request_timeout: Duration::from_secs(10),
         mcp_injection: injection,
+        preapprove_maw_tools: preapprove,
     });
     Fx {
         _dir: dir,
@@ -137,6 +142,10 @@ async fn handshake_sends_the_expected_requests_and_never_leaks_the_token() {
         p["config"]["mcp_servers"]["maw"]["bearer_token_env_var"],
         "MAW_MCP_TOKEN"
     );
+    assert_eq!(
+        p["config"]["mcp_servers"]["maw"]["default_tools_approval_mode"], "approve",
+        "MAW's own tools must not prompt"
+    );
     // the token is passed through the child's environment only
     assert!(log.contains("env:MAW_MCP_TOKEN=present"));
     assert!(
@@ -157,6 +166,10 @@ async fn command_line_injection_mode_puts_only_non_secrets_in_argv() {
         "{argv}"
     );
     assert!(argv.contains("mcp_servers.maw.bearer_token_env_var=\"MAW_MCP_TOKEN\""));
+    assert!(
+        argv.contains("mcp_servers.maw.default_tools_approval_mode=\"approve\""),
+        "{argv}"
+    );
     assert!(!log.contains(TOKEN));
     // in this mode thread/start must not repeat the config
     let start: serde_json::Value = log
@@ -510,5 +523,125 @@ async fn capabilities_are_truthful() {
     assert!(
         c.interrupt && c.resume && c.approvals && c.mcp_http && c.usage_reporting && c.streaming
     );
+    session.shutdown().await.unwrap();
+}
+
+// ---------------------------------------------------------------------------------------------
+// MCP tool-call approvals (`mcpServer/elicitation/request`)
+// ---------------------------------------------------------------------------------------------
+
+async fn elicitation_round_trip(
+    decision: ApprovalDecision,
+    expect_log: &str,
+    expect_tool_ok: bool,
+) {
+    let fx = fixture_with(McpInjection::ThreadConfig, false);
+    let (session, mut rx) = start(&fx).await;
+    session
+        .send_input(AgentInput::text("ELICIT"))
+        .await
+        .unwrap();
+    let ev = collect(&mut rx, |e| {
+        matches!(e, ProviderEvent::ApprovalRequested { .. })
+    })
+    .await;
+    let (request_id, summary, kind, details) = match ev.last() {
+        Some(ProviderEvent::ApprovalRequested {
+            request_id,
+            summary,
+            kind,
+            details,
+            reason,
+            paths,
+        }) => {
+            assert_eq!(reason.as_deref(), Some("Submit a task result"));
+            assert!(paths.is_empty());
+            (request_id.clone(), summary.clone(), *kind, details.clone())
+        }
+        other => panic!("expected approval, got {other:?}"),
+    };
+    assert_eq!(request_id, "910");
+    assert_eq!(kind, ApprovalKind::Other);
+    assert_eq!(summary, "call tool maw/maw_task_submit_result");
+    assert_eq!(
+        details["arguments"]["task"], "T-1",
+        "the user must see what will be called"
+    );
+    session
+        .resolve_approval(&request_id, decision)
+        .await
+        .unwrap();
+    let rest = collect(&mut rx, is_turn_done).await;
+    assert!(
+        rest.iter().any(|e| matches!(e, ProviderEvent::ToolCompleted { ok, name, .. } if *ok == expect_tool_ok && name == "maw/maw_task_submit_result")),
+        "{rest:?}"
+    );
+    assert!(log_text(&fx).contains(expect_log), "log: {}", log_text(&fx));
+    // answered exactly once
+    assert!(session
+        .resolve_approval(&request_id, decision)
+        .await
+        .is_err());
+    session.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn mcp_tool_call_elicitation_is_surfaced_and_accepted() {
+    elicitation_round_trip(
+        ApprovalDecision::Approve,
+        "elicit:accept:persist=none",
+        true,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn mcp_tool_call_elicitation_session_approval_sets_persist_session_never_always() {
+    elicitation_round_trip(
+        ApprovalDecision::ApproveForSession,
+        "elicit:accept:persist=session",
+        true,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn mcp_tool_call_elicitation_deny_and_abort_map_to_decline_and_cancel() {
+    elicitation_round_trip(ApprovalDecision::Deny, "elicit:decline:persist=none", false).await;
+    elicitation_round_trip(ApprovalDecision::Abort, "elicit:cancel:persist=none", false).await;
+}
+
+#[tokio::test]
+async fn form_elicitations_are_declined_with_a_clear_event_instead_of_hanging() {
+    let fx = fixture(McpInjection::ThreadConfig);
+    let (session, mut rx) = start(&fx).await;
+    session
+        .send_input(AgentInput::text("FORMELICIT"))
+        .await
+        .unwrap();
+    let ev = collect(&mut rx, is_turn_done).await;
+    assert!(
+        ev.iter().any(|e| matches!(e, ProviderEvent::Error { fatal: false, message } if message.contains("other-server") && message.contains("declined"))),
+        "{ev:?}"
+    );
+    assert!(!ev
+        .iter()
+        .any(|e| matches!(e, ProviderEvent::ApprovalRequested { .. })));
+    assert!(log_text(&fx).contains("form_elicit_answer:decline"));
+    session.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn preapproval_can_be_disabled_and_is_then_absent_from_the_config() {
+    let fx = fixture_with(McpInjection::ThreadConfig, false);
+    let (session, _rx) = start(&fx).await;
+    let start_req: serde_json::Value = log_text(&fx)
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .find(|l: &serde_json::Value| l["method"] == "thread/start")
+        .unwrap();
+    let maw = &start_req["params"]["config"]["mcp_servers"]["maw"];
+    assert!(maw.get("default_tools_approval_mode").is_none());
+    assert!(maw["url"].is_string());
     session.shutdown().await.unwrap();
 }

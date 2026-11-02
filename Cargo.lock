@@ -1033,6 +1033,7 @@ dependencies = [
  "chrono",
  "clap",
  "directories",
+ "libc",
  "maw-core",
  "maw-mcp",
  "maw-orchestrator",

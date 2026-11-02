@@ -428,6 +428,8 @@ pub fn task_view(t: &Task, tasks: &[Task], agents: &[Agent]) -> Value {
         "evidence": t.evidence.iter().map(|e| json!({ "kind": e.kind.as_str(), "passed": e.passed, "summary": e.summary })).collect::<Vec<_>>(),
         "artifacts": t.artifacts.iter().map(|a| json!({ "kind": a.kind, "path": a.path, "description": a.description })).collect::<Vec<_>>(),
         "workspace_id": t.workspace_id, "no_file_changes_expected": t.no_file_changes_expected,
+        // where the owner's changes live (its isolated git worktree), for reviewers/the Leader to inspect
+        "owner_workspace": t.owner_agent_id.as_ref().and_then(|o| agents.iter().find(|a| &a.id == o)).and_then(|a| a.workspace.clone()),
     })
 }
 

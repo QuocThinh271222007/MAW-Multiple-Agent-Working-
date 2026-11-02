@@ -25,6 +25,8 @@ pub struct MockScript {
     pub reject_first_review: bool,
     /// The first worker turn asks for an approval before writing files.
     pub approval_demo: bool,
+    /// The Leader does not complete the goal on its own; it needs MAW's "all tasks verified" nudge.
+    pub leader_forgets_to_complete: bool,
     /// Pause between simulated steps.
     pub step_delay: Duration,
 }
@@ -35,6 +37,7 @@ impl Default for MockScript {
             block_first_backend: false,
             reject_first_review: false,
             approval_demo: false,
+            leader_forgets_to_complete: false,
             step_delay: Duration::from_millis(15),
         }
     }
@@ -306,12 +309,20 @@ impl Inner {
             return Ok(());
         }
         // 1) messages: answer blockers, acknowledge the rest
+        let mut nudged = false;
         let inbox = self.call("maw_message_inbox", json!({})).await.map_err(e)?;
         for m in inbox["messages"].as_array().cloned().unwrap_or_default() {
             if self.stopped() {
                 return Ok(());
             }
             let id = m["message_id"].as_str().unwrap_or_default().to_string();
+            if m["subject"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("All tasks verified")
+            {
+                nudged = true;
+            }
             if m["type"] == "BLOCKER" {
                 if let (Some(task), Some(from)) = (m["task"].as_str(), m["from"].as_str()) {
                     if from != "orchestrator" {
@@ -365,7 +376,9 @@ impl Inner {
         // 3) completion
         let tasks_v = self.call("maw_task_list", json!({})).await.map_err(e)?;
         let all = tasks_v["tasks"].as_array().cloned().unwrap_or_default();
-        if !all.is_empty()
+        let may_complete = !self.script.leader_forgets_to_complete || nudged;
+        if may_complete
+            && !all.is_empty()
             && all
                 .iter()
                 .all(|t| matches!(t["status"].as_str(), Some("DONE") | Some("CANCELED")))

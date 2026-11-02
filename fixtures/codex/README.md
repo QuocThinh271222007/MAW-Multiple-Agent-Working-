@@ -8,6 +8,7 @@ Raw server -> client lines captured from a **real** `codex app-server` session
 | --- | --- |
 | `turn_ok_0.166.0.jsonl` | handshake, `thread/start`, a plain turn: deltas, final message, token usage, rate-limit snapshot, `turn/completed` |
 | `mcp_tool_call_0.166.0.jsonl` | the same plus `mcpServer/startupStatus/updated` for the `maw` server and an `mcpToolCall` item (`maw/maw_goal_get`) |
+| `mcp_elicitation_request_0.166.0.jsonl` | the verbatim `mcpServer/elicitation/request` codex sends (policy `on-request`) before running a **non-read-only** MCP tool when the server is not pre-approved: `_meta.codex_approval_kind = "mcp_tool_call"`, tool args in `_meta.tool_params`, `persist: ["session","always"]`. Captured from a live control run (only the request line, kept verbatim) |
 
 Sanitized: home directory, hostname, installation id and temp directory names are replaced.
 Secrets are redacted by the adapter at capture time. Re-capture (and bump the file names and the

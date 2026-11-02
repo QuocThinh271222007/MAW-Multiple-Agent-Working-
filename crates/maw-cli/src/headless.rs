@@ -99,6 +99,73 @@ pub fn print_tasks(tasks: &[Task], agents: &[Agent]) {
     }
 }
 
+/// How long a headless run without a terminal waits before denying an approval request.
+const HEADLESS_DENY_AFTER: Duration = Duration::from_secs(120);
+
+/// Resolve one approval request in headless mode. With a terminal the *user* decides; without
+/// one the request is denied after a timeout. Nothing is ever approved automatically.
+async fn resolve_headless_approval(
+    sup: std::sync::Arc<maw_orchestrator::Supervisor>,
+    id: ApprovalId,
+) {
+    use maw_core::provider::ApprovalDecision;
+    use std::io::IsTerminal;
+    let Some(ap) = sup
+        .engine
+        .pending_approvals()
+        .ok()
+        .and_then(|v| v.into_iter().find(|a| a.id == id))
+    else {
+        return;
+    };
+    let who = sup
+        .engine
+        .get_agent(&ap.agent_id)
+        .map(|a| a.name)
+        .unwrap_or_else(|_| ap.agent_id.0.clone());
+    eprintln!(
+        "\n⏸  APPROVAL NEEDED — {who} wants to: {}{}",
+        ap.summary,
+        ap.reason
+            .as_ref()
+            .map(|r| format!("  (reason: {r})"))
+            .unwrap_or_default()
+    );
+    let decision = if std::io::stdin().is_terminal() {
+        eprint!("   [y]es once / [s]ession / [n]o / [a]bort turn > ");
+        let line = tokio::task::spawn_blocking(|| {
+            let mut s = String::new();
+            let _ = std::io::stdin().read_line(&mut s);
+            s
+        })
+        .await
+        .unwrap_or_default();
+        match line.trim().to_ascii_lowercase().as_str() {
+            "y" | "yes" => ApprovalDecision::Approve,
+            "s" | "session" => ApprovalDecision::ApproveForSession,
+            "a" | "abort" => ApprovalDecision::Abort,
+            _ => ApprovalDecision::Deny,
+        }
+    } else {
+        eprintln!("   (no terminal: denying in {}s unless you resolve it in the TUI; MAW never auto-approves)", HEADLESS_DENY_AFTER.as_secs());
+        tokio::time::sleep(HEADLESS_DENY_AFTER).await;
+        ApprovalDecision::Deny
+    };
+    // it may have been resolved elsewhere in the meantime
+    if sup
+        .engine
+        .pending_approvals()
+        .map(|v| v.iter().any(|a| a.id == id))
+        .unwrap_or(false)
+    {
+        if let Err(e) = sup.resolve_approval(&id, decision).await {
+            eprintln!("   could not resolve approval: {e}");
+        } else {
+            eprintln!("   → {decision:?}");
+        }
+    }
+}
+
 pub enum Outcome {
     GoalCompleted,
     Stopped,
@@ -139,6 +206,28 @@ pub async fn drive(
                 }
             }
         }))
+    };
+
+    let approver = {
+        let sup = rt.sup.clone();
+        let mut rx = engine.subscribe();
+        tokio::spawn(async move {
+            loop {
+                match rx.recv().await {
+                    Ok(e) if e.event_type == EventKind::PermissionRequested => {
+                        if let Some(id) = e.payload.get("approval_id").and_then(|v| v.as_str()) {
+                            tokio::spawn(resolve_headless_approval(
+                                sup.clone(),
+                                ApprovalId::from(id),
+                            ));
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(_) => break,
+                }
+            }
+        })
     };
 
     // wait for agents to come up (connected, or terminally unavailable)
@@ -235,5 +324,6 @@ pub async fn drive(
     if let Some(p) = printer {
         p.abort();
     }
+    approver.abort();
     Ok(outcome)
 }

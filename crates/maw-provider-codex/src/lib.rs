@@ -39,6 +39,11 @@ pub struct CodexConfig {
     pub capture_path: Option<PathBuf>,
     pub request_timeout: Duration,
     pub mcp_injection: McpInjection,
+    /// Let tools of MAW's own `maw` MCP server run without Codex asking per call
+    /// (`mcp_servers.maw.default_tools_approval_mode = "approve"`). Default `true`; other MCP
+    /// servers are never affected. When `false`, each non-read-only call surfaces as an
+    /// `ApprovalRequested` for the user instead.
+    pub preapprove_maw_tools: bool,
 }
 
 impl Default for CodexConfig {
@@ -48,6 +53,7 @@ impl Default for CodexConfig {
             capture_path: None,
             request_timeout: Duration::from_secs(60),
             mcp_injection: McpInjection::ThreadConfig,
+            preapprove_maw_tools: true,
         }
     }
 }
@@ -186,6 +192,14 @@ impl AgentProvider for CodexProvider {
                     protocol::MCP_SERVER_NAME,
                     json!(protocol::MCP_TOKEN_ENV)
                 ));
+                if self.cfg.preapprove_maw_tools {
+                    cmd.arg("-c").arg(format!(
+                        "mcp_servers.{}.{}={}",
+                        protocol::MCP_SERVER_NAME,
+                        protocol::PREAPPROVE_KEY,
+                        json!(protocol::PREAPPROVE_VALUE)
+                    ));
+                }
             }
         }
         cmd.current_dir(&cfg.cwd)
@@ -230,13 +244,17 @@ impl AgentProvider for CodexProvider {
                 while let Ok(Some(l)) = lines.next_line().await {
                     sh.record_stderr(&l);
                 }
+                sh.mark_stderr_done();
             });
+        } else {
+            shared.mark_stderr_done();
         }
 
         match handshake(
             &shared,
             &cfg,
             self.cfg.mcp_injection == McpInjection::ThreadConfig,
+            self.cfg.preapprove_maw_tools,
         )
         .await
         {
@@ -265,6 +283,7 @@ async fn handshake(
     shared: &Arc<Shared>,
     cfg: &SessionConfig,
     thread_config: bool,
+    preapprove: bool,
 ) -> ProviderResult<String> {
     shared
         .request(
@@ -278,7 +297,7 @@ async fn handshake(
         .map_err(auth_hint)?;
     shared.notify("initialized", None).await?;
 
-    let params = protocol::thread_params(cfg, thread_config);
+    let params = protocol::thread_params(cfg, thread_config, preapprove);
     if let Some(native) = &cfg.resume_native_id {
         let mut p = params.clone();
         p["threadId"] = json!(native);

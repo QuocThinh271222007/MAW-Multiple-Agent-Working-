@@ -27,21 +27,30 @@ pub fn sandbox_mode(p: PermissionProfile) -> &'static str {
     }
 }
 
+/// Per-server key that makes Codex run every tool of that MCP server without asking.
+/// Without it, Codex (policy `on-request`/`untrusted`) sends an `mcpServer/elicitation/request`
+/// before each non-`readOnlyHint` tool call. Verified live against codex 0.166.0.
+pub const PREAPPROVE_KEY: &str = "default_tools_approval_mode";
+pub const PREAPPROVE_VALUE: &str = "approve";
+
 /// Config override registering MAW's streamable-HTTP MCP server. The token itself is NOT
 /// included: Codex reads it from [`MCP_TOKEN_ENV`] in its own environment.
-pub fn mcp_config(endpoint: &McpEndpoint) -> Value {
-    json!({
-        "mcp_servers": {
-            MCP_SERVER_NAME: {
-                "url": endpoint.url,
-                "bearer_token_env_var": MCP_TOKEN_ENV,
-            }
-        }
-    })
+///
+/// `preapprove` sets [`PREAPPROVE_KEY`] on MAW's *own* loopback coordination server only; the
+/// coordination tools are authorized by MAW's role checks, and other MCP servers still ask.
+pub fn mcp_config(endpoint: &McpEndpoint, preapprove: bool) -> Value {
+    let mut server = json!({
+        "url": endpoint.url,
+        "bearer_token_env_var": MCP_TOKEN_ENV,
+    });
+    if preapprove {
+        server[PREAPPROVE_KEY] = json!(PREAPPROVE_VALUE);
+    }
+    json!({ "mcp_servers": { MCP_SERVER_NAME: server } })
 }
 
 /// Parameters shared by `thread/start` and `thread/resume`.
-pub fn thread_params(cfg: &SessionConfig, include_mcp_config: bool) -> Value {
+pub fn thread_params(cfg: &SessionConfig, include_mcp_config: bool, preapprove: bool) -> Value {
     let mut p = json!({
         "cwd": cfg.cwd.to_string_lossy(),
         "approvalPolicy": approval_policy(cfg.permission),
@@ -53,7 +62,7 @@ pub fn thread_params(cfg: &SessionConfig, include_mcp_config: bool) -> Value {
     }
     if include_mcp_config {
         if let Some(e) = &cfg.mcp {
-            p["config"] = mcp_config(e);
+            p["config"] = mcp_config(e, preapprove);
         }
     }
     p
@@ -329,6 +338,71 @@ pub enum ServerRequestOutcome {
     },
     /// Respond with a JSON-RPC error so the server never waits on us.
     Reject { code: i64, message: String },
+    /// Answer immediately with a valid (declining) result and tell the supervisor why.
+    Respond { result: Value, notice: String },
+}
+
+/// `mcpServer/elicitation/request` that Codex uses to ask "may this MCP tool run?".
+/// Identified by `_meta.codex_approval_kind == "mcp_tool_call"` (observed on codex 0.166.0).
+fn is_tool_call_approval(params: &Value) -> bool {
+    params
+        .pointer("/_meta/codex_approval_kind")
+        .and_then(Value::as_str)
+        == Some("mcp_tool_call")
+}
+
+/// The tool name is only present in the human-readable message: `Allow the maw MCP server to
+/// run tool "maw_task_block"?`.
+fn tool_name_from_message(msg: &str) -> Option<&str> {
+    let start = msg.find('"')? + 1;
+    let len = msg[start..].find('"')?;
+    Some(&msg[start..start + len])
+}
+
+fn translate_elicitation(id: &Value, params: &Value) -> ServerRequestOutcome {
+    let server = s(params, "serverName").unwrap_or("?");
+    if !is_tool_call_approval(params) {
+        // A genuine form / URL elicitation: MAW has no UI to fill it in. Decline explicitly (a valid
+        // answer, so the tool call fails fast instead of hanging) and say so.
+        let mode = s(params, "mode").unwrap_or("?");
+        return ServerRequestOutcome::Respond {
+            result: json!({ "action": "decline" }),
+            notice: format!(
+                "MCP server '{server}' asked for interactive input (mode '{mode}': {}); MAW cannot present it and declined",
+                snippet(&json!(s(params, "message").unwrap_or("")), 120)
+            ),
+        };
+    }
+    let message = s(params, "message").unwrap_or_default();
+    let tool = tool_name_from_message(message).unwrap_or("(unknown tool)");
+    let request_id = rpc_id_string(id);
+    let meta = params.get("_meta").cloned().unwrap_or(Value::Null);
+    ServerRequestOutcome::Approval {
+        request_id: request_id.clone(),
+        event: ProviderEvent::ApprovalRequested {
+            request_id,
+            kind: ApprovalKind::Other,
+            summary: format!("call tool {server}/{tool}"),
+            reason: meta
+                .get("tool_description")
+                .and_then(Value::as_str)
+                .map(String::from),
+            paths: vec![],
+            details: json!({
+                "kind": "mcp_tool_call",
+                "server": server,
+                "tool": tool,
+                "arguments": meta.get("tool_params"),
+                "message": message,
+                "turnId": s(params, "turnId"),
+            }),
+        },
+        pending: PendingApproval {
+            rpc_id: id.clone(),
+            kind: ApprovalKind::Other,
+            requested_permissions: None,
+        },
+    }
 }
 
 pub fn rpc_id_string(id: &Value) -> String {
@@ -406,6 +480,7 @@ pub fn translate_server_request(id: &Value, method: &str, params: &Value) -> Ser
                 },
             }
         }
+        "mcpServer/elicitation/request" => translate_elicitation(id, params),
         other => ServerRequestOutcome::Reject {
             code: -32601,
             message: format!("MAW does not support server request '{other}'"),
@@ -416,6 +491,17 @@ pub fn translate_server_request(id: &Value, method: &str, params: &Value) -> Ser
 /// Build the JSON-RPC `result` that answers an approval request.
 pub fn approval_response(p: &PendingApproval, d: ApprovalDecision) -> Value {
     match p.kind {
+        // `Other` is only produced for MCP tool-call elicitations (`mcpServer/elicitation/request`).
+        // `_meta.persist = "session"` remembers the approval for the session (verified live);
+        // MAW never sends "always" because that would persist the grant in the user's Codex config.
+        ApprovalKind::Other => match d {
+            ApprovalDecision::Approve => json!({ "action": "accept" }),
+            ApprovalDecision::ApproveForSession => {
+                json!({ "action": "accept", "_meta": { "persist": "session" } })
+            }
+            ApprovalDecision::Deny => json!({ "action": "decline" }),
+            ApprovalDecision::Abort => json!({ "action": "cancel" }),
+        },
         ApprovalKind::Permissions => match d {
             ApprovalDecision::Approve | ApprovalDecision::ApproveForSession => json!({
                 "permissions": p.requested_permissions.clone().unwrap_or_else(|| json!({})),
@@ -455,16 +541,145 @@ mod tests {
 
     #[test]
     fn mcp_config_never_embeds_the_token() {
-        let c = mcp_config(&McpEndpoint {
+        let ep = McpEndpoint {
             url: "http://127.0.0.1:1/mcp".into(),
             token: "maw_tok_secret".into(),
-        });
+        };
+        let c = mcp_config(&ep, true);
         let text = c.to_string();
         assert!(!text.contains("maw_tok_secret"));
         assert_eq!(
             c["mcp_servers"]["maw"]["bearer_token_env_var"],
             MCP_TOKEN_ENV
         );
+    }
+
+    #[test]
+    fn maw_server_is_preapproved_only_when_asked_and_only_for_maw() {
+        let ep = McpEndpoint {
+            url: "http://127.0.0.1:1/mcp".into(),
+            token: "t".into(),
+        };
+        let on = mcp_config(&ep, true);
+        assert_eq!(
+            on["mcp_servers"]["maw"]["default_tools_approval_mode"],
+            "approve"
+        );
+        assert_eq!(
+            on["mcp_servers"].as_object().map(|m| m.len()),
+            Some(1),
+            "no other server is touched"
+        );
+        assert!(mcp_config(&ep, false)["mcp_servers"]["maw"]
+            .get("default_tools_approval_mode")
+            .is_none());
+    }
+
+    /// Verbatim shape of the request codex 0.166.0 sent for a non-read-only MCP tool.
+    fn tool_call_elicitation() -> Value {
+        json!({
+            "threadId": "t", "turnId": "u", "serverName": "maw", "mode": "form",
+            "_meta": { "codex_approval_kind": "mcp_tool_call", "persist": ["session", "always"],
+                       "tool_description": "Record a write", "tool_params": { "message": "hi" } },
+            "message": "Allow the maw MCP server to run tool \"maw_probe_write\"?",
+            "requestedSchema": { "type": "object", "properties": {} }
+        })
+    }
+
+    #[test]
+    fn mcp_tool_call_elicitation_becomes_an_approval_request() {
+        match translate_server_request(
+            &json!(0),
+            "mcpServer/elicitation/request",
+            &tool_call_elicitation(),
+        ) {
+            ServerRequestOutcome::Approval {
+                request_id,
+                event,
+                pending,
+            } => {
+                assert_eq!(request_id, "0");
+                assert_eq!(pending.kind, ApprovalKind::Other);
+                match event {
+                    ProviderEvent::ApprovalRequested {
+                        summary,
+                        kind,
+                        details,
+                        reason,
+                        ..
+                    } => {
+                        assert_eq!(kind, ApprovalKind::Other);
+                        assert_eq!(summary, "call tool maw/maw_probe_write");
+                        assert_eq!(reason.as_deref(), Some("Record a write"));
+                        assert_eq!(details["arguments"]["message"], "hi");
+                        assert_eq!(details["server"], "maw");
+                    }
+                    other => panic!("{other:?}"),
+                }
+            }
+            other => panic!("expected approval, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn elicitation_answers_use_the_mcp_action_shape() {
+        let p = PendingApproval {
+            rpc_id: json!(0),
+            kind: ApprovalKind::Other,
+            requested_permissions: None,
+        };
+        assert_eq!(
+            approval_response(&p, ApprovalDecision::Approve),
+            json!({ "action": "accept" })
+        );
+        assert_eq!(
+            approval_response(&p, ApprovalDecision::ApproveForSession),
+            json!({ "action": "accept", "_meta": { "persist": "session" } })
+        );
+        assert_eq!(
+            approval_response(&p, ApprovalDecision::Deny),
+            json!({ "action": "decline" })
+        );
+        assert_eq!(
+            approval_response(&p, ApprovalDecision::Abort),
+            json!({ "action": "cancel" })
+        );
+        // never persists a permanent grant
+        for d in [
+            ApprovalDecision::Approve,
+            ApprovalDecision::ApproveForSession,
+        ] {
+            assert!(!approval_response(&p, d).to_string().contains("always"));
+        }
+    }
+
+    #[test]
+    fn real_form_and_url_elicitations_are_declined_with_a_notice() {
+        let form = json!({ "threadId": "t", "serverName": "other", "mode": "form", "message": "Enter your API key",
+            "requestedSchema": { "type": "object", "properties": { "key": { "type": "string" } } } });
+        let url = json!({ "threadId": "t", "serverName": "other", "mode": "url", "message": "Sign in", "url": "https://x", "elicitationId": "e" });
+        for p in [form, url] {
+            match translate_server_request(&json!(3), "mcpServer/elicitation/request", &p) {
+                ServerRequestOutcome::Respond { result, notice } => {
+                    assert_eq!(result["action"], "decline");
+                    assert!(
+                        notice.contains("'other'") && notice.contains("declined"),
+                        "{notice}"
+                    );
+                }
+                other => panic!("expected decline, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn tool_name_parsing_tolerates_odd_messages() {
+        assert_eq!(
+            tool_name_from_message("Allow the x MCP server to run tool \"a_b\"?"),
+            Some("a_b")
+        );
+        assert_eq!(tool_name_from_message("no quotes"), None);
+        assert_eq!(tool_name_from_message("one \" only"), None);
     }
 
     #[test]

@@ -250,14 +250,32 @@ async fn mock_team_completes_the_auth_scenario_end_to_end() {
     );
     let wt = repo.path().join(".maw/worktrees");
     assert!(wt.join("codex-backend").exists() && wt.join("codex-tests").exists());
+    // Integration is continuous (as tasks complete), so by now both branches are merged cleanly;
+    // an explicit extra pass is a no-op and reports no conflicts.
     let results = sup.integrate_done_work().await.unwrap();
     assert!(
-        !results.is_empty()
-            && results.iter().all(|(_, o)| !matches!(
-                o,
-                maw_orchestrator::workspace::IntegrationOutcome::Conflict { .. }
-            )),
+        results.iter().all(|(_, o)| !matches!(
+            o,
+            maw_orchestrator::workspace::IntegrationOutcome::Conflict { .. }
+        )),
         "{results:?}"
+    );
+    let snap = engine.snapshot().unwrap();
+    let worktrees: Vec<_> = snap
+        .workspaces
+        .iter()
+        .filter(|w| w.kind == "worktree")
+        .collect();
+    assert_eq!(worktrees.len(), 2);
+    assert!(
+        worktrees
+            .iter()
+            .all(|w| w.integration_status == "integrated"),
+        "{:?}",
+        worktrees
+            .iter()
+            .map(|w| (&w.branch, &w.integration_status))
+            .collect::<Vec<_>>()
     );
     let integ = sup.integration_path();
     assert!(
@@ -413,4 +431,87 @@ fn crash_mid_task_is_recovered_conservatively_after_restart() {
         .any(|m| m.subject.contains("Recovery")));
     // a second recovery is a no-op (idempotent)
     assert!(engine.recover().unwrap().tasks_parked.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn idle_leader_is_nudged_after_integration_to_complete_the_goal() {
+    let repo = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    init_repo(repo.path());
+    let store = Arc::new(Store::open(data.path().join("maw.db")).unwrap());
+    let engine = Engine::open(store, "demo", &repo.path().to_string_lossy(), fast_cfg()).unwrap();
+    add_team(&engine);
+    let sup = Supervisor::new(engine.clone());
+    sup.register_provider(MockProvider::new(
+        engine.clone(),
+        MockScript {
+            leader_forgets_to_complete: true,
+            ..Default::default()
+        },
+    ));
+    sup.connect_all().await;
+    let runner = tokio::spawn(sup.clone().run());
+    engine.create_goal("auth", vec![]).unwrap();
+
+    let done = wait_for(Duration::from_secs(60), || {
+        engine
+            .current_goal()
+            .unwrap()
+            .map(|g| g.status == GoalStatus::Completed)
+            .unwrap_or(false)
+    })
+    .await;
+    assert!(
+        done,
+        "the nudge should let the Leader finish; tasks: {:?}",
+        engine
+            .list_tasks()
+            .unwrap()
+            .iter()
+            .map(|t| (&t.key, t.status))
+            .collect::<Vec<_>>()
+    );
+
+    let events = engine
+        .read(|db| db.events_since(engine.project_id(), 0, 100_000))
+        .unwrap();
+    let nudge = events
+        .iter()
+        .find(|e| {
+            e.event_type == EventKind::MessageSent
+                && e.payload["subject"]
+                    .as_str()
+                    .unwrap_or("")
+                    .starts_with("All tasks verified")
+        })
+        .expect("completion nudge was sent");
+    let completed = events
+        .iter()
+        .find(|e| e.event_type == EventKind::GoalCompleted)
+        .unwrap();
+    assert!(
+        nudge.sequence < completed.sequence,
+        "goal completed only after the nudge"
+    );
+    // worker branches were integrated before the Leader was nudged
+    let snap = engine.snapshot().unwrap();
+    assert!(
+        snap.workspaces
+            .iter()
+            .filter(|w| w.kind == "worktree")
+            .all(|w| w.integration_status == "integrated"),
+        "{:?}",
+        snap.workspaces
+            .iter()
+            .map(|w| (&w.branch, &w.integration_status))
+            .collect::<Vec<_>>()
+    );
+    assert!(repo.path().join(".maw/worktrees/_integration").exists());
+    assert_eq!(
+        git(repo.path(), &["status", "--porcelain"]),
+        "",
+        "user checkout untouched"
+    );
+    sup.shutdown().await;
+    runner.abort();
 }

@@ -133,6 +133,8 @@ pub struct Supervisor {
     briefed: Mutex<HashSet<AgentId>>,
     user_stopped: Mutex<HashSet<AgentId>>,
     reconnecting: Mutex<HashSet<AgentId>>,
+    /// goal -> (nudges sent, when the last one was sent)
+    nudges: Mutex<HashMap<GoalId, (u32, std::time::Instant)>>,
 }
 
 impl Supervisor {
@@ -151,6 +153,7 @@ impl Supervisor {
             briefed: Mutex::new(HashSet::new()),
             user_stopped: Mutex::new(HashSet::new()),
             reconnecting: Mutex::new(HashSet::new()),
+            nudges: Mutex::new(HashMap::new()),
         })
     }
 
@@ -1001,6 +1004,12 @@ impl Supervisor {
                         self.capture_submission(&tid).await;
                     }
                 }
+                EventKind::TaskCompleted => {
+                    // continuous integration: merge finished workers' branches as soon as they are quiet
+                    if let Err(e) = self.integrate_done_work().await {
+                        tracing::warn!("integration after task completion failed: {e}");
+                    }
+                }
                 _ => {}
             }
         }
@@ -1059,12 +1068,91 @@ impl Supervisor {
         let paused = self.engine.is_paused();
 
         self.kickoff_leader(&live).await?;
+        self.nudge_completion(&live).await?;
         if !paused {
             self.auto_assign(&live, &cfg).await?;
             self.dispatch_tasks(&live, &cfg).await?;
             self.dispatch_reviews(&live, &cfg).await?;
         }
         self.deliver_messages(&live, &cfg).await?;
+        Ok(())
+    }
+
+    /// When every task is verified but the Leader is idle and the goal is still open, integrate the
+    /// finished work and tell the Leader so it can verify the criteria and complete the goal.
+    /// Bounded (2 nudges per goal, spaced) so a stuck Leader cannot cause a message loop.
+    async fn nudge_completion(self: &Arc<Self>, live: &HashSet<AgentId>) -> CoreResult<()> {
+        let Some(leader) = self.engine.leader()? else {
+            return Ok(());
+        };
+        if !live.contains(&leader.id) || !leader.state.is_available() {
+            return Ok(());
+        }
+        let Some(goal) = self.engine.current_goal()? else {
+            return Ok(());
+        };
+        if !matches!(goal.status, GoalStatus::Active | GoalStatus::Verifying) {
+            return Ok(());
+        }
+        let tasks = self.engine.list_tasks()?;
+        let mine: Vec<&Task> = tasks
+            .iter()
+            .filter(|t| t.goal_id == goal.id && t.status != TaskStatus::Canceled)
+            .collect();
+        if mine.is_empty() || mine.iter().any(|t| t.status != TaskStatus::Done) {
+            return Ok(());
+        }
+        if !self.engine.undelivered_for(&leader.id)?.is_empty() {
+            return Ok(()); // it has mail to process first
+        }
+        let sent = {
+            let g = self
+                .nudges
+                .lock()
+                .map_err(|_| CoreError::Internal("nudge lock".into()))?;
+            match g.get(&goal.id) {
+                Some((n, at)) if *n >= 2 || at.elapsed() < Duration::from_secs(45) => return Ok(()),
+                Some((n, _)) => *n,
+                None => 0,
+            }
+        };
+        let results = self.integrate_done_work().await.unwrap_or_else(|e| {
+            tracing::warn!("integration failed: {e}");
+            vec![]
+        });
+        if results
+            .iter()
+            .any(|(_, o)| matches!(o, ws::IntegrationOutcome::Conflict { .. }))
+        {
+            return Ok(()); // integrate_done_work already told the Leader about the conflict
+        }
+        let integ = if results.is_empty() {
+            "Worker branches are already integrated into `maw/integration`.".to_string()
+        } else {
+            format!(
+                "MAW integrated {} into `maw/integration` without conflicts.",
+                results
+                    .iter()
+                    .map(|(b, _)| format!("`{b}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
+        self.engine.send_message(
+            &Actor::System,
+            &leader.id.0,
+            MessageType::Instruction,
+            "All tasks verified — complete the goal",
+            &format!(
+                "Every task of the goal is DONE and verified. {integ} The merged result is at {} (read-only inspection).\nCheck the goal's success criteria against it. If they are met, call maw_goal_update(status=\"completed\"). If something is missing, create corrective tasks with maw_task_create.",
+                self.integration_path().display()
+            ),
+            None,
+            Some(format!("complete-nudge-{}-{sent}", goal.id)),
+        )?;
+        if let Ok(mut g) = self.nudges.lock() {
+            g.insert(goal.id.clone(), (sent + 1, std::time::Instant::now()));
+        }
         Ok(())
     }
 

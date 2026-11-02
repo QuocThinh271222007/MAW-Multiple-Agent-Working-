@@ -702,7 +702,8 @@ impl Engine {
             self.transition(emit, db, &mut t, TaskStatus::Blocked, EventKind::TaskBlocked, json!({ "reason": reason, "needs": needs, "by": Self::agent_name(db, &actor.id()), "by_id": actor.id() }))?;
             self.release_agent_slot(db, &owner, &t.id)?;
             db.end_attempts(&t.id, "blocked", Some(reason))?;
-            if !actor.is_leader() {
+            // Always tell the Leader (notify_leader_tx skips only when the Leader itself is the actor).
+            {
                 self.notify_leader_tx(db, emit, actor, Some(&t), MessageType::Blocker, &format!("{} blocked", t.key), &format!("{} is blocked: {}{}", t.key, reason, needs.map(|n| format!("\nNeeds: {n}")).unwrap_or_default()))?;
             }
             Ok(t)
@@ -887,6 +888,14 @@ impl Engine {
             }
             self.release_agent_slot(db, &owner, &t.id)?;
             db.end_attempts(&t.id, "submitted", Some(summary))?;
+            // Tell the Leader where the worker's isolated worktree is, so it inspects the right place.
+            let workspace_hint = match db.get_agent(&actor.id())? {
+                Some(a) => match a.workspace.filter(|w| !w.is_empty()) {
+                    Some(w) => format!("{w} (branch maw/{})", crate::workspace::slug(&a.name)),
+                    None => "(the project directory)".to_string(),
+                },
+                None => "(unknown)".to_string(),
+            };
             self.notify_leader_tx(
                 db,
                 emit,
@@ -894,7 +903,12 @@ impl Engine {
                 Some(&t),
                 MessageType::Result,
                 &format!("{} submitted ({})", t.key, if needs_review { "awaiting review" } else { "awaiting verification" }),
-                &format!("{name} submitted {} \"{}\".\nSummary: {summary}\nEvidence items: {}", t.key, t.title, t.evidence.len()),
+                &format!(
+                    "{name} submitted {} \"{}\".\nSummary: {summary}\nEvidence items: {}\nWorker workspace (inspect the changes here, read-only): {workspace_hint}",
+                    t.key,
+                    t.title,
+                    t.evidence.len()
+                ),
             )?;
             Ok(t)
         })

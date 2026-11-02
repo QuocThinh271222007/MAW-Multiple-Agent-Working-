@@ -170,3 +170,27 @@ fn every_real_notification_is_either_mapped_or_known_to_be_ignorable() {
         }
     }
 }
+
+#[test]
+fn real_mcp_tool_call_elicitation_becomes_an_approval_request() {
+    // Verbatim request codex 0.166.0 sent before a non-read-only tool call (live control run).
+    let lines = load("mcp_elicitation_request_0.166.0.jsonl");
+    assert_eq!(lines.len(), 1);
+    let m = &lines[0];
+    let id = m.get("id").expect("server request has an id");
+    match translate_server_request(id, "mcpServer/elicitation/request", &m["params"]) {
+        ServerRequestOutcome::Approval { event, pending, .. } => {
+            assert_eq!(pending.kind, ApprovalKind::Other);
+            match event {
+                ProviderEvent::ApprovalRequested {
+                    summary, details, ..
+                } => {
+                    assert_eq!(summary, "call tool maw/maw_probe_write");
+                    assert_eq!(details["arguments"]["message"], "hi");
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+        other => panic!("a real tool-call elicitation must surface as an approval, got {other:?}"),
+    }
+}

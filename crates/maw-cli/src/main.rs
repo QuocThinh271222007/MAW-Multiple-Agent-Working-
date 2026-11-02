@@ -203,6 +203,11 @@ enum ConfigCmd {
 }
 
 fn main() -> Result<()> {
+    #[cfg(unix)]
+    unsafe {
+        // Behave like other CLI tools when piped into `head`: exit quietly on EPIPE instead of panicking.
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
     let cli = Cli::parse();
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

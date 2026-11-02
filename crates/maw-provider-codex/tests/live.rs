@@ -20,9 +20,14 @@ fn enabled() -> bool {
 }
 
 fn provider() -> CodexProvider {
+    provider_with(true)
+}
+
+fn provider_with(preapprove_maw_tools: bool) -> CodexProvider {
     CodexProvider::new(CodexConfig {
         capture_path: std::env::var("MAW_CODEX_CAPTURE").ok().map(PathBuf::from),
         request_timeout: Duration::from_secs(60),
+        preapprove_maw_tools,
         ..CodexConfig::default()
     })
 }
@@ -48,6 +53,16 @@ async fn run_turn(
     session: &SessionHandle,
     prompt: &str,
 ) -> Vec<ProviderEvent> {
+    run_turn_deciding(rx, session, prompt, ApprovalDecision::Deny).await
+}
+
+/// Like `run_turn`, but answers every approval request with `decision` (live runs never block on a human).
+async fn run_turn_deciding(
+    rx: &mut EventReceiver,
+    session: &SessionHandle,
+    prompt: &str,
+    decision: ApprovalDecision,
+) -> Vec<ProviderEvent> {
     session
         .send_input(AgentInput::text(prompt))
         .await
@@ -64,11 +79,8 @@ async fn run_turn(
                     ..
                 } = &ev
                 {
-                    // Live runs must never block on a human: deny and record.
-                    eprintln!("[live] approval requested ({summary}); denying");
-                    let _ = session
-                        .resolve_approval(request_id, ApprovalDecision::Deny)
-                        .await;
+                    eprintln!("[live] approval requested ({summary}); answering {decision:?}");
+                    let _ = session.resolve_approval(request_id, decision).await;
                 }
                 let done = matches!(ev, ProviderEvent::TurnCompleted { .. });
                 out.push(ev);
@@ -228,7 +240,16 @@ async fn standin_mcp() -> (String, Arc<Mutex<Vec<(String, String)>>>) {
                         .unwrap_or_default();
                 let m = req["method"].as_str().unwrap_or("").to_string();
                 if let Ok(mut l) = log.lock() {
-                    l.push((m.clone(), auth));
+                    // tool calls are logged as `tools/call:<tool>` so tests can tell which tool ran
+                    let label = if m == "tools/call" {
+                        format!(
+                            "tools/call:{}",
+                            req["params"]["name"].as_str().unwrap_or("?")
+                        )
+                    } else {
+                        m.clone()
+                    };
+                    l.push((label, auth));
                 }
                 let Some(id) = req.get("id").cloned() else {
                     let _ = sock.write_all(respond("202 Accepted", "").as_bytes()).await;
@@ -239,10 +260,18 @@ async fn standin_mcp() -> (String, Arc<Mutex<Vec<(String, String)>>>) {
                         serde_json::json!({ "protocolVersion": req["params"]["protocolVersion"], "capabilities": { "tools": {} }, "serverInfo": { "name": "maw-standin", "version": "0" } })
                     }
                     "tools/list" => {
-                        serde_json::json!({ "tools": [{ "name": "maw_goal_get", "description": "Get the current MAW goal", "inputSchema": { "type": "object", "properties": {} }, "annotations": { "readOnlyHint": true } }] })
+                        serde_json::json!({ "tools": [
+                            { "name": "maw_goal_get", "description": "Get the current MAW goal", "inputSchema": { "type": "object", "properties": {} }, "annotations": { "readOnlyHint": true } },
+                            { "name": "maw_probe_write", "description": "Record a state-changing write", "inputSchema": { "type": "object", "properties": { "message": { "type": "string" } } }, "annotations": { "readOnlyHint": false } }
+                        ] })
                     }
                     "tools/call" => {
-                        serde_json::json!({ "content": [{ "type": "text", "text": "{\"goal\":\"STANDIN-GOAL-7731\"}" }] })
+                        let text = if req["params"]["name"] == "maw_probe_write" {
+                            "{\"recorded\":true}"
+                        } else {
+                            "{\"goal\":\"STANDIN-GOAL-7731\"}"
+                        };
+                        serde_json::json!({ "content": [{ "type": "text", "text": text }] })
                     }
                     _ => serde_json::json!({}),
                 };
@@ -299,10 +328,132 @@ async fn live_codex_calls_an_authenticated_mcp_tool() {
         .collect();
     assert!(reply.contains("STANDIN-GOAL-7731"), "reply was {reply:?}");
     let seen = seen.lock().unwrap().clone();
-    assert!(seen.iter().any(|(m, _)| m == "tools/call"), "{seen:?}");
+    assert!(
+        seen.iter().any(|(m, _)| m == "tools/call:maw_goal_get"),
+        "{seen:?}"
+    );
     assert!(
         seen.iter().all(|(_, a)| a == &format!("Bearer {token}")),
         "every request must carry the per-agent bearer token: {seen:?}"
+    );
+    session.shutdown().await.unwrap();
+}
+
+const WRITE_PROMPT: &str = "Call the MCP tool maw_probe_write (server: maw) exactly once with message 'hi', then reply with the single word DONE.";
+
+async fn session_with_standin(
+    p: &CodexProvider,
+) -> (
+    SessionHandle,
+    EventReceiver,
+    Arc<Mutex<Vec<(String, String)>>>,
+    tempfile::TempDir,
+) {
+    let (url, seen) = standin_mcp().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (session, rx) = p
+        .start_session(cfg(
+            dir.path().to_path_buf(),
+            Some(McpEndpoint {
+                url,
+                token: "maw_tok_live_0123456789abcdef".into(),
+            }),
+            PermissionProfile::Balanced,
+        ))
+        .await
+        .expect("session starts");
+    (session, rx, seen, dir)
+}
+
+/// The bug from the first real run: a NON-read-only MAW tool must run without any prompt.
+#[tokio::test]
+#[ignore = "live: needs an authenticated codex CLI and spends quota; set MAW_LIVE_CODEX=1"]
+async fn live_non_read_only_maw_tool_runs_without_approval() {
+    if !enabled() {
+        eprintln!("MAW_LIVE_CODEX!=1; skipping");
+        return;
+    }
+    let (session, mut rx, seen, _dir) = session_with_standin(&provider()).await;
+    let events = run_turn(&mut rx, &session, WRITE_PROMPT).await;
+    eprintln!("[live] events: {events:#?}");
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, ProviderEvent::ApprovalRequested { .. })),
+        "pre-approved MAW tools must not prompt"
+    );
+    assert!(events.iter().any(|e| matches!(e, ProviderEvent::ToolCompleted { name, ok: true, .. } if name == "maw/maw_probe_write")));
+    assert!(
+        seen.lock()
+            .unwrap()
+            .iter()
+            .any(|(m, _)| m == "tools/call:maw_probe_write"),
+        "the write tool really reached the server"
+    );
+    session.shutdown().await.unwrap();
+}
+
+/// Negative control + part 2: without pre-approval Codex asks; MAW surfaces it as an approval
+/// request and approving it through `resolve_approval` lets the call through.
+#[tokio::test]
+#[ignore = "live: needs an authenticated codex CLI and spends quota; set MAW_LIVE_CODEX=1"]
+async fn live_without_preapproval_the_tool_call_surfaces_as_an_approval_request() {
+    if !enabled() {
+        eprintln!("MAW_LIVE_CODEX!=1; skipping");
+        return;
+    }
+    let (session, mut rx, seen, _dir) = session_with_standin(&provider_with(false)).await;
+    let events =
+        run_turn_deciding(&mut rx, &session, WRITE_PROMPT, ApprovalDecision::Approve).await;
+    eprintln!("[live] events: {events:#?}");
+    let req = events
+        .iter()
+        .find_map(|e| {
+            if let ProviderEvent::ApprovalRequested {
+                summary,
+                kind,
+                details,
+                ..
+            } = e
+            {
+                Some((summary.clone(), *kind, details.clone()))
+            } else {
+                None
+            }
+        })
+        .expect("codex must ask before running a non-read-only MCP tool");
+    assert_eq!(req.0, "call tool maw/maw_probe_write");
+    assert_eq!(req.1, ApprovalKind::Other);
+    assert_eq!(req.2["arguments"]["message"], "hi");
+    assert!(events.iter().any(|e| matches!(e, ProviderEvent::ToolCompleted { name, ok: true, .. } if name == "maw/maw_probe_write")), "approved call must complete");
+    assert!(seen
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|(m, _)| m == "tools/call:maw_probe_write"));
+    session.shutdown().await.unwrap();
+}
+
+/// Denying must really stop the call from reaching the server.
+#[tokio::test]
+#[ignore = "live: needs an authenticated codex CLI and spends quota; set MAW_LIVE_CODEX=1"]
+async fn live_denied_tool_call_never_reaches_the_server() {
+    if !enabled() {
+        eprintln!("MAW_LIVE_CODEX!=1; skipping");
+        return;
+    }
+    let (session, mut rx, seen, _dir) = session_with_standin(&provider_with(false)).await;
+    let events = run_turn_deciding(&mut rx, &session, WRITE_PROMPT, ApprovalDecision::Deny).await;
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, ProviderEvent::ApprovalRequested { .. })));
+    assert!(
+        !seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(m, _)| m == "tools/call:maw_probe_write"),
+        "a denied call must not execute"
     );
     session.shutdown().await.unwrap();
 }

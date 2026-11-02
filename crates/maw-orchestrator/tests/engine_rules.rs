@@ -712,3 +712,40 @@ fn lease_expiry_blocks_instead_of_silently_retrying() {
     assert!(t.blocked_reason.unwrap().contains("lease expired"));
     assert_eq!(engine.get_agent(&w.id).unwrap().current_task_id, None);
 }
+
+#[test]
+fn orchestrator_initiated_blocks_still_notify_the_leader() {
+    // Regression: a real run parked a task after the worker ended its turn twice without a result,
+    // but the Leader was never told, so nothing progressed.
+    let f = setup();
+    call(&f, &f.leader, "maw_task_create", json!({ "title": "A" })).unwrap();
+    make_running(&f, "T-1", &f.w1);
+    f.engine
+        .block_task(
+            &Actor::System,
+            "T-1",
+            "agent ended its turn twice without a result",
+            Some("Leader decision"),
+        )
+        .unwrap();
+    let msgs = f.engine.undelivered_for(&f.leader.id()).unwrap();
+    assert!(
+        msgs.iter().any(|m| m.message_type == MessageType::Blocker
+            && m.content.contains("ended its turn twice")),
+        "{msgs:?}"
+    );
+    // the Leader blocking a task itself does not message itself
+    call(&f, &f.leader, "maw_task_create", json!({ "title": "B" })).unwrap();
+    f.engine
+        .assign_task(&f.leader, "T-2", &f.w2.id().0)
+        .unwrap();
+    f.engine
+        .block_task(&f.leader, "T-2", "parked by leader", None)
+        .unwrap();
+    assert!(f
+        .engine
+        .undelivered_for(&f.leader.id())
+        .unwrap()
+        .iter()
+        .all(|m| !m.content.contains("parked by leader")));
+}

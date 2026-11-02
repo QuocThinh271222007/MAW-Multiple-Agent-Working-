@@ -247,6 +247,70 @@ fn main() {
                         }
                         turn_completed("completed", None);
                     }
+                    // The request below is the shape codex 0.166.0 really sends before a
+                    // non-read-only MCP tool call (captured live; ids/paths simplified).
+                    "ELICIT" => {
+                        turn_started();
+                        out(
+                            &json!({ "id": 910, "method": "mcpServer/elicitation/request", "params": {
+                            "threadId": THREAD, "turnId": "turn_1", "serverName": "maw", "mode": "form",
+                            "_meta": { "codex_approval_kind": "mcp_tool_call", "persist": ["session", "always"],
+                                       "tool_description": "Submit a task result", "tool_params": { "task": "T-1" },
+                                       "tool_params_display": [{ "name": "task", "value": "T-1", "display_name": "task" }] },
+                            "message": "Allow the maw MCP server to run tool \"maw_task_submit_result\"?",
+                            "requestedSchema": { "type": "object", "properties": {} } } }),
+                        );
+                        let mut action = String::from("?");
+                        let mut persist = String::from("none");
+                        while let Some(m) = read_msg(&mut lines) {
+                            if m.get("id") == Some(&json!(910)) && m.get("method").is_none() {
+                                action = m
+                                    .pointer("/result/action")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("?")
+                                    .to_string();
+                                persist = m
+                                    .pointer("/result/_meta/persist")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("none")
+                                    .to_string();
+                                break;
+                            }
+                        }
+                        log(&format!("elicit:{action}:persist={persist}"));
+                        let ok = action == "accept";
+                        notify(
+                            "item/started",
+                            json!({ "threadId": THREAD, "turnId": "turn_1", "item": { "type": "mcpToolCall", "id": "t1", "server": "maw", "tool": "maw_task_submit_result", "arguments": { "task": "T-1" }, "status": "inProgress" } }),
+                        );
+                        notify(
+                            "item/completed",
+                            json!({ "threadId": THREAD, "turnId": "turn_1", "item": { "type": "mcpToolCall", "id": "t1", "server": "maw", "tool": "maw_task_submit_result", "arguments": { "task": "T-1" },
+                            "status": if ok { "completed" } else { "failed" }, "error": if ok { Value::Null } else { json!({ "message": "user cancelled MCP tool call" }) } } }),
+                        );
+                        turn_completed("completed", None);
+                    }
+                    "FORMELICIT" => {
+                        turn_started();
+                        out(
+                            &json!({ "id": 911, "method": "mcpServer/elicitation/request", "params": {
+                            "threadId": THREAD, "turnId": "turn_1", "serverName": "other-server", "mode": "form",
+                            "message": "Please enter your API key",
+                            "requestedSchema": { "type": "object", "properties": { "key": { "type": "string" } } } } }),
+                        );
+                        while let Some(m) = read_msg(&mut lines) {
+                            if m.get("id") == Some(&json!(911)) && m.get("method").is_none() {
+                                log(&format!(
+                                    "form_elicit_answer:{}",
+                                    m.pointer("/result/action")
+                                        .and_then(Value::as_str)
+                                        .unwrap_or("?")
+                                ));
+                                break;
+                            }
+                        }
+                        turn_completed("completed", None);
+                    }
                     "GARBAGE" => {
                         raw("this is not json");
                         raw("{\"method\": \"item/agentMessage/delta\", \"params\": {broken");
