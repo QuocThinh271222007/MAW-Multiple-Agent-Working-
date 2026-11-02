@@ -1,0 +1,37 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  test:
+    name: fmt / clippy / test (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: git config --global user.name ci && git config --global user.email ci@localhost
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets
+      - run: cargo build --workspace
+      # Deterministic fake providers only. Live-provider tests are #[ignore] and need MAW_LIVE_* + real logins.
+      - run: cargo test --workspace
+
+  docs-in-sync:
+    name: MCP tool reference is up to date
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo run -q -p maw-cli -- tools --markdown > /tmp/MCP_TOOLS.md
+      - run: diff -u docs/MCP_TOOLS.md /tmp/MCP_TOOLS.md

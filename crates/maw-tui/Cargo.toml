@@ -2,3 +2,21 @@
 name = "maw-tui"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+
+[dependencies]
+maw-core.workspace = true
+maw-storage.workspace = true
+maw-orchestrator.workspace = true
+anyhow.workspace = true
+chrono.workspace = true
+crossterm.workspace = true
+futures.workspace = true
+ratatui.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+unicode-width = "0.2"
+
+[dev-dependencies]
+tempfile = "3"

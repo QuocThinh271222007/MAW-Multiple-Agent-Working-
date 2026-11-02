@@ -2,3 +2,21 @@
 name = "maw-mcp"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+
+[dependencies]
+maw-core.workspace = true
+maw-orchestrator.workspace = true
+anyhow.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+axum = "0.8"
+http = "1"
+rmcp = { version = "3.8", features = ["server", "transport-io", "transport-streamable-http-server"] }
+
+[dev-dependencies]
+maw-storage.workspace = true
+rmcp = { version = "3.8", features = ["server", "client", "transport-io", "transport-streamable-http-server", "transport-streamable-http-client-reqwest"] }
+reqwest = { version = "0.12", default-features = false, features = ["json"] }

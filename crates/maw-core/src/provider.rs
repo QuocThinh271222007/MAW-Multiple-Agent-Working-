@@ -54,9 +54,17 @@ pub struct ProviderInfo {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum AuthStatus {
-    Authenticated { method: String, account: Option<String>, plan: Option<String> },
-    NotAuthenticated { hint: String },
-    Unknown { reason: String },
+    Authenticated {
+        method: String,
+        account: Option<String>,
+        plan: Option<String>,
+    },
+    NotAuthenticated {
+        hint: String,
+    },
+    Unknown {
+        reason: String,
+    },
 }
 
 impl AuthStatus {
@@ -98,7 +106,10 @@ pub struct AgentInput {
 
 impl AgentInput {
     pub fn text(t: impl Into<String>) -> Self {
-        AgentInput { text: t.into(), steer_if_active: false }
+        AgentInput {
+            text: t.into(),
+            steer_if_active: false,
+        }
     }
 }
 
@@ -132,18 +143,47 @@ pub enum ApprovalDecision {
 /// Normalized events emitted by every provider adapter.
 #[derive(Clone, Debug)]
 pub enum ProviderEvent {
-    Connected { native_session_id: Option<String> },
-    TurnStarted { turn_id: String },
+    Connected {
+        native_session_id: Option<String>,
+    },
+    TurnStarted {
+        turn_id: String,
+    },
     /// Streaming text chunk (not persisted as a durable event).
-    MessageDelta { text: String },
+    MessageDelta {
+        text: String,
+    },
     /// A complete assistant message.
-    Message { text: String },
-    ToolStarted { call_id: String, name: String, detail: Option<String> },
-    ToolCompleted { call_id: String, name: String, ok: bool, detail: Option<String> },
-    CommandStarted { call_id: String, command: String, cwd: Option<String> },
-    CommandOutput { call_id: String, chunk: String },
-    CommandCompleted { call_id: String, exit_code: Option<i64> },
-    FileChanged { paths: Vec<String> },
+    Message {
+        text: String,
+    },
+    ToolStarted {
+        call_id: String,
+        name: String,
+        detail: Option<String>,
+    },
+    ToolCompleted {
+        call_id: String,
+        name: String,
+        ok: bool,
+        detail: Option<String>,
+    },
+    CommandStarted {
+        call_id: String,
+        command: String,
+        cwd: Option<String>,
+    },
+    CommandOutput {
+        call_id: String,
+        chunk: String,
+    },
+    CommandCompleted {
+        call_id: String,
+        exit_code: Option<i64>,
+    },
+    FileChanged {
+        paths: Vec<String>,
+    },
     ApprovalRequested {
         request_id: String,
         kind: ApprovalKind,
@@ -152,11 +192,23 @@ pub enum ProviderEvent {
         paths: Vec<String>,
         details: serde_json::Value,
     },
-    TurnCompleted { turn_id: String, outcome: TurnOutcome, error: Option<String> },
+    TurnCompleted {
+        turn_id: String,
+        outcome: TurnOutcome,
+        error: Option<String>,
+    },
     Usage(UsageMetrics),
-    RateLimited { retry_after_ms: Option<u64>, detail: String },
-    Error { message: String, fatal: bool },
-    Disconnected { reason: String },
+    RateLimited {
+        retry_after_ms: Option<u64>,
+        detail: String,
+    },
+    Error {
+        message: String,
+        fatal: bool,
+    },
+    Disconnected {
+        reason: String,
+    },
 }
 
 /// A live provider session. All methods take `&self` so sessions can be shared.
@@ -167,7 +219,11 @@ pub trait AgentSession: Send + Sync {
     /// Begin a new turn (or steer the active one when allowed and supported).
     async fn send_input(&self, input: AgentInput) -> ProviderResult<()>;
     async fn interrupt(&self) -> ProviderResult<()>;
-    async fn resolve_approval(&self, request_id: &str, decision: ApprovalDecision) -> ProviderResult<()>;
+    async fn resolve_approval(
+        &self,
+        request_id: &str,
+        decision: ApprovalDecision,
+    ) -> ProviderResult<()>;
     /// Terminate the session and release every owned process.
     async fn shutdown(&self) -> ProviderResult<()>;
 }
@@ -181,7 +237,10 @@ pub trait AgentProvider: Send + Sync {
     async fn detect(&self) -> ProviderResult<ProviderInfo>;
     async fn auth_status(&self) -> ProviderResult<AuthStatus>;
     /// Start a session (or resume when `cfg.resume_native_id` is set and supported).
-    async fn start_session(&self, cfg: SessionConfig) -> ProviderResult<(SessionHandle, EventReceiver)>;
+    async fn start_session(
+        &self,
+        cfg: SessionConfig,
+    ) -> ProviderResult<(SessionHandle, EventReceiver)>;
 }
 
 /// Bounded event channel capacity: slow consumers apply backpressure to the adapter instead

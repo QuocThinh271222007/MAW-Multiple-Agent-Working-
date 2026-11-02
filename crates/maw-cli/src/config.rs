@@ -1,0 +1,184 @@
+//! User configuration, data directories and the project registry.
+
+use anyhow::{Context, Result};
+use maw_core::OrchestratorConfig;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct UiConfig {
+    pub monochrome: bool,
+    pub mouse: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct ProviderConfig {
+    /// Override the executable (otherwise found on PATH).
+    pub path: Option<String>,
+    pub model: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct MawConfig {
+    pub ui: UiConfig,
+    pub orchestrator: OrchestratorConfig,
+    pub codex: ProviderConfig,
+    pub claude: ProviderConfig,
+}
+
+#[derive(Debug, Clone)]
+pub struct Dirs {
+    pub config: PathBuf,
+    pub data: PathBuf,
+}
+
+impl Dirs {
+    /// `MAW_HOME` overrides both directories (used by tests and portable installs).
+    pub fn discover() -> Result<Dirs> {
+        if let Some(h) = std::env::var_os("MAW_HOME") {
+            let h = PathBuf::from(h);
+            return Ok(Dirs {
+                config: h.join("config"),
+                data: h.join("data"),
+            });
+        }
+        let pd = directories::ProjectDirs::from("dev", "maw", "maw")
+            .context("cannot determine the user's home directory")?;
+        Ok(Dirs {
+            config: pd.config_dir().to_path_buf(),
+            data: pd.data_dir().to_path_buf(),
+        })
+    }
+    pub fn config_file(&self) -> PathBuf {
+        self.config.join("config.toml")
+    }
+    pub fn registry_file(&self) -> PathBuf {
+        self.config.join("projects.json")
+    }
+    pub fn project_dir(&self, name: &str) -> PathBuf {
+        self.data.join("projects").join(sanitize(name))
+    }
+    pub fn db_path(&self, name: &str) -> PathBuf {
+        self.project_dir(name).join("maw.db")
+    }
+    pub fn log_file(&self) -> PathBuf {
+        self.data.join("logs").join("maw.log")
+    }
+}
+
+pub fn sanitize(name: &str) -> String {
+    let s: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    if s.is_empty() {
+        "project".into()
+    } else {
+        s
+    }
+}
+
+impl MawConfig {
+    pub fn load(dirs: &Dirs) -> Result<MawConfig> {
+        let p = dirs.config_file();
+        if !p.exists() {
+            return Ok(MawConfig::default());
+        }
+        let text =
+            std::fs::read_to_string(&p).with_context(|| format!("reading {}", p.display()))?;
+        toml::from_str(&text)
+            .with_context(|| format!("{} is not valid; fix it or delete it to reset", p.display()))
+    }
+    pub fn save(&self, dirs: &Dirs) -> Result<()> {
+        std::fs::create_dir_all(&dirs.config)?;
+        std::fs::write(dirs.config_file(), toml::to_string_pretty(self)?)?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct Registry {
+    /// project name -> absolute path
+    pub projects: BTreeMap<String, String>,
+}
+
+impl Registry {
+    pub fn load(dirs: &Dirs) -> Registry {
+        std::fs::read_to_string(dirs.registry_file())
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    }
+    pub fn save(&self, dirs: &Dirs) -> Result<()> {
+        std::fs::create_dir_all(&dirs.config)?;
+        std::fs::write(dirs.registry_file(), serde_json::to_string_pretty(self)?)?;
+        Ok(())
+    }
+    pub fn find_by_path(&self, path: &Path) -> Option<String> {
+        self.projects
+            .iter()
+            .find(|(_, p)| Path::new(p) == path)
+            .map(|(n, _)| n.clone())
+    }
+    /// Register a path, choosing a unique name derived from the directory name.
+    pub fn add(&mut self, path: &Path, name: Option<&str>) -> String {
+        if let Some(existing) = self.find_by_path(path) {
+            return existing;
+        }
+        let base = name
+            .map(String::from)
+            .or_else(|| path.file_name().map(|n| n.to_string_lossy().to_string()))
+            .unwrap_or_else(|| "project".into());
+        let mut candidate = base.clone();
+        let mut i = 2;
+        while self.projects.contains_key(&candidate) {
+            candidate = format!("{base}-{i}");
+            i += 1;
+        }
+        self.projects
+            .insert(candidate.clone(), path.to_string_lossy().to_string());
+        candidate
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn registry_picks_unique_names_and_is_idempotent() {
+        let mut r = Registry::default();
+        let a = r.add(Path::new("/x/app"), None);
+        let b = r.add(Path::new("/y/app"), None);
+        assert_eq!((a.as_str(), b.as_str()), ("app", "app-2"));
+        assert_eq!(r.add(Path::new("/x/app"), None), "app");
+    }
+
+    #[test]
+    fn config_roundtrips_and_defaults_missing_fields() {
+        let c: MawConfig = toml::from_str("[orchestrator]\nmax_concurrency = 2\n").unwrap();
+        assert_eq!(c.orchestrator.max_concurrency, 2);
+        assert_eq!(
+            c.orchestrator.max_attempts,
+            OrchestratorConfig::default().max_attempts
+        );
+        let s = toml::to_string_pretty(&c).unwrap();
+        assert!(toml::from_str::<MawConfig>(&s).is_ok());
+    }
+
+    #[test]
+    fn sanitize_names() {
+        assert_eq!(sanitize("My App/1"), "My-App-1");
+        assert_eq!(sanitize(""), "project");
+    }
+}

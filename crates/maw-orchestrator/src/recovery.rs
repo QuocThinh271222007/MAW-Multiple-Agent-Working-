@@ -66,9 +66,7 @@ impl Engine {
             Ok(())
         })?;
         // the current run must stay open until a clean shutdown
-        self.store.write(|db| {
-            db.reopen_run(&this_run)
-        })?;
+        self.store.write(|db| db.reopen_run(&this_run))?;
         if !report.tasks_parked.is_empty() {
             let leader = self.leader()?;
             if leader.is_some() {

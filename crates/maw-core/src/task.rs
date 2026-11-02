@@ -53,14 +53,20 @@ impl TaskStatus {
     }
 
     pub fn is_terminal(&self) -> bool {
-        matches!(self, TaskStatus::Done | TaskStatus::Failed | TaskStatus::Canceled)
+        matches!(
+            self,
+            TaskStatus::Done | TaskStatus::Failed | TaskStatus::Canceled
+        )
     }
 
     /// Whether the task currently occupies an agent.
     pub fn is_active(&self) -> bool {
         matches!(
             self,
-            TaskStatus::Assigned | TaskStatus::Running | TaskStatus::InReview | TaskStatus::Verifying
+            TaskStatus::Assigned
+                | TaskStatus::Running
+                | TaskStatus::InReview
+                | TaskStatus::Verifying
         )
     }
 
@@ -292,7 +298,10 @@ impl Task {
     pub fn completion_blockers(&self) -> Vec<String> {
         let mut out = Vec::new();
         if self.evidence.iter().all(|e| !e.passed) {
-            out.push("no passing evidence recorded (file changes, test/build result, or verification)".into());
+            out.push(
+                "no passing evidence recorded (file changes, test/build result, or verification)"
+                    .into(),
+            );
         }
         if self.evidence.iter().any(|e| {
             matches!(e.kind, EvidenceKind::TestResult | EvidenceKind::BuildResult) && !e.passed
@@ -466,7 +475,11 @@ mod tests {
     fn done_only_from_verifying() {
         for s in TaskStatus::ALL {
             let ok = s.can_transition_to(TaskStatus::Done);
-            assert_eq!(ok, matches!(s, TaskStatus::Verifying | TaskStatus::Done), "{s}");
+            assert_eq!(
+                ok,
+                matches!(s, TaskStatus::Verifying | TaskStatus::Done),
+                "{s}"
+            );
         }
     }
 
@@ -495,11 +508,11 @@ mod tests {
         e.insert(b.clone(), vec![a.clone()]);
         e.insert(c.clone(), vec![b.clone()]);
         // a -> c would close the loop a -> c -> b -> a
-        assert!(would_create_cycle(&e, &a, &[c.clone()]).is_some());
+        assert!(would_create_cycle(&e, &a, std::slice::from_ref(&c)).is_some());
         // new independent dep is fine
-        assert!(would_create_cycle(&e, &c, &[a.clone()]).is_none());
+        assert!(would_create_cycle(&e, &c, std::slice::from_ref(&a)).is_none());
         // self dependency
-        assert!(would_create_cycle(&e, &a, &[a.clone()]).is_some());
+        assert!(would_create_cycle(&e, &a, std::slice::from_ref(&a)).is_some());
         assert!(validate_acyclic(&e).is_ok());
         e.insert(a.clone(), vec![c.clone()]);
         assert!(validate_acyclic(&e).is_err());
@@ -525,7 +538,10 @@ mod tests {
 
     #[test]
     fn scope_expansion_lowers_progress() {
-        let mut tasks = vec![mk("a", TaskStatus::Done, 1.0, 100), mk("b", TaskStatus::Done, 1.0, 100)];
+        let mut tasks = vec![
+            mk("a", TaskStatus::Done, 1.0, 100),
+            mk("b", TaskStatus::Done, 1.0, 100),
+        ];
         assert_eq!(Progress::compute(&tasks).verified_pct, 100.0);
         tasks.push(mk("c", TaskStatus::Backlog, 2.0, 0));
         assert_eq!(Progress::compute(&tasks).verified_pct, 50.0);

@@ -12,10 +12,10 @@ pub mod task;
 pub mod workspace;
 
 pub use agent::*;
-pub use workspace::*;
 pub use config::OrchestratorConfig;
 pub use error::{CoreError, CoreResult};
 pub use event::{Event, EventKind};
 pub use goal::*;
 pub use ids::*;
 pub use task::*;
+pub use workspace::*;

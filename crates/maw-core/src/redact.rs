@@ -1,7 +1,16 @@
 //! Best-effort secret redaction for logs, diagnostics and persisted output.
 
 const MARKERS: &[&str] = &[
-    "sk-ant-", "sk-proj-", "sk-", "ghp_", "gho_", "github_pat_", "xoxb-", "xoxp-", "AKIA", "maw_tok_",
+    "sk-ant-",
+    "sk-proj-",
+    "sk-",
+    "ghp_",
+    "gho_",
+    "github_pat_",
+    "xoxb-",
+    "xoxp-",
+    "AKIA",
+    "maw_tok_",
 ];
 
 /// Replace likely credentials with `[REDACTED]`.
@@ -10,7 +19,15 @@ pub fn redact(input: &str) -> String {
     let mut rest = input;
     'outer: while !rest.is_empty() {
         // Bearer tokens
-        for prefix in ["Bearer ", "bearer ", "Authorization: ", "api_key=", "apikey=", "token=", "password="] {
+        for prefix in [
+            "Bearer ",
+            "bearer ",
+            "Authorization: ",
+            "api_key=",
+            "apikey=",
+            "token=",
+            "password=",
+        ] {
             if rest.starts_with(prefix) {
                 out.push_str(prefix);
                 let tail = &rest[prefix.len()..];

@@ -2,3 +2,21 @@
 name = "maw-provider-codex"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+description = "MAW provider adapter for the OpenAI Codex App Server"
+
+[dependencies]
+maw-core.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+
+[[bin]]
+name = "maw-fake-codex"
+path = "src/bin/maw-fake-codex.rs"
+test = false

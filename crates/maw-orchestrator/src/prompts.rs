@@ -27,7 +27,7 @@ Do not implement tasks yourself unless no worker can. Do not create unbounded ta
             "{common}\n\nROLE: {}. You implement assigned tasks in your own isolated git worktree (your current directory). Stay inside the task's scope and do not touch unrelated files.\n\
 - Work only on the task MAW gives you. Use maw_progress_report for milestones (it also renews your lease).\n\
 - If blocked, call maw_task_block (reason + what you need) or maw_agent_request_help, then stop and wait; do not guess around a blocker.\n\
-- Commit your work in the worktree (message prefixed with the task key).\n\
+- Leave your work in the worktree; try to commit it (message prefixed with the task key), but if committing is not permitted in your sandbox that is fine: MAW commits uncommitted changes when you submit.\n\
 - Finish with maw_task_submit_result: a summary, changed_files, and evidence (tests/builds you actually ran, with pass/fail). Never report passing tests you did not run.\n\
 - Read maw_message_inbox when asked and maw_message_ack messages you act on.",
             role.as_str().to_uppercase()
@@ -48,7 +48,13 @@ pub fn goal_prompt(goal: &Goal) -> String {
     )
 }
 
-pub fn task_prompt(task: &Task, deps: &[Task], workspace: &str, branch: Option<&str>, feedback: &[Message]) -> String {
+pub fn task_prompt(
+    task: &Task,
+    deps: &[Task],
+    workspace: &str,
+    branch: Option<&str>,
+    feedback: &[Message],
+) -> String {
     let mut s = format!(
         "TASK {key}: {title}\nPriority: {prio} | Attempt: {attempt}\nWorkspace: {workspace}{branch}\n\nDescription:\n{desc}\n\nAcceptance criteria:\n{ac}\n",
         key = task.key,
@@ -61,7 +67,9 @@ pub fn task_prompt(task: &Task, deps: &[Task], workspace: &str, branch: Option<&
         ac = if task.acceptance_criteria.is_empty() { "- (none given)".into() } else { task.acceptance_criteria.iter().map(|c| format!("- {c}")).collect::<Vec<_>>().join("\n") },
     );
     if !deps.is_empty() {
-        s.push_str("\nCompleted prerequisites (read details with maw_task_get / maw_context_read):\n");
+        s.push_str(
+            "\nCompleted prerequisites (read details with maw_task_get / maw_context_read):\n",
+        );
         for d in deps {
             s.push_str(&format!("- {} {} [{}]\n", d.key, d.title, d.status));
         }
@@ -69,7 +77,10 @@ pub fn task_prompt(task: &Task, deps: &[Task], workspace: &str, branch: Option<&
     if !feedback.is_empty() {
         s.push_str("\nMessages for this task (address them first):\n");
         for m in feedback {
-            s.push_str(&format!("[{}] {}\n{}\n", m.message_type, m.subject, m.content));
+            s.push_str(&format!(
+                "[{}] {}\n{}\n",
+                m.message_type, m.subject, m.content
+            ));
         }
     }
     s.push_str("\nWhen finished call maw_task_submit_result with evidence, or maw_task_block if you cannot proceed. Do not stop without doing one of these.");

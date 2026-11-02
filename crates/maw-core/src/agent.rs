@@ -215,7 +215,13 @@ impl AgentState {
         if matches!(to, Disconnected | Failed | Stopped) {
             return true;
         }
-        let active = [Thinking, Working, WaitingApproval, WaitingDependency, Blocked];
+        let active = [
+            Thinking,
+            Working,
+            WaitingApproval,
+            WaitingDependency,
+            Blocked,
+        ];
         match self {
             Disconnected => matches!(to, Connecting),
             Connecting => matches!(to, AuthRequired | Idle),
@@ -226,9 +232,7 @@ impl AgentState {
             Thinking | Working | WaitingApproval | WaitingDependency | Blocked => {
                 active.contains(&to) || matches!(to, Idle | Completed | RateLimited | Recovering)
             }
-            RateLimited => {
-                active.contains(&to) || matches!(to, Idle | Recovering | Connecting)
-            }
+            RateLimited => active.contains(&to) || matches!(to, Idle | Recovering | Connecting),
             Recovering => matches!(to, Connecting | Idle | Thinking | Working | RateLimited),
             Failed => matches!(to, Recovering | Connecting),
             Stopped => matches!(to, Connecting),

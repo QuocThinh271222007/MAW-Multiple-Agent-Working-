@@ -75,7 +75,8 @@ impl Engine {
     // ------------------------------------------------------------------ lookups
 
     pub(crate) fn task_ref(&self, db: &Db, r: &str) -> CoreResult<Task> {
-        db.resolve_task(&self.project.id, r.trim())?.ok_or_else(|| CoreError::not_found("task", r))
+        db.resolve_task(&self.project.id, r.trim())?
+            .ok_or_else(|| CoreError::not_found("task", r))
     }
 
     pub fn get_task(&self, r: &str) -> CoreResult<Task> {
@@ -89,11 +90,17 @@ impl Engine {
     pub fn progress(&self) -> CoreResult<Progress> {
         let goal = self.current_goal()?;
         let tasks = self.list_tasks()?;
-        Ok(Progress::compute(tasks.iter().filter(|t| goal.as_ref().map(|g| g.id == t.goal_id).unwrap_or(true))))
+        Ok(Progress::compute(tasks.iter().filter(|t| {
+            goal.as_ref().map(|g| g.id == t.goal_id).unwrap_or(true)
+        })))
     }
 
     fn agent_name(db: &Db, id: &AgentId) -> String {
-        db.get_agent(id).ok().flatten().map(|a| a.name).unwrap_or_else(|| id.0.clone())
+        db.get_agent(id)
+            .ok()
+            .flatten()
+            .map(|a| a.name)
+            .unwrap_or_else(|| id.0.clone())
     }
 
     fn resolve_executor(&self, db: &Db, r: &str) -> CoreResult<Agent> {
@@ -103,7 +110,10 @@ impl Engine {
             .find(|a| a.id.0 == r || a.name.eq_ignore_ascii_case(r))
             .ok_or_else(|| CoreError::not_found("agent", r))?;
         if !a.role.is_executor() {
-            return Err(CoreError::InvalidInput(format!("agent '{}' has role {} and cannot own implementation tasks", a.name, a.role)));
+            return Err(CoreError::InvalidInput(format!(
+                "agent '{}' has role {} and cannot own implementation tasks",
+                a.name, a.role
+            )));
         }
         Ok(a)
     }
@@ -111,9 +121,21 @@ impl Engine {
     // ------------------------------------------------------------------ transitions
 
     /// Validated status change that also maintains lifecycle timestamps.
-    pub(crate) fn transition(&self, emit: &mut Emit, db: &Db, t: &mut Task, to: TaskStatus, kind: EventKind, mut payload: Value) -> CoreResult<()> {
+    pub(crate) fn transition(
+        &self,
+        emit: &mut Emit,
+        db: &Db,
+        t: &mut Task,
+        to: TaskStatus,
+        kind: EventKind,
+        mut payload: Value,
+    ) -> CoreResult<()> {
         if !t.status.can_transition_to(to) {
-            return Err(CoreError::InvalidTransition { what: "task", from: t.status.to_string(), to: to.to_string() });
+            return Err(CoreError::InvalidTransition {
+                what: "task",
+                from: t.status.to_string(),
+                to: to.to_string(),
+            });
         }
         let from = t.status;
         t.status = to;
@@ -142,7 +164,12 @@ impl Engine {
         Ok(())
     }
 
-    fn release_agent_slot(&self, db: &Db, agent: &Option<AgentId>, task: &TaskId) -> CoreResult<()> {
+    fn release_agent_slot(
+        &self,
+        db: &Db,
+        agent: &Option<AgentId>,
+        task: &TaskId,
+    ) -> CoreResult<()> {
         if let Some(aid) = agent {
             if let Some(mut a) = db.get_agent(aid)? {
                 if a.current_task_id.as_ref() == Some(task) {
@@ -157,10 +184,22 @@ impl Engine {
     /// Promote BACKLOG tasks whose dependencies are all DONE and move pre-assigned READY tasks to ASSIGNED.
     pub(crate) fn refresh_ready(&self, db: &Db, emit: &mut Emit) -> CoreResult<()> {
         let tasks = db.list_tasks(&self.project.id)?;
-        let status: HashMap<TaskId, TaskStatus> = tasks.iter().map(|t| (t.id.clone(), t.status)).collect();
+        let status: HashMap<TaskId, TaskStatus> =
+            tasks.iter().map(|t| (t.id.clone(), t.status)).collect();
         for mut t in tasks {
-            if t.status == TaskStatus::Backlog && t.dependencies.iter().all(|d| status.get(d) == Some(&TaskStatus::Done)) {
-                self.transition(emit, db, &mut t, TaskStatus::Ready, EventKind::TaskReady, json!({}))?;
+            if t.status == TaskStatus::Backlog
+                && t.dependencies
+                    .iter()
+                    .all(|d| status.get(d) == Some(&TaskStatus::Done))
+            {
+                self.transition(
+                    emit,
+                    db,
+                    &mut t,
+                    TaskStatus::Ready,
+                    EventKind::TaskReady,
+                    json!({}),
+                )?;
             }
             if t.status == TaskStatus::Ready {
                 if let Some(owner) = t.owner_agent_id.clone() {
@@ -176,15 +215,21 @@ impl Engine {
 
     pub fn create_task(&self, actor: &Actor, nt: NewTask) -> CoreResult<Task> {
         if !actor.is_leader() {
-            return Err(CoreError::Forbidden("only the Leader (or the user) can create tasks".into()));
+            return Err(CoreError::Forbidden(
+                "only the Leader (or the user) can create tasks".into(),
+            ));
         }
         let title = nt.title.trim().to_string();
         if title.is_empty() || title.len() > 200 {
-            return Err(CoreError::InvalidInput("task title must be 1..200 characters".into()));
+            return Err(CoreError::InvalidInput(
+                "task title must be 1..200 characters".into(),
+            ));
         }
         let weight = nt.weight.unwrap_or(1.0);
         if !(weight.is_finite() && weight > 0.0 && weight <= 1000.0) {
-            return Err(CoreError::InvalidInput("weight must be in (0, 1000]".into()));
+            return Err(CoreError::InvalidInput(
+                "weight must be in (0, 1000]".into(),
+            ));
         }
         let cfg = self.config();
         self.tx(|db, emit| {
@@ -293,7 +338,9 @@ impl Engine {
 
     pub fn update_task(&self, actor: &Actor, r: &str, patch: TaskPatch) -> CoreResult<Task> {
         if !actor.is_leader() {
-            return Err(CoreError::Forbidden("only the Leader (or the user) can modify tasks".into()));
+            return Err(CoreError::Forbidden(
+                "only the Leader (or the user) can modify tasks".into(),
+            ));
         }
         self.tx(|db, emit| {
             let mut t = self.task_ref(db, r)?;
@@ -379,7 +426,9 @@ impl Engine {
 
     pub fn assign_task(&self, actor: &Actor, r: &str, agent_ref: &str) -> CoreResult<Task> {
         if !actor.is_leader() {
-            return Err(CoreError::Forbidden("only the Leader (or the user) can assign tasks".into()));
+            return Err(CoreError::Forbidden(
+                "only the Leader (or the user) can assign tasks".into(),
+            ));
         }
         self.tx(|db, emit| {
             let mut t = self.task_ref(db, r)?;
@@ -431,29 +480,57 @@ impl Engine {
             _ => return Err(CoreError::Forbidden("only agents claim tasks".into())),
         };
         if !role.is_executor() {
-            return Err(CoreError::Forbidden(format!("role {role} cannot claim implementation tasks")));
+            return Err(CoreError::Forbidden(format!(
+                "role {role} cannot claim implementation tasks"
+            )));
         }
         self.tx(|db, emit| {
-            let agent = db.get_agent(&aid)?.ok_or_else(|| CoreError::not_found("agent", &aid))?;
+            let agent = db
+                .get_agent(&aid)?
+                .ok_or_else(|| CoreError::not_found("agent", &aid))?;
             if let Some(cur) = &agent.current_task_id {
                 let cur_task = db.get_task(cur)?;
-                if cur_task.map(|t| t.status == TaskStatus::Running).unwrap_or(false) && r.map(|x| x != cur.0).unwrap_or(true) {
-                    return Err(CoreError::Conflict("agent already has a running task; submit or release it first".into()));
+                if cur_task
+                    .map(|t| t.status == TaskStatus::Running)
+                    .unwrap_or(false)
+                    && r.map(|x| x != cur.0).unwrap_or(true)
+                {
+                    return Err(CoreError::Conflict(
+                        "agent already has a running task; submit or release it first".into(),
+                    ));
                 }
             }
             let mut t = match r {
                 Some(r) => self.task_ref(db, r)?,
                 None => {
-                    let mut ready: Vec<Task> = db.list_tasks(&self.project.id)?.into_iter().filter(|t| t.status == TaskStatus::Ready && t.owner_agent_id.is_none()).collect();
-                    ready.sort_by(|a, b| b.priority.rank().cmp(&a.priority.rank()).then(a.created_at.cmp(&b.created_at)));
-                    ready.into_iter().next().ok_or_else(|| CoreError::Precondition("no_ready_task: nothing is ready to claim".into()))?
+                    let mut ready: Vec<Task> = db
+                        .list_tasks(&self.project.id)?
+                        .into_iter()
+                        .filter(|t| t.status == TaskStatus::Ready && t.owner_agent_id.is_none())
+                        .collect();
+                    ready.sort_by(|a, b| {
+                        b.priority
+                            .rank()
+                            .cmp(&a.priority.rank())
+                            .then(a.created_at.cmp(&b.created_at))
+                    });
+                    ready.into_iter().next().ok_or_else(|| {
+                        CoreError::Precondition("no_ready_task: nothing is ready to claim".into())
+                    })?
                 }
             };
             match (t.status, &t.owner_agent_id) {
                 (TaskStatus::Ready, None) => {
                     t.owner_agent_id = Some(aid.clone());
                     db.update_task(&t)?;
-                    self.transition(emit, db, &mut t, TaskStatus::Assigned, EventKind::TaskClaimed, json!({ "by": agent.name, "by_id": aid, "to": agent.name, "to_id": aid }))?;
+                    self.transition(
+                        emit,
+                        db,
+                        &mut t,
+                        TaskStatus::Assigned,
+                        EventKind::TaskClaimed,
+                        json!({ "by": agent.name, "by_id": aid, "to": agent.name, "to_id": aid }),
+                    )?;
                 }
                 (TaskStatus::Assigned, Some(o)) | (TaskStatus::Running, Some(o)) if *o == aid => {}
                 _ => {
@@ -461,11 +538,15 @@ impl Engine {
                         "{} cannot be claimed (status {}, owner {})",
                         t.key,
                         t.status,
-                        t.owner_agent_id.as_ref().map(|o| Self::agent_name(db, o)).unwrap_or_else(|| "none".into())
+                        t.owner_agent_id
+                            .as_ref()
+                            .map(|o| Self::agent_name(db, o))
+                            .unwrap_or_else(|| "none".into())
                     )))
                 }
             }
-            db.get_task(&t.id)?.ok_or_else(|| CoreError::Internal("task vanished".into()))
+            db.get_task(&t.id)?
+                .ok_or_else(|| CoreError::Internal("task vanished".into()))
         })
     }
 
@@ -474,20 +555,38 @@ impl Engine {
         let cfg = self.config();
         self.tx(|db, emit| {
             let mut t = self.task_ref(db, r)?;
-            let owner = t.owner_agent_id.clone().ok_or_else(|| CoreError::Precondition("task has no owner".into()))?;
+            let owner = t
+                .owner_agent_id
+                .clone()
+                .ok_or_else(|| CoreError::Precondition("task has no owner".into()))?;
             if t.status == TaskStatus::Running {
                 return Ok(t);
             }
             // One task at a time per agent: never overwrite another running task's slot.
             if let Some(a) = db.get_agent(&owner)? {
                 if let Some(cur) = &a.current_task_id {
-                    if cur != &t.id && db.get_task(cur)?.map(|c| c.status == TaskStatus::Running).unwrap_or(false) {
-                        return Err(CoreError::Conflict(format!("{} is already running another task", a.name)));
+                    if cur != &t.id
+                        && db
+                            .get_task(cur)?
+                            .map(|c| c.status == TaskStatus::Running)
+                            .unwrap_or(false)
+                    {
+                        return Err(CoreError::Conflict(format!(
+                            "{} is already running another task",
+                            a.name
+                        )));
                     }
                 }
             }
             if t.attempt_count >= cfg.max_attempts {
-                self.transition(emit, db, &mut t, TaskStatus::Failed, EventKind::TaskFailed, json!({ "reason": format!("exceeded {} attempts", cfg.max_attempts) }))?;
+                self.transition(
+                    emit,
+                    db,
+                    &mut t,
+                    TaskStatus::Failed,
+                    EventKind::TaskFailed,
+                    json!({ "reason": format!("exceeded {} attempts", cfg.max_attempts) }),
+                )?;
                 return Ok(t);
             }
             t.attempt_count += 1;
@@ -495,7 +594,14 @@ impl Engine {
             t.last_heartbeat_at = Some(Utc::now());
             t.blocked_reason = None;
             let attempt = t.attempt_count;
-            self.transition(emit, db, &mut t, TaskStatus::Running, EventKind::TaskStarted, json!({ "attempt": attempt, "agent_id": owner }))?;
+            self.transition(
+                emit,
+                db,
+                &mut t,
+                TaskStatus::Running,
+                EventKind::TaskStarted,
+                json!({ "attempt": attempt, "agent_id": owner }),
+            )?;
             // transition() clears nothing for Running, but persists; re-save the lease explicitly.
             t.lease_expires_at = Some(Utc::now() + Duration::seconds(cfg.lease_secs));
             db.update_task(&t)?;
@@ -530,11 +636,20 @@ impl Engine {
         match actor {
             Actor::Agent { id, .. } if t.owner_agent_id.as_ref() == Some(id) => Ok(()),
             _ if actor.is_leader() => Ok(()),
-            _ => Err(CoreError::Forbidden(format!("only the owner of {} (or the Leader) may do this", t.key))),
+            _ => Err(CoreError::Forbidden(format!(
+                "only the owner of {} (or the Leader) may do this",
+                t.key
+            ))),
         }
     }
 
-    pub fn report_progress(&self, actor: &Actor, r: &str, percent: Option<u8>, note: &str) -> CoreResult<Task> {
+    pub fn report_progress(
+        &self,
+        actor: &Actor,
+        r: &str,
+        percent: Option<u8>,
+        note: &str,
+    ) -> CoreResult<Task> {
         let cfg = self.config();
         self.tx(|db, emit| {
             let mut t = self.task_ref(db, r)?;
@@ -563,7 +678,13 @@ impl Engine {
         })
     }
 
-    pub fn block_task(&self, actor: &Actor, r: &str, reason: &str, needs: Option<&str>) -> CoreResult<Task> {
+    pub fn block_task(
+        &self,
+        actor: &Actor,
+        r: &str,
+        reason: &str,
+        needs: Option<&str>,
+    ) -> CoreResult<Task> {
         if reason.trim().is_empty() {
             return Err(CoreError::InvalidInput("a blocker needs a reason".into()));
         }
@@ -592,8 +713,17 @@ impl Engine {
         self.tx(|db, emit| {
             let mut t = self.task_ref(db, r)?;
             self.require_owner(actor, &t)?;
-            if !matches!(t.status, TaskStatus::Running | TaskStatus::Assigned | TaskStatus::Blocked | TaskStatus::Ready) {
-                return Err(CoreError::Precondition(format!("{} is {} and cannot be released", t.key, t.status)));
+            if !matches!(
+                t.status,
+                TaskStatus::Running
+                    | TaskStatus::Assigned
+                    | TaskStatus::Blocked
+                    | TaskStatus::Ready
+            ) {
+                return Err(CoreError::Precondition(format!(
+                    "{} is {} and cannot be released",
+                    t.key, t.status
+                )));
             }
             let prev = t.owner_agent_id.take();
             t.blocked_reason = None;
@@ -602,17 +732,32 @@ impl Engine {
                 db.update_task(&t)?;
             } else {
                 db.update_task(&t)?;
-                self.transition(emit, db, &mut t, TaskStatus::Ready, EventKind::TaskReleased, json!({ "reason": reason, "by": actor.id() }))?;
+                self.transition(
+                    emit,
+                    db,
+                    &mut t,
+                    TaskStatus::Ready,
+                    EventKind::TaskReleased,
+                    json!({ "reason": reason, "by": actor.id() }),
+                )?;
             }
             self.release_agent_slot(db, &prev, &t.id)?;
             db.end_attempts(&t.id, "released", Some(reason))?;
-            db.get_task(&t.id)?.ok_or_else(|| CoreError::Internal("task vanished".into()))
+            db.get_task(&t.id)?
+                .ok_or_else(|| CoreError::Internal("task vanished".into()))
         })
     }
 
     // ------------------------------------------------------------------ evidence
 
-    fn add_evidence_tx(&self, db: &Db, emit: &mut Emit, t: &mut Task, actor: &Actor, e: &EvidenceInput) -> CoreResult<()> {
+    fn add_evidence_tx(
+        &self,
+        db: &Db,
+        emit: &mut Emit,
+        t: &mut Task,
+        actor: &Actor,
+        e: &EvidenceInput,
+    ) -> CoreResult<()> {
         if e.summary.trim().is_empty() {
             return Err(CoreError::InvalidInput("evidence needs a summary".into()));
         }
@@ -640,14 +785,25 @@ impl Engine {
             let mut t = self.task_ref(db, r)?;
             self.require_owner(actor, &t)?;
             if t.status.is_terminal() {
-                return Err(CoreError::Precondition(format!("{} is {}", t.key, t.status)));
+                return Err(CoreError::Precondition(format!(
+                    "{} is {}",
+                    t.key, t.status
+                )));
             }
             self.add_evidence_tx(db, emit, &mut t, actor, &e)?;
-            db.get_task(&t.id)?.ok_or_else(|| CoreError::Internal("task vanished".into()))
+            db.get_task(&t.id)?
+                .ok_or_else(|| CoreError::Internal("task vanished".into()))
         })
     }
 
-    pub fn register_artifact(&self, actor: &Actor, r: Option<&str>, kind: &str, path: Option<String>, description: &str) -> CoreResult<Artifact> {
+    pub fn register_artifact(
+        &self,
+        actor: &Actor,
+        r: Option<&str>,
+        kind: &str,
+        path: Option<String>,
+        description: &str,
+    ) -> CoreResult<Artifact> {
         self.tx(|db, emit| {
             let task = match r {
                 Some(r) => Some(self.task_ref(db, r)?),
@@ -684,7 +840,14 @@ impl Engine {
 
     // ------------------------------------------------------------------ submit / review / verify
 
-    pub fn submit_result(&self, actor: &Actor, r: &str, summary: &str, evidence: Vec<EvidenceInput>, changed_files: Vec<String>) -> CoreResult<Task> {
+    pub fn submit_result(
+        &self,
+        actor: &Actor,
+        r: &str,
+        summary: &str,
+        evidence: Vec<EvidenceInput>,
+        changed_files: Vec<String>,
+    ) -> CoreResult<Task> {
         if summary.trim().is_empty() {
             return Err(CoreError::InvalidInput("a result needs a summary".into()));
         }
@@ -738,24 +901,45 @@ impl Engine {
     }
 
     /// Owner or Leader asks for a review of a RUNNING/VERIFYING task.
-    pub fn request_review(&self, actor: &Actor, r: &str, reviewer: Option<&str>) -> CoreResult<Task> {
+    pub fn request_review(
+        &self,
+        actor: &Actor,
+        r: &str,
+        reviewer: Option<&str>,
+    ) -> CoreResult<Task> {
         self.tx(|db, emit| {
             let mut t = self.task_ref(db, r)?;
             self.require_owner(actor, &t)?;
             if !matches!(t.status, TaskStatus::Running | TaskStatus::Verifying) {
-                return Err(CoreError::Precondition(format!("{} is {}; reviews apply to RUNNING or VERIFYING tasks", t.key, t.status)));
+                return Err(CoreError::Precondition(format!(
+                    "{} is {}; reviews apply to RUNNING or VERIFYING tasks",
+                    t.key, t.status
+                )));
             }
             if let Some(rv) = reviewer {
-                let a = db.list_agents(&self.project.id)?.into_iter().find(|a| a.id.0 == rv || a.name.eq_ignore_ascii_case(rv)).ok_or_else(|| CoreError::not_found("agent", rv))?;
+                let a = db
+                    .list_agents(&self.project.id)?
+                    .into_iter()
+                    .find(|a| a.id.0 == rv || a.name.eq_ignore_ascii_case(rv))
+                    .ok_or_else(|| CoreError::not_found("agent", rv))?;
                 if Some(&a.id) == t.owner_agent_id.as_ref() {
-                    return Err(CoreError::InvalidInput("a task cannot be reviewed by its owner".into()));
+                    return Err(CoreError::InvalidInput(
+                        "a task cannot be reviewed by its owner".into(),
+                    ));
                 }
                 t.reviewer_agent_id = Some(a.id);
             }
             t.review_status = ReviewStatus::Pending;
             let owner = t.owner_agent_id.clone();
             let reviewer_id = t.reviewer_agent_id.clone();
-            self.transition(emit, db, &mut t, TaskStatus::InReview, EventKind::TaskReviewRequested, json!({ "by": actor.id(), "reviewer": reviewer_id }))?;
+            self.transition(
+                emit,
+                db,
+                &mut t,
+                TaskStatus::InReview,
+                EventKind::TaskReviewRequested,
+                json!({ "by": actor.id(), "reviewer": reviewer_id }),
+            )?;
             self.release_agent_slot(db, &owner, &t.id)?;
             Ok(t)
         })
@@ -769,7 +953,9 @@ impl Engine {
                 return Err(CoreError::Precondition("task is not in review".into()));
             }
             if t.owner_agent_id.as_ref() == Some(reviewer) {
-                return Err(CoreError::InvalidInput("owner cannot review own task".into()));
+                return Err(CoreError::InvalidInput(
+                    "owner cannot review own task".into(),
+                ));
             }
             t.reviewer_agent_id = Some(reviewer.clone());
             db.update_task(&t)?;
@@ -781,9 +967,17 @@ impl Engine {
         })
     }
 
-    pub fn submit_review(&self, actor: &Actor, r: &str, approve: bool, feedback: &str) -> CoreResult<Task> {
+    pub fn submit_review(
+        &self,
+        actor: &Actor,
+        r: &str,
+        approve: bool,
+        feedback: &str,
+    ) -> CoreResult<Task> {
         if !approve && feedback.trim().is_empty() {
-            return Err(CoreError::InvalidInput("a rejection must include actionable feedback".into()));
+            return Err(CoreError::InvalidInput(
+                "a rejection must include actionable feedback".into(),
+            ));
         }
         match actor.role() {
             Some(Role::Reviewer) | Some(Role::Leader) | None => {}
@@ -852,21 +1046,32 @@ impl Engine {
     /// review where one is required); an agent's claim alone never completes a task.
     pub fn verify_task(&self, actor: &Actor, r: &str, pass: bool, notes: &str) -> CoreResult<Task> {
         if !actor.is_leader() {
-            return Err(CoreError::Forbidden("only the Leader (or the user) can verify tasks".into()));
+            return Err(CoreError::Forbidden(
+                "only the Leader (or the user) can verify tasks".into(),
+            ));
         }
         if notes.trim().is_empty() {
-            return Err(CoreError::InvalidInput("verification needs notes describing what was checked".into()));
+            return Err(CoreError::InvalidInput(
+                "verification needs notes describing what was checked".into(),
+            ));
         }
         self.tx(|db, emit| {
             let mut t = self.task_ref(db, r)?;
             if t.status != TaskStatus::Verifying {
-                return Err(CoreError::Precondition(format!("{} is {}; only VERIFYING tasks can be verified", t.key, t.status)));
+                return Err(CoreError::Precondition(format!(
+                    "{} is {}; only VERIFYING tasks can be verified",
+                    t.key, t.status
+                )));
             }
             if pass {
                 // Evidence must exist independently of the verifier's own sign-off.
                 let blockers = t.completion_blockers();
                 if !blockers.is_empty() {
-                    return Err(CoreError::Precondition(format!("{} cannot be completed: {}", t.key, blockers.join("; "))));
+                    return Err(CoreError::Precondition(format!(
+                        "{} cannot be completed: {}",
+                        t.key,
+                        blockers.join("; ")
+                    )));
                 }
             }
             let criteria = t.acceptance_criteria.clone();
@@ -875,23 +1080,56 @@ impl Engine {
                 emit,
                 &mut t,
                 actor,
-                &EvidenceInput { kind: EvidenceKind::Verification, summary: notes.to_string(), passed: pass, detail: json!({ "criteria": criteria }) },
+                &EvidenceInput {
+                    kind: EvidenceKind::Verification,
+                    summary: notes.to_string(),
+                    passed: pass,
+                    detail: json!({ "criteria": criteria }),
+                },
             )?;
             if pass {
-                emit.push(EventKind::TaskVerified, actor.agent_id().as_ref(), Some(&t.id), json!({ "task_key": t.key, "by": actor.id(), "notes": notes }));
-                self.transition(emit, db, &mut t, TaskStatus::Done, EventKind::TaskCompleted, json!({ "by": actor.id(), "notes": notes }))?;
+                emit.push(
+                    EventKind::TaskVerified,
+                    actor.agent_id().as_ref(),
+                    Some(&t.id),
+                    json!({ "task_key": t.key, "by": actor.id(), "notes": notes }),
+                );
+                self.transition(
+                    emit,
+                    db,
+                    &mut t,
+                    TaskStatus::Done,
+                    EventKind::TaskCompleted,
+                    json!({ "by": actor.id(), "notes": notes }),
+                )?;
                 db.end_attempts(&t.id, "done", None)?;
                 self.refresh_ready(db, emit)?;
                 // Tell the Leader when everything is verified.
                 let tasks = db.list_tasks(&self.project.id)?;
-                if tasks.iter().filter(|x| x.goal_id == t.goal_id).all(|x| matches!(x.status, TaskStatus::Done | TaskStatus::Canceled)) && !actor.is_leader() {
+                if tasks
+                    .iter()
+                    .filter(|x| x.goal_id == t.goal_id)
+                    .all(|x| matches!(x.status, TaskStatus::Done | TaskStatus::Canceled))
+                    && !actor.is_leader()
+                {
                     // only relevant for non-leader actors; Leader sees it in the response
                 }
             } else {
                 let owner = t.owner_agent_id.clone();
                 t.progress = 50;
-                let next = if owner.is_some() { TaskStatus::Assigned } else { TaskStatus::Ready };
-                self.transition(emit, db, &mut t, next, EventKind::TaskReviewed, json!({ "verdict": "failed_verification", "notes": notes }))?;
+                let next = if owner.is_some() {
+                    TaskStatus::Assigned
+                } else {
+                    TaskStatus::Ready
+                };
+                self.transition(
+                    emit,
+                    db,
+                    &mut t,
+                    next,
+                    EventKind::TaskReviewed,
+                    json!({ "verdict": "failed_verification", "notes": notes }),
+                )?;
                 if let Some(o) = owner {
                     self.send_message_tx(
                         db,
@@ -910,18 +1148,28 @@ impl Engine {
                     )?;
                 }
             }
-            db.get_task(&t.id)?.ok_or_else(|| CoreError::Internal("task vanished".into()))
+            db.get_task(&t.id)?
+                .ok_or_else(|| CoreError::Internal("task vanished".into()))
         })
     }
 
     pub fn fail_task(&self, actor: &Actor, r: &str, reason: &str) -> CoreResult<Task> {
         if !actor.is_leader() {
-            return Err(CoreError::Forbidden("only the Leader (or the orchestrator) can fail a task".into()));
+            return Err(CoreError::Forbidden(
+                "only the Leader (or the orchestrator) can fail a task".into(),
+            ));
         }
         self.tx(|db, emit| {
             let mut t = self.task_ref(db, r)?;
             let owner = t.owner_agent_id.clone();
-            self.transition(emit, db, &mut t, TaskStatus::Failed, EventKind::TaskFailed, json!({ "reason": reason, "by": actor.id() }))?;
+            self.transition(
+                emit,
+                db,
+                &mut t,
+                TaskStatus::Failed,
+                EventKind::TaskFailed,
+                json!({ "reason": reason, "by": actor.id() }),
+            )?;
             self.release_agent_slot(db, &owner, &t.id)?;
             db.end_attempts(&t.id, "failed", Some(reason))?;
             Ok(t)
@@ -931,12 +1179,17 @@ impl Engine {
     /// Re-queue a failed or blocked task for another bounded attempt (explicit recovery action).
     pub fn requeue_task(&self, actor: &Actor, r: &str) -> CoreResult<Task> {
         if !actor.is_leader() {
-            return Err(CoreError::Forbidden("only the Leader (or the user) can requeue tasks".into()));
+            return Err(CoreError::Forbidden(
+                "only the Leader (or the user) can requeue tasks".into(),
+            ));
         }
         self.tx(|db, emit| {
             let mut t = self.task_ref(db, r)?;
             if !matches!(t.status, TaskStatus::Failed | TaskStatus::Blocked) {
-                return Err(CoreError::Precondition(format!("{} is {}; only FAILED or BLOCKED tasks can be requeued", t.key, t.status)));
+                return Err(CoreError::Precondition(format!(
+                    "{} is {}; only FAILED or BLOCKED tasks can be requeued",
+                    t.key, t.status
+                )));
             }
             if t.status == TaskStatus::Failed {
                 // explicit human/Leader decision: grant one more attempt
@@ -944,9 +1197,17 @@ impl Engine {
             }
             t.blocked_reason = None;
             let to = TaskStatus::Ready;
-            self.transition(emit, db, &mut t, to, EventKind::TaskUnblocked, json!({ "by": actor.id() }))?;
+            self.transition(
+                emit,
+                db,
+                &mut t,
+                to,
+                EventKind::TaskUnblocked,
+                json!({ "by": actor.id() }),
+            )?;
             self.refresh_ready(db, emit)?;
-            db.get_task(&t.id)?.ok_or_else(|| CoreError::Internal("task vanished".into()))
+            db.get_task(&t.id)?
+                .ok_or_else(|| CoreError::Internal("task vanished".into()))
         })
     }
 

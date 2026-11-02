@@ -14,7 +14,11 @@ pub enum CoreError {
     #[error("invalid input: {0}")]
     InvalidInput(String),
     #[error("invalid state transition for {what}: {from} -> {to}")]
-    InvalidTransition { what: &'static str, from: String, to: String },
+    InvalidTransition {
+        what: &'static str,
+        from: String,
+        to: String,
+    },
     #[error("dependency cycle detected: {0}")]
     DependencyCycle(String),
     #[error("conflict: {0}")]
@@ -49,7 +53,10 @@ impl CoreError {
     }
 
     pub fn not_found(what: &'static str, id: impl ToString) -> Self {
-        CoreError::NotFound { what, id: id.to_string() }
+        CoreError::NotFound {
+            what,
+            id: id.to_string(),
+        }
     }
 
     /// JSON body used for structured MCP tool errors.

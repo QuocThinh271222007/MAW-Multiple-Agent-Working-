@@ -12,7 +12,10 @@ use rusqlite::Connection;
 use std::path::Path;
 use std::sync::Mutex;
 
-const MIGRATIONS: &[(&str, &str)] = &[("0001_init", include_str!("../../../migrations/0001_init.sql"))];
+const MIGRATIONS: &[(&str, &str)] = &[(
+    "0001_init",
+    include_str!("../../../migrations/0001_init.sql"),
+)];
 
 pub struct Store {
     conn: Mutex<Connection>,
@@ -40,23 +43,35 @@ impl Store {
 
     fn init(conn: Connection, wal: bool) -> CoreResult<Store> {
         if wal {
-            conn.pragma_update(None, "journal_mode", "WAL").map_err(se)?;
-            conn.pragma_update(None, "synchronous", "NORMAL").map_err(se)?;
+            conn.pragma_update(None, "journal_mode", "WAL")
+                .map_err(se)?;
+            conn.pragma_update(None, "synchronous", "NORMAL")
+                .map_err(se)?;
         }
         conn.pragma_update(None, "foreign_keys", "ON").map_err(se)?;
-        conn.busy_timeout(std::time::Duration::from_secs(5)).map_err(se)?;
-        let store = Store { conn: Mutex::new(conn) };
+        conn.busy_timeout(std::time::Duration::from_secs(5))
+            .map_err(se)?;
+        let store = Store {
+            conn: Mutex::new(conn),
+        };
         store.migrate()?;
         Ok(store)
     }
 
     fn migrate(&self) -> CoreResult<()> {
-        let mut conn = self.conn.lock().map_err(|_| CoreError::Internal("store poisoned".into()))?;
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|_| CoreError::Internal("store poisoned".into()))?;
         conn.execute_batch("CREATE TABLE IF NOT EXISTS schema_migrations (name TEXT PRIMARY KEY, applied_at TEXT NOT NULL);")
             .map_err(se)?;
         for (name, sql) in MIGRATIONS {
             let applied: bool = conn
-                .query_row("SELECT 1 FROM schema_migrations WHERE name = ?1", [name], |_| Ok(true))
+                .query_row(
+                    "SELECT 1 FROM schema_migrations WHERE name = ?1",
+                    [name],
+                    |_| Ok(true),
+                )
                 .unwrap_or(false);
             if applied {
                 continue;
@@ -75,12 +90,18 @@ impl Store {
     }
 
     pub fn read<R>(&self, f: impl FnOnce(&Db) -> CoreResult<R>) -> CoreResult<R> {
-        let conn = self.conn.lock().map_err(|_| CoreError::Internal("store poisoned".into()))?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| CoreError::Internal("store poisoned".into()))?;
         f(&Db(&conn))
     }
 
     pub fn write<R>(&self, f: impl FnOnce(&Db) -> CoreResult<R>) -> CoreResult<R> {
-        let mut conn = self.conn.lock().map_err(|_| CoreError::Internal("store poisoned".into()))?;
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|_| CoreError::Internal("store poisoned".into()))?;
         let tx = conn.transaction().map_err(se)?;
         match f(&Db(&tx)) {
             Ok(v) => {

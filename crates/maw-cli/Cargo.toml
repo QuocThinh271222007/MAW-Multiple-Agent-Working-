@@ -2,3 +2,30 @@
 name = "maw-cli"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+description = "MAW (Multiple Agent Working): terminal-native multi-agent orchestration"
+
+[[bin]]
+name = "maw"
+path = "src/main.rs"
+
+[dependencies]
+maw-core.workspace = true
+maw-storage.workspace = true
+maw-orchestrator.workspace = true
+maw-mcp.workspace = true
+maw-tui.workspace = true
+maw-provider-codex.workspace = true
+maw-provider-claude.workspace = true
+anyhow.workspace = true
+chrono.workspace = true
+clap.workspace = true
+directories.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+toml = "0.8"
+tempfile = "3"
+

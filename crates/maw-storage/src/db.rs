@@ -14,7 +14,9 @@ fn ts(d: DateTime<Utc>) -> String {
     d.to_rfc3339_opts(SecondsFormat::Millis, true)
 }
 fn pts(s: &str) -> DateTime<Utc> {
-    DateTime::parse_from_rfc3339(s).map(|d| d.with_timezone(&Utc)).unwrap_or_else(|_| Utc::now())
+    DateTime::parse_from_rfc3339(s)
+        .map(|d| d.with_timezone(&Utc))
+        .unwrap_or_else(|_| Utc::now())
 }
 fn opt_ts(d: Option<DateTime<Utc>>) -> Option<String> {
     d.map(ts)
@@ -46,7 +48,10 @@ fn task_from_row(r: &Row) -> rusqlite::Result<Task> {
         description: r.get(6)?,
         acceptance_criteria: from_js(&r.get::<_, String>(7)?),
         priority: r.get::<_, String>(8)?.parse().unwrap_or(Priority::Normal),
-        status: r.get::<_, String>(9)?.parse().unwrap_or(TaskStatus::Backlog),
+        status: r
+            .get::<_, String>(9)?
+            .parse()
+            .unwrap_or(TaskStatus::Backlog),
         owner_agent_id: r.get::<_, Option<String>>(10)?.map(AgentId),
         dependencies: vec![],
         estimated_weight: r.get(11)?,
@@ -81,7 +86,10 @@ fn agent_from_row(r: &Row) -> rusqlite::Result<Agent> {
         provider: r.get::<_, String>(3)?.parse().unwrap_or(ProviderKind::Mock),
         model: r.get(4)?,
         role: r.get::<_, String>(5)?.parse().unwrap_or(Role::Worker),
-        state: r.get::<_, String>(6)?.parse().unwrap_or(AgentState::Disconnected),
+        state: r
+            .get::<_, String>(6)?
+            .parse()
+            .unwrap_or(AgentState::Disconnected),
         permission: r.get::<_, String>(7)?.parse().unwrap_or_default(),
         session_id: r.get(8)?,
         native_session_id: r.get(9)?,
@@ -119,7 +127,10 @@ fn message_from_row(r: &Row) -> rusqlite::Result<Message> {
         sender_agent_id: AgentId(r.get(2)?),
         recipient_agent_id: AgentId(r.get(3)?),
         task_id: r.get::<_, Option<String>>(4)?.map(TaskId),
-        message_type: r.get::<_, String>(5)?.parse().unwrap_or(MessageType::Status),
+        message_type: r
+            .get::<_, String>(5)?
+            .parse()
+            .unwrap_or(MessageType::Status),
         subject: r.get(6)?,
         content: r.get(7)?,
         created_at: pts(&r.get::<_, String>(8)?),
@@ -141,7 +152,10 @@ fn event_from_row(r: &Row) -> rusqlite::Result<Event> {
         agent_id: r.get::<_, Option<String>>(6)?.map(AgentId),
         task_id: r.get::<_, Option<String>>(7)?.map(TaskId),
         correlation_id: r.get(8)?,
-        event_type: r.get::<_, String>(9)?.parse().unwrap_or(EventKind::ProviderError),
+        event_type: r
+            .get::<_, String>(9)?
+            .parse()
+            .unwrap_or(EventKind::ProviderError),
         payload: serde_json::from_str(&r.get::<_, String>(10)?).unwrap_or(serde_json::Value::Null),
     })
 }
@@ -187,7 +201,10 @@ const APR_COLS: &str = "id, project_id, agent_id, task_id, kind, summary, reason
 
 impl<'a> Db<'a> {
     pub fn applied_migrations(&self) -> CoreResult<Vec<String>> {
-        let mut st = self.0.prepare("SELECT name FROM schema_migrations ORDER BY name").map_err(se)?;
+        let mut st = self
+            .0
+            .prepare("SELECT name FROM schema_migrations ORDER BY name")
+            .map_err(se)?;
         let rows = st.query_map([], |r| r.get(0)).map_err(se)?;
         rows.collect::<Result<Vec<String>, _>>().map_err(se)
     }
@@ -203,27 +220,48 @@ impl<'a> Db<'a> {
         Ok(())
     }
     pub fn list_projects(&self) -> CoreResult<Vec<Project>> {
-        let mut st = self.0.prepare("SELECT id, name, path, created_at FROM projects ORDER BY name").map_err(se)?;
+        let mut st = self
+            .0
+            .prepare("SELECT id, name, path, created_at FROM projects ORDER BY name")
+            .map_err(se)?;
         let rows = st
             .query_map([], |r| {
-                Ok(Project { id: ProjectId(r.get(0)?), name: r.get(1)?, path: r.get(2)?, created_at: pts(&r.get::<_, String>(3)?) })
+                Ok(Project {
+                    id: ProjectId(r.get(0)?),
+                    name: r.get(1)?,
+                    path: r.get(2)?,
+                    created_at: pts(&r.get::<_, String>(3)?),
+                })
             })
             .map_err(se)?;
         rows.collect::<Result<_, _>>().map_err(se)
     }
     pub fn find_project(&self, name_or_id: &str) -> CoreResult<Option<Project>> {
-        Ok(self.list_projects()?.into_iter().find(|p| p.name == name_or_id || p.id.0 == name_or_id))
+        Ok(self
+            .list_projects()?
+            .into_iter()
+            .find(|p| p.name == name_or_id || p.id.0 == name_or_id))
     }
 
     // ---- goals ----
     pub fn insert_goal(&self, g: &Goal) -> CoreResult<()> {
         self.0
             .execute(
-                &format!("INSERT INTO goals({GOAL_COLS}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)"),
+                &format!(
+                    "INSERT INTO goals({GOAL_COLS}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)"
+                ),
                 params![
-                    g.id.0, g.project_id.0, g.text, js(&g.success_criteria), g.status.as_str(), g.revision,
-                    g.leader_agent_id.as_ref().map(|a| a.0.clone()), g.current_milestone, g.current_focus,
-                    ts(g.created_at), ts(g.updated_at)
+                    g.id.0,
+                    g.project_id.0,
+                    g.text,
+                    js(&g.success_criteria),
+                    g.status.as_str(),
+                    g.revision,
+                    g.leader_agent_id.as_ref().map(|a| a.0.clone()),
+                    g.current_milestone,
+                    g.current_focus,
+                    ts(g.created_at),
+                    ts(g.updated_at)
                 ],
             )
             .map_err(se)?;
@@ -244,7 +282,11 @@ impl<'a> Db<'a> {
     }
     pub fn get_goal(&self, id: &GoalId) -> CoreResult<Option<Goal>> {
         self.0
-            .query_row(&format!("SELECT {GOAL_COLS} FROM goals WHERE id=?1"), [&id.0], goal_from_row)
+            .query_row(
+                &format!("SELECT {GOAL_COLS} FROM goals WHERE id=?1"),
+                [&id.0],
+                goal_from_row,
+            )
             .optional()
             .map_err(se)
     }
@@ -353,27 +395,39 @@ impl<'a> Db<'a> {
     }
     pub fn get_agent(&self, id: &AgentId) -> CoreResult<Option<Agent>> {
         self.0
-            .query_row(&format!("SELECT {AGENT_COLS} FROM agents WHERE id=?1"), [&id.0], agent_from_row)
+            .query_row(
+                &format!("SELECT {AGENT_COLS} FROM agents WHERE id=?1"),
+                [&id.0],
+                agent_from_row,
+            )
             .optional()
             .map_err(se)
     }
     pub fn list_agents(&self, project: &ProjectId) -> CoreResult<Vec<Agent>> {
         let mut st = self
             .0
-            .prepare(&format!("SELECT {AGENT_COLS} FROM agents WHERE project_id=?1 ORDER BY created_at, rowid"))
+            .prepare(&format!(
+                "SELECT {AGENT_COLS} FROM agents WHERE project_id=?1 ORDER BY created_at, rowid"
+            ))
             .map_err(se)?;
         let rows = st.query_map([&project.0], agent_from_row).map_err(se)?;
         rows.collect::<Result<_, _>>().map_err(se)
     }
     pub fn delete_agent(&self, id: &AgentId) -> CoreResult<()> {
-        self.0.execute("DELETE FROM agents WHERE id=?1", [&id.0]).map_err(se)?;
+        self.0
+            .execute("DELETE FROM agents WHERE id=?1", [&id.0])
+            .map_err(se)?;
         Ok(())
     }
 
     // ---- tasks ----
     pub fn next_task_key(&self, project: &ProjectId) -> CoreResult<i64> {
         self.0
-            .query_row("SELECT COALESCE(MAX(key_num),0)+1 FROM tasks WHERE project_id=?1", [&project.0], |r| r.get(0))
+            .query_row(
+                "SELECT COALESCE(MAX(key_num),0)+1 FROM tasks WHERE project_id=?1",
+                [&project.0],
+                |r| r.get(0),
+            )
             .map_err(se)
     }
     /// Insert a new task (dependencies persisted too). Returns the stored task with its key.
@@ -398,7 +452,10 @@ impl<'a> Db<'a> {
             .map_err(se)?;
         for d in &t.dependencies {
             self.0
-                .execute("INSERT OR IGNORE INTO task_deps(task_id, depends_on) VALUES (?1,?2)", params![t.id.0, d.0])
+                .execute(
+                    "INSERT OR IGNORE INTO task_deps(task_id, depends_on) VALUES (?1,?2)",
+                    params![t.id.0, d.0],
+                )
                 .map_err(se)?;
         }
         let mut stored = t.clone();
@@ -424,10 +481,15 @@ impl<'a> Db<'a> {
             )
             .map_err(se)?;
         // Replace dependency set.
-        self.0.execute("DELETE FROM task_deps WHERE task_id=?1", [&t.id.0]).map_err(se)?;
+        self.0
+            .execute("DELETE FROM task_deps WHERE task_id=?1", [&t.id.0])
+            .map_err(se)?;
         for d in &t.dependencies {
             self.0
-                .execute("INSERT OR IGNORE INTO task_deps(task_id, depends_on) VALUES (?1,?2)", params![t.id.0, d.0])
+                .execute(
+                    "INSERT OR IGNORE INTO task_deps(task_id, depends_on) VALUES (?1,?2)",
+                    params![t.id.0, d.0],
+                )
                 .map_err(se)?;
         }
         Ok(())
@@ -438,8 +500,14 @@ impl<'a> Db<'a> {
         }
         let mut deps: HashMap<String, Vec<TaskId>> = HashMap::new();
         {
-            let mut st = self.0.prepare("SELECT task_id, depends_on FROM task_deps").map_err(se)?;
-            for row in st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))).map_err(se)? {
+            let mut st = self
+                .0
+                .prepare("SELECT task_id, depends_on FROM task_deps")
+                .map_err(se)?;
+            for row in st
+                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+                .map_err(se)?
+            {
                 let (a, b) = row.map_err(se)?;
                 deps.entry(a).or_default().push(TaskId(b));
             }
@@ -458,7 +526,8 @@ impl<'a> Db<'a> {
                             kind: r.get::<_, String>(1)?.parse().unwrap_or(EvidenceKind::Note),
                             summary: r.get(2)?,
                             passed: r.get::<_, i64>(3)? != 0,
-                            detail: serde_json::from_str(&r.get::<_, String>(4)?).unwrap_or(serde_json::Value::Null),
+                            detail: serde_json::from_str(&r.get::<_, String>(4)?)
+                                .unwrap_or(serde_json::Value::Null),
                             recorded_by: AgentId(r.get(5)?),
                             recorded_at: pts(&r.get::<_, String>(6)?),
                         },
@@ -507,7 +576,11 @@ impl<'a> Db<'a> {
     pub fn get_task(&self, id: &TaskId) -> CoreResult<Option<Task>> {
         let t = self
             .0
-            .query_row(&format!("SELECT {TASK_COLS} FROM tasks WHERE id=?1"), [&id.0], task_from_row)
+            .query_row(
+                &format!("SELECT {TASK_COLS} FROM tasks WHERE id=?1"),
+                [&id.0],
+                task_from_row,
+            )
             .optional()
             .map_err(se)?;
         match t {
@@ -521,7 +594,10 @@ impl<'a> Db<'a> {
     }
     /// Resolve a task by id or by its `T-n` key.
     pub fn resolve_task(&self, project: &ProjectId, id_or_key: &str) -> CoreResult<Option<Task>> {
-        let found = if let Some(n) = id_or_key.strip_prefix("T-").and_then(|n| n.parse::<i64>().ok()) {
+        let found = if let Some(n) = id_or_key
+            .strip_prefix("T-")
+            .and_then(|n| n.parse::<i64>().ok())
+        {
             self.0
                 .query_row(
                     &format!("SELECT {TASK_COLS} FROM tasks WHERE project_id=?1 AND key_num=?2"),
@@ -532,7 +608,11 @@ impl<'a> Db<'a> {
                 .map_err(se)?
         } else {
             self.0
-                .query_row(&format!("SELECT {TASK_COLS} FROM tasks WHERE id=?1 AND project_id=?2"), params![id_or_key, project.0], task_from_row)
+                .query_row(
+                    &format!("SELECT {TASK_COLS} FROM tasks WHERE id=?1 AND project_id=?2"),
+                    params![id_or_key, project.0],
+                    task_from_row,
+                )
                 .optional()
                 .map_err(se)?
         };
@@ -545,10 +625,18 @@ impl<'a> Db<'a> {
             None => Ok(None),
         }
     }
-    pub fn find_task_by_idempotency(&self, project: &ProjectId, key: &str) -> CoreResult<Option<Task>> {
+    pub fn find_task_by_idempotency(
+        &self,
+        project: &ProjectId,
+        key: &str,
+    ) -> CoreResult<Option<Task>> {
         let id: Option<String> = self
             .0
-            .query_row("SELECT id FROM tasks WHERE project_id=?1 AND idempotency_key=?2", params![project.0, key], |r| r.get(0))
+            .query_row(
+                "SELECT id FROM tasks WHERE project_id=?1 AND idempotency_key=?2",
+                params![project.0, key],
+                |r| r.get(0),
+            )
             .optional()
             .map_err(se)?;
         match id {
@@ -559,15 +647,25 @@ impl<'a> Db<'a> {
     pub fn list_tasks(&self, project: &ProjectId) -> CoreResult<Vec<Task>> {
         let mut st = self
             .0
-            .prepare(&format!("SELECT {TASK_COLS} FROM tasks WHERE project_id=?1 ORDER BY key_num"))
+            .prepare(&format!(
+                "SELECT {TASK_COLS} FROM tasks WHERE project_id=?1 ORDER BY key_num"
+            ))
             .map_err(se)?;
-        let mut tasks: Vec<Task> = st.query_map([&project.0], task_from_row).map_err(se)?.collect::<Result<_, _>>().map_err(se)?;
+        let mut tasks: Vec<Task> = st
+            .query_map([&project.0], task_from_row)
+            .map_err(se)?
+            .collect::<Result<_, _>>()
+            .map_err(se)?;
         self.hydrate(&mut tasks, Some(project))?;
         Ok(tasks)
     }
     pub fn count_goal_tasks(&self, goal: &GoalId) -> CoreResult<usize> {
         self.0
-            .query_row("SELECT COUNT(*) FROM tasks WHERE goal_id=?1", [&goal.0], |r| r.get::<_, i64>(0))
+            .query_row(
+                "SELECT COUNT(*) FROM tasks WHERE goal_id=?1",
+                [&goal.0],
+                |r| r.get::<_, i64>(0),
+            )
             .map(|n| n as usize)
             .map_err(se)
     }
@@ -646,7 +744,12 @@ impl<'a> Db<'a> {
             .map_err(se)?;
         Ok(())
     }
-    pub fn find_message_by_idempotency(&self, project: &ProjectId, sender: &AgentId, key: &str) -> CoreResult<Option<Message>> {
+    pub fn find_message_by_idempotency(
+        &self,
+        project: &ProjectId,
+        sender: &AgentId,
+        key: &str,
+    ) -> CoreResult<Option<Message>> {
         self.0
             .query_row(
                 &format!("SELECT {MSG_COLS} FROM messages WHERE project_id=?1 AND sender_agent_id=?2 AND idempotency_key=?3"),
@@ -658,18 +761,29 @@ impl<'a> Db<'a> {
     }
     pub fn get_message(&self, id: &MessageId) -> CoreResult<Option<Message>> {
         self.0
-            .query_row(&format!("SELECT {MSG_COLS} FROM messages WHERE id=?1"), [&id.0], message_from_row)
+            .query_row(
+                &format!("SELECT {MSG_COLS} FROM messages WHERE id=?1"),
+                [&id.0],
+                message_from_row,
+            )
             .optional()
             .map_err(se)
     }
     /// Messages addressed to the agent. `unacked_only` hides acknowledged ones.
-    pub fn inbox(&self, agent: &AgentId, unacked_only: bool, limit: usize) -> CoreResult<Vec<Message>> {
+    pub fn inbox(
+        &self,
+        agent: &AgentId,
+        unacked_only: bool,
+        limit: usize,
+    ) -> CoreResult<Vec<Message>> {
         let sql = format!(
             "SELECT {MSG_COLS} FROM messages WHERE recipient_agent_id=?1 {} ORDER BY created_at, rowid LIMIT ?2",
             if unacked_only { "AND acknowledged_at IS NULL" } else { "" }
         );
         let mut st = self.0.prepare(&sql).map_err(se)?;
-        let rows = st.query_map(params![agent.0, limit as i64], message_from_row).map_err(se)?;
+        let rows = st
+            .query_map(params![agent.0, limit as i64], message_from_row)
+            .map_err(se)?;
         rows.collect::<Result<_, _>>().map_err(se)
     }
     pub fn undelivered(&self, agent: &AgentId) -> CoreResult<Vec<Message>> {
@@ -687,18 +801,26 @@ impl<'a> Db<'a> {
             .0
             .prepare("SELECT DISTINCT recipient_agent_id FROM messages WHERE project_id=?1 AND delivered_at IS NULL")
             .map_err(se)?;
-        let rows = st.query_map([&project.0], |r| Ok(AgentId(r.get(0)?))).map_err(se)?;
+        let rows = st
+            .query_map([&project.0], |r| Ok(AgentId(r.get(0)?)))
+            .map_err(se)?;
         rows.collect::<Result<_, _>>().map_err(se)
     }
     pub fn mark_delivered(&self, id: &MessageId) -> CoreResult<()> {
         self.0
-            .execute("UPDATE messages SET delivered_at=?2 WHERE id=?1 AND delivered_at IS NULL", params![id.0, ts(Utc::now())])
+            .execute(
+                "UPDATE messages SET delivered_at=?2 WHERE id=?1 AND delivered_at IS NULL",
+                params![id.0, ts(Utc::now())],
+            )
             .map_err(se)?;
         Ok(())
     }
     pub fn mark_acked(&self, id: &MessageId) -> CoreResult<()> {
         self.0
-            .execute("UPDATE messages SET acknowledged_at=?2 WHERE id=?1 AND acknowledged_at IS NULL", params![id.0, ts(Utc::now())])
+            .execute(
+                "UPDATE messages SET acknowledged_at=?2 WHERE id=?1 AND acknowledged_at IS NULL",
+                params![id.0, ts(Utc::now())],
+            )
             .map_err(se)?;
         Ok(())
     }
@@ -733,12 +855,19 @@ impl<'a> Db<'a> {
         e.sequence = self.0.last_insert_rowid();
         Ok(e.sequence)
     }
-    pub fn events_since(&self, project: &ProjectId, after: i64, limit: usize) -> CoreResult<Vec<Event>> {
+    pub fn events_since(
+        &self,
+        project: &ProjectId,
+        after: i64,
+        limit: usize,
+    ) -> CoreResult<Vec<Event>> {
         let mut st = self
             .0
             .prepare(&format!("SELECT {EVENT_COLS} FROM events WHERE project_id=?1 AND sequence>?2 ORDER BY sequence LIMIT ?3"))
             .map_err(se)?;
-        let rows = st.query_map(params![project.0, after, limit as i64], event_from_row).map_err(se)?;
+        let rows = st
+            .query_map(params![project.0, after, limit as i64], event_from_row)
+            .map_err(se)?;
         rows.collect::<Result<_, _>>().map_err(se)
     }
     pub fn recent_events(&self, project: &ProjectId, limit: usize) -> CoreResult<Vec<Event>> {
@@ -757,13 +886,23 @@ impl<'a> Db<'a> {
     pub fn events_for_task(&self, task: &TaskId, limit: usize) -> CoreResult<Vec<Event>> {
         let mut st = self
             .0
-            .prepare(&format!("SELECT {EVENT_COLS} FROM events WHERE task_id=?1 ORDER BY sequence LIMIT ?2"))
+            .prepare(&format!(
+                "SELECT {EVENT_COLS} FROM events WHERE task_id=?1 ORDER BY sequence LIMIT ?2"
+            ))
             .map_err(se)?;
-        let rows = st.query_map(params![task.0, limit as i64], event_from_row).map_err(se)?;
+        let rows = st
+            .query_map(params![task.0, limit as i64], event_from_row)
+            .map_err(se)?;
         rows.collect::<Result<_, _>>().map_err(se)
     }
     pub fn count_events(&self, project: &ProjectId) -> CoreResult<i64> {
-        self.0.query_row("SELECT COUNT(*) FROM events WHERE project_id=?1", [&project.0], |r| r.get(0)).map_err(se)
+        self.0
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE project_id=?1",
+                [&project.0],
+                |r| r.get(0),
+            )
+            .map_err(se)
     }
     /// Retention: drop the oldest verbose events beyond `keep`. Returns rows deleted.
     pub fn prune_verbose_events(&self, keep: i64) -> CoreResult<usize> {
@@ -787,7 +926,13 @@ impl<'a> Db<'a> {
         Ok(())
     }
     /// List entries, optionally filtered by kind and a case-insensitive substring over key/content/tags.
-    pub fn search_context(&self, project: &ProjectId, kind: Option<&str>, query: Option<&str>, limit: usize) -> CoreResult<Vec<ContextEntry>> {
+    pub fn search_context(
+        &self,
+        project: &ProjectId,
+        kind: Option<&str>,
+        query: Option<&str>,
+        limit: usize,
+    ) -> CoreResult<Vec<ContextEntry>> {
         let mut st = self
             .0
             .prepare("SELECT id, project_id, kind, key, content, tags, task_id, author, created_at FROM context_entries WHERE project_id=?1 ORDER BY created_at DESC, rowid DESC")
@@ -848,14 +993,20 @@ impl<'a> Db<'a> {
     }
     pub fn get_workspace(&self, id: &WorkspaceId) -> CoreResult<Option<Workspace>> {
         self.0
-            .query_row(&format!("SELECT {WS_COLS} FROM workspaces WHERE id=?1"), [&id.0], workspace_from_row)
+            .query_row(
+                &format!("SELECT {WS_COLS} FROM workspaces WHERE id=?1"),
+                [&id.0],
+                workspace_from_row,
+            )
             .optional()
             .map_err(se)
     }
     pub fn list_workspaces(&self, project: &ProjectId) -> CoreResult<Vec<Workspace>> {
         let mut st = self
             .0
-            .prepare(&format!("SELECT {WS_COLS} FROM workspaces WHERE project_id=?1 ORDER BY created_at"))
+            .prepare(&format!(
+                "SELECT {WS_COLS} FROM workspaces WHERE project_id=?1 ORDER BY created_at"
+            ))
             .map_err(se)?;
         let rows = st.query_map([&project.0], workspace_from_row).map_err(se)?;
         rows.collect::<Result<_, _>>().map_err(se)
@@ -876,12 +1027,21 @@ impl<'a> Db<'a> {
     }
     pub fn get_approval(&self, id: &ApprovalId) -> CoreResult<Option<Approval>> {
         self.0
-            .query_row(&format!("SELECT {APR_COLS} FROM approvals WHERE id=?1"), [&id.0], approval_from_row)
+            .query_row(
+                &format!("SELECT {APR_COLS} FROM approvals WHERE id=?1"),
+                [&id.0],
+                approval_from_row,
+            )
             .optional()
             .map_err(se)
     }
-    pub fn list_approvals(&self, project: &ProjectId, pending_only: bool) -> CoreResult<Vec<Approval>> {
-        let sql = format!(
+    pub fn list_approvals(
+        &self,
+        project: &ProjectId,
+        pending_only: bool,
+    ) -> CoreResult<Vec<Approval>> {
+        let sql =
+            format!(
             "SELECT {APR_COLS} FROM approvals WHERE project_id=?1 {} ORDER BY requested_at DESC",
             if pending_only { "AND status='pending'" } else { "" }
         );
@@ -891,7 +1051,10 @@ impl<'a> Db<'a> {
     }
     pub fn resolve_approval(&self, id: &ApprovalId, status: ApprovalStatus) -> CoreResult<()> {
         self.0
-            .execute("UPDATE approvals SET status=?2, resolved_at=?3 WHERE id=?1", params![id.0, status.as_str(), ts(Utc::now())])
+            .execute(
+                "UPDATE approvals SET status=?2, resolved_at=?3 WHERE id=?1",
+                params![id.0, status.as_str(), ts(Utc::now())],
+            )
             .map_err(se)?;
         Ok(())
     }
@@ -917,7 +1080,10 @@ impl<'a> Db<'a> {
     }
     pub fn end_run(&self, id: &RunId) -> CoreResult<()> {
         self.0
-            .execute("UPDATE runs SET stopped_at=?2, clean_shutdown=1 WHERE id=?1", params![id.0, ts(Utc::now())])
+            .execute(
+                "UPDATE runs SET stopped_at=?2, clean_shutdown=1 WHERE id=?1",
+                params![id.0, ts(Utc::now())],
+            )
             .map_err(se)?;
         Ok(())
     }
@@ -942,7 +1108,12 @@ impl<'a> Db<'a> {
     }
     /// Undo `close_unclean_runs` for the currently active run.
     pub fn reopen_run(&self, id: &RunId) -> CoreResult<()> {
-        self.0.execute("UPDATE runs SET clean_shutdown=0, stopped_at=NULL WHERE id=?1", [&id.0]).map_err(se)?;
+        self.0
+            .execute(
+                "UPDATE runs SET clean_shutdown=0, stopped_at=NULL WHERE id=?1",
+                [&id.0],
+            )
+            .map_err(se)?;
         Ok(())
     }
     /// Mark old unclean runs as closed (after recovery has handled them).
@@ -956,7 +1127,11 @@ impl<'a> Db<'a> {
     // ---- kv ----
     pub fn kv_get(&self, project: &ProjectId, key: &str) -> CoreResult<Option<String>> {
         self.0
-            .query_row("SELECT value FROM kv WHERE project_id=?1 AND key=?2", params![project.0, key], |r| r.get(0))
+            .query_row(
+                "SELECT value FROM kv WHERE project_id=?1 AND key=?2",
+                params![project.0, key],
+                |r| r.get(0),
+            )
             .optional()
             .map_err(se)
     }
@@ -977,7 +1152,12 @@ mod tests {
     use crate::Store;
 
     fn project(db: &Db) -> Project {
-        let p = Project { id: ProjectId::new(), name: "demo".into(), path: "/tmp/demo".into(), created_at: Utc::now() };
+        let p = Project {
+            id: ProjectId::new(),
+            name: "demo".into(),
+            path: "/tmp/demo".into(),
+            created_at: Utc::now(),
+        };
         db.insert_project(&p).unwrap();
         p
     }
@@ -1041,7 +1221,10 @@ mod tests {
         let path = dir.path().join("maw.db");
         {
             let s = Store::open(&path).unwrap();
-            assert_eq!(s.applied_migrations().unwrap(), vec!["0001_init".to_string()]);
+            assert_eq!(
+                s.applied_migrations().unwrap(),
+                vec!["0001_init".to_string()]
+            );
             s.write(|db| {
                 project(db);
                 Ok(())
@@ -1067,7 +1250,9 @@ mod tests {
             assert_eq!(got.dependencies, vec![a.id.clone()]);
             assert_eq!(db.find_task_by_idempotency(&p.id, "k1")?.unwrap().id, a.id);
             // duplicate idempotency key rejected by the unique index
-            assert!(db.insert_task(&task(&p, &g, "dup", vec![]), Some("k1")).is_err());
+            assert!(db
+                .insert_task(&task(&p, &g, "dup", vec![]), Some("k1"))
+                .is_err());
             Ok(())
         })
         .unwrap();
@@ -1090,7 +1275,11 @@ mod tests {
         s.write(|db| {
             let p = project(db);
             for i in 0..5 {
-                let mut e = Event::new(p.id.clone(), EventKind::AgentMessage, serde_json::json!({ "i": i }));
+                let mut e = Event::new(
+                    p.id.clone(),
+                    EventKind::AgentMessage,
+                    serde_json::json!({ "i": i }),
+                );
                 db.append_event(&mut e)?;
             }
             let mut keep = Event::new(p.id.clone(), EventKind::TaskCreated, serde_json::json!({}));

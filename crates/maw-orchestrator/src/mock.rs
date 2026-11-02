@@ -31,7 +31,12 @@ pub struct MockScript {
 
 impl Default for MockScript {
     fn default() -> Self {
-        MockScript { block_first_backend: false, reject_first_review: false, approval_demo: false, step_delay: Duration::from_millis(15) }
+        MockScript {
+            block_first_backend: false,
+            reject_first_review: false,
+            approval_demo: false,
+            step_delay: Duration::from_millis(15),
+        }
     }
 }
 
@@ -44,7 +49,11 @@ pub struct MockProvider {
 
 impl MockProvider {
     pub fn new(engine: Arc<Engine>, script: MockScript) -> Arc<MockProvider> {
-        Arc::new(MockProvider { engine, script, rejected_once: Arc::new(AtomicBool::new(false)) })
+        Arc::new(MockProvider {
+            engine,
+            script,
+            rejected_once: Arc::new(AtomicBool::new(false)),
+        })
     }
 }
 
@@ -54,12 +63,26 @@ impl AgentProvider for MockProvider {
         ProviderKind::Mock
     }
     async fn detect(&self) -> ProviderResult<ProviderInfo> {
-        Ok(ProviderInfo { kind: ProviderKind::Mock, installed: true, executable: None, version: Some("mock".into()), execution_modes: vec!["in-process".into()], notes: vec!["deterministic test provider".into()] })
+        Ok(ProviderInfo {
+            kind: ProviderKind::Mock,
+            installed: true,
+            executable: None,
+            version: Some("mock".into()),
+            execution_modes: vec!["in-process".into()],
+            notes: vec!["deterministic test provider".into()],
+        })
     }
     async fn auth_status(&self) -> ProviderResult<AuthStatus> {
-        Ok(AuthStatus::Authenticated { method: "mock".into(), account: None, plan: None })
+        Ok(AuthStatus::Authenticated {
+            method: "mock".into(),
+            account: None,
+            plan: None,
+        })
     }
-    async fn start_session(&self, cfg: SessionConfig) -> ProviderResult<(SessionHandle, EventReceiver)> {
+    async fn start_session(
+        &self,
+        cfg: SessionConfig,
+    ) -> ProviderResult<(SessionHandle, EventReceiver)> {
         let (tx, rx) = mpsc::channel(PROVIDER_EVENT_BUFFER);
         let inner = Arc::new(Inner {
             engine: self.engine.clone(),
@@ -75,7 +98,12 @@ impl AgentProvider for MockProvider {
             native: format!("mock-{}", cfg.agent_id),
             rejected_once: self.rejected_once.clone(),
         });
-        let _ = inner.tx.send(ProviderEvent::Connected { native_session_id: Some(inner.native.clone()) }).await;
+        let _ = inner
+            .tx
+            .send(ProviderEvent::Connected {
+                native_session_id: Some(inner.native.clone()),
+            })
+            .await;
         Ok((Arc::new(MockSession { inner }), rx))
     }
 }
@@ -105,17 +133,33 @@ impl AgentSession for MockSession {
         Some(self.inner.native.clone())
     }
     fn capabilities(&self) -> Capabilities {
-        Capabilities { streaming: true, interrupt: true, resume: false, steer_active_turn: false, approvals: true, mcp_http: false, usage_reporting: false, model_selection: false }
+        Capabilities {
+            streaming: true,
+            interrupt: true,
+            resume: false,
+            steer_active_turn: false,
+            approvals: true,
+            mcp_http: false,
+            usage_reporting: false,
+            model_selection: false,
+        }
     }
     async fn send_input(&self, input: AgentInput) -> ProviderResult<()> {
         let me = self.inner.clone();
         if me.busy.swap(true, Ordering::SeqCst) {
-            return Err(ProviderError::Other("mock session already has an active turn".into()));
+            return Err(ProviderError::Other(
+                "mock session already has an active turn".into(),
+            ));
         }
         me.interrupted.store(false, Ordering::SeqCst);
         tokio::spawn(async move {
             let turn_id = format!("turn-{}", me.turns.fetch_add(1, Ordering::SeqCst) + 1);
-            let _ = me.tx.send(ProviderEvent::TurnStarted { turn_id: turn_id.clone() }).await;
+            let _ = me
+                .tx
+                .send(ProviderEvent::TurnStarted {
+                    turn_id: turn_id.clone(),
+                })
+                .await;
             let result = me.run_turn(&input.text).await;
             let (outcome, error) = match result {
                 Ok(()) if me.interrupted.load(Ordering::SeqCst) => (TurnOutcome::Interrupted, None),
@@ -123,7 +167,14 @@ impl AgentSession for MockSession {
                 Err(e) => (TurnOutcome::Failed, Some(e)),
             };
             me.busy.store(false, Ordering::SeqCst);
-            let _ = me.tx.send(ProviderEvent::TurnCompleted { turn_id, outcome, error }).await;
+            let _ = me
+                .tx
+                .send(ProviderEvent::TurnCompleted {
+                    turn_id,
+                    outcome,
+                    error,
+                })
+                .await;
         });
         Ok(())
     }
@@ -136,19 +187,36 @@ impl AgentSession for MockSession {
         }
         Ok(())
     }
-    async fn resolve_approval(&self, request_id: &str, decision: ApprovalDecision) -> ProviderResult<()> {
-        let sender = self.inner.approvals.lock().ok().and_then(|mut a| a.remove(request_id));
+    async fn resolve_approval(
+        &self,
+        request_id: &str,
+        decision: ApprovalDecision,
+    ) -> ProviderResult<()> {
+        let sender = self
+            .inner
+            .approvals
+            .lock()
+            .ok()
+            .and_then(|mut a| a.remove(request_id));
         match sender {
             Some(s) => {
                 let _ = s.send(decision);
                 Ok(())
             }
-            None => Err(ProviderError::Protocol(format!("unknown approval {request_id}"))),
+            None => Err(ProviderError::Protocol(format!(
+                "unknown approval {request_id}"
+            ))),
         }
     }
     async fn shutdown(&self) -> ProviderResult<()> {
         self.inner.interrupted.store(true, Ordering::SeqCst);
-        let _ = self.inner.tx.send(ProviderEvent::Disconnected { reason: "shutdown".into() }).await;
+        let _ = self
+            .inner
+            .tx
+            .send(ProviderEvent::Disconnected {
+                reason: "shutdown".into(),
+            })
+            .await;
         Ok(())
     }
 }
@@ -167,7 +235,12 @@ fn slugify(s: &str) -> String {
 
 impl Inner {
     async fn say(&self, text: &str) {
-        let _ = self.tx.send(ProviderEvent::Message { text: text.to_string() }).await;
+        let _ = self
+            .tx
+            .send(ProviderEvent::Message {
+                text: text.to_string(),
+            })
+            .await;
     }
 
     async fn pause(&self) {
@@ -181,22 +254,40 @@ impl Inner {
     /// Call a coordination tool exactly like an MCP client would, emitting tool events.
     async fn call(&self, tool: &str, args: Value) -> Result<Value, CoreError> {
         let actor = match self.engine.get_agent(&self.agent_id) {
-            Ok(a) => Actor::Agent { id: a.id, role: a.role },
+            Ok(a) => Actor::Agent {
+                id: a.id,
+                role: a.role,
+            },
             Err(e) => return Err(e),
         };
         let call_id = format!("{tool}-{}", self.turns.load(Ordering::SeqCst));
-        let _ = self.tx.send(ProviderEvent::ToolStarted { call_id: call_id.clone(), name: tool.to_string(), detail: Some(args.to_string().chars().take(120).collect()) }).await;
+        let _ = self
+            .tx
+            .send(ProviderEvent::ToolStarted {
+                call_id: call_id.clone(),
+                name: tool.to_string(),
+                detail: Some(args.to_string().chars().take(120).collect()),
+            })
+            .await;
         let res = self.engine.call_tool(&actor, tool, args);
         let _ = self
             .tx
-            .send(ProviderEvent::ToolCompleted { call_id, name: tool.to_string(), ok: res.is_ok(), detail: res.as_ref().err().map(|e| e.to_string()) })
+            .send(ProviderEvent::ToolCompleted {
+                call_id,
+                name: tool.to_string(),
+                ok: res.is_ok(),
+                detail: res.as_ref().err().map(|e| e.to_string()),
+            })
             .await;
         self.pause().await;
         res
     }
 
     async fn run_turn(&self, _prompt: &str) -> Result<(), String> {
-        let agent = self.engine.get_agent(&self.agent_id).map_err(|e| e.to_string())?;
+        let agent = self
+            .engine
+            .get_agent(&self.agent_id)
+            .map_err(|e| e.to_string())?;
         match agent.role {
             Role::Leader => self.leader_turn().await,
             Role::Worker | Role::Specialist => self.worker_turn().await,
@@ -224,20 +315,30 @@ impl Inner {
             if m["type"] == "BLOCKER" {
                 if let (Some(task), Some(from)) = (m["task"].as_str(), m["from"].as_str()) {
                     if from != "orchestrator" {
-                        self.say(&format!("{from} is blocked on {task}; clarifying and re-assigning")).await;
+                        self.say(&format!(
+                            "{from} is blocked on {task}; clarifying and re-assigning"
+                        ))
+                        .await;
                         let _ = self
                             .call("maw_message_send", json!({ "to": from, "message_type": "ANSWER", "subject": format!("Re: {task} blocker"), "content": "Use bcrypt with cost 12 and store only the hash. Proceed with that assumption.", "task": task }))
                             .await;
                         let _ = self.call("maw_task_release", json!({ "task": task, "reason": "blocker resolved by Leader; retrying" })).await;
-                        let _ = self.call("maw_task_assign", json!({ "task": task, "agent": from })).await;
+                        let _ = self
+                            .call("maw_task_assign", json!({ "task": task, "agent": from }))
+                            .await;
                     }
                 }
             }
-            let _ = self.call("maw_message_ack", json!({ "message_id": id })).await;
+            let _ = self
+                .call("maw_message_ack", json!({ "message_id": id }))
+                .await;
         }
         // 2) reviews nobody else can do
         let agents = self.call("maw_agent_list", json!({})).await.map_err(e)?;
-        let has_reviewer = agents["agents"].as_array().map(|a| a.iter().any(|x| x["role"] == "reviewer")).unwrap_or(false);
+        let has_reviewer = agents["agents"]
+            .as_array()
+            .map(|a| a.iter().any(|x| x["role"] == "reviewer"))
+            .unwrap_or(false);
         let tasks_v = self.call("maw_task_list", json!({})).await.map_err(e)?;
         for t in tasks_v["tasks"].as_array().cloned().unwrap_or_default() {
             if self.stopped() {
@@ -249,9 +350,13 @@ impl Inner {
                     let _ = self.call("maw_review_submit", json!({ "task": key, "verdict": "approve", "feedback": "Leader review: matches acceptance criteria." })).await;
                 }
                 "VERIFYING" => {
-                    let full = self.call("maw_task_get", json!({ "task": key })).await.map_err(e)?;
+                    let full = self
+                        .call("maw_task_get", json!({ "task": key }))
+                        .await
+                        .map_err(e)?;
                     let evidence = full["evidence"].as_array().map(|a| a.len()).unwrap_or(0);
-                    self.say(&format!("verifying {key}: {evidence} evidence item(s)")).await;
+                    self.say(&format!("verifying {key}: {evidence} evidence item(s)"))
+                        .await;
                     let _ = self.call("maw_task_verify", json!({ "task": key, "pass": true, "notes": format!("Checked {evidence} evidence items against the acceptance criteria; all satisfied.") })).await;
                 }
                 _ => {}
@@ -260,7 +365,11 @@ impl Inner {
         // 3) completion
         let tasks_v = self.call("maw_task_list", json!({})).await.map_err(e)?;
         let all = tasks_v["tasks"].as_array().cloned().unwrap_or_default();
-        if !all.is_empty() && all.iter().all(|t| matches!(t["status"].as_str(), Some("DONE") | Some("CANCELED"))) {
+        if !all.is_empty()
+            && all
+                .iter()
+                .all(|t| matches!(t["status"].as_str(), Some("DONE") | Some("CANCELED")))
+        {
             self.say("all tasks verified; completing the goal").await;
             let _ = self.call("maw_goal_update", json!({ "status": "completed", "reason": "all tasks verified", "current_focus": "done" })).await;
         }
@@ -270,26 +379,87 @@ impl Inner {
     async fn plan_and_create_tasks(&self) -> Result<(), String> {
         let e = |x: CoreError| x.to_string();
         let goal = self.call("maw_goal_get", json!({})).await.map_err(e)?;
-        self.say(&format!("analyzing objective: {}", goal["goal"]["text"].as_str().unwrap_or(""))).await;
+        self.say(&format!(
+            "analyzing objective: {}",
+            goal["goal"]["text"].as_str().unwrap_or("")
+        ))
+        .await;
         let agents = self.call("maw_agent_list", json!({})).await.map_err(e)?;
         let workers: Vec<String> = agents["agents"]
             .as_array()
-            .map(|a| a.iter().filter(|x| matches!(x["role"].as_str(), Some("worker") | Some("specialist"))).filter_map(|x| x["agent"].as_str().map(String::from)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter(|x| matches!(x["role"].as_str(), Some("worker") | Some("specialist")))
+                    .filter_map(|x| x["agent"].as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default();
         let w1 = workers.first().cloned();
         let w2 = workers.get(1).cloned().or_else(|| w1.clone());
-        let has_reviewer = agents["agents"].as_array().map(|a| a.iter().any(|x| x["role"] == "reviewer")).unwrap_or(false);
+        let has_reviewer = agents["agents"]
+            .as_array()
+            .map(|a| a.iter().any(|x| x["role"] == "reviewer"))
+            .unwrap_or(false);
         let _ = self.call("maw_goal_update", json!({ "current_milestone": "Foundation", "current_focus": "planning the work breakdown" })).await;
         let specs = [
-            ("AUTH-01 Analyze existing architecture", "Survey the repository layout and conventions.", vec![], w1.clone(), true, false, 1.0),
-            ("AUTH-02 Design interfaces", "Define the authentication module interfaces.", vec!["T-1"], w1.clone(), false, false, 1.0),
-            ("AUTH-03 Implement backend logic", "Implement credential hashing and validation.", vec!["T-2"], w1.clone(), false, true, 3.0),
-            ("AUTH-04 Write tests", "Write unit tests for the module.", vec!["T-2"], w2.clone(), false, false, 2.0),
-            ("AUTH-05 Write documentation", "Document the module.", vec!["T-2"], w2.clone(), false, false, 1.0),
-            ("AUTH-06 Integrate and verify", "Run the full suite and confirm the module works end to end.", vec!["T-3", "T-4", "T-5"], w1.clone(), false, false, 1.0),
+            (
+                "AUTH-01 Analyze existing architecture",
+                "Survey the repository layout and conventions.",
+                vec![],
+                w1.clone(),
+                true,
+                false,
+                1.0,
+            ),
+            (
+                "AUTH-02 Design interfaces",
+                "Define the authentication module interfaces.",
+                vec!["T-1"],
+                w1.clone(),
+                false,
+                false,
+                1.0,
+            ),
+            (
+                "AUTH-03 Implement backend logic",
+                "Implement credential hashing and validation.",
+                vec!["T-2"],
+                w1.clone(),
+                false,
+                true,
+                3.0,
+            ),
+            (
+                "AUTH-04 Write tests",
+                "Write unit tests for the module.",
+                vec!["T-2"],
+                w2.clone(),
+                false,
+                false,
+                2.0,
+            ),
+            (
+                "AUTH-05 Write documentation",
+                "Document the module.",
+                vec!["T-2"],
+                w2.clone(),
+                false,
+                false,
+                1.0,
+            ),
+            (
+                "AUTH-06 Integrate and verify",
+                "Run the full suite and confirm the module works end to end.",
+                vec!["T-3", "T-4", "T-5"],
+                w1.clone(),
+                false,
+                false,
+                1.0,
+            ),
         ];
         let mut milestones = vec![];
-        for (i, (title, desc, deps, assignee, no_files, review, weight)) in specs.iter().enumerate() {
+        for (i, (title, desc, deps, assignee, no_files, review, weight)) in specs.iter().enumerate()
+        {
             let mut args = json!({
                 "title": title, "description": desc, "dependencies": deps, "weight": weight,
                 "acceptance_criteria": [format!("{title} is complete and evidenced")],
@@ -321,7 +491,9 @@ impl Inner {
             // nothing assigned: just acknowledge messages
             let inbox = self.call("maw_message_inbox", json!({})).await.map_err(e)?;
             for m in inbox["messages"].as_array().cloned().unwrap_or_default() {
-                let _ = self.call("maw_message_ack", json!({ "message_id": m["message_id"] })).await;
+                let _ = self
+                    .call("maw_message_ack", json!({ "message_id": m["message_id"] }))
+                    .await;
             }
             return Ok(());
         };
@@ -359,8 +531,12 @@ impl Inner {
             }
         }
 
-        if self.script.block_first_backend && task.title.to_lowercase().contains("backend") && task.attempt_count == 1 {
-            self.say("the requirements don't say which password hashing scheme to use").await;
+        if self.script.block_first_backend
+            && task.title.to_lowercase().contains("backend")
+            && task.attempt_count == 1
+        {
+            self.say("the requirements don't say which password hashing scheme to use")
+                .await;
             self.call("maw_task_block", json!({ "task": key, "reason": "Unclear which password hashing algorithm to use", "needs": "a decision from the Leader" })).await.map_err(e)?;
             return Ok(());
         }
@@ -377,14 +553,44 @@ impl Inner {
         } else {
             let file = format!("{}.md", slugify(&task.title));
             let path = self.cwd.join(&file);
-            std::fs::write(&path, format!("# {}\n\nProduced by {} for {key}.\n", task.title, me.name)).map_err(|x| x.to_string())?;
-            let _ = self.tx.send(ProviderEvent::FileChanged { paths: vec![file.clone()] }).await;
+            std::fs::write(
+                &path,
+                format!("# {}\n\nProduced by {} for {key}.\n", task.title, me.name),
+            )
+            .map_err(|x| x.to_string())?;
+            let _ = self
+                .tx
+                .send(ProviderEvent::FileChanged {
+                    paths: vec![file.clone()],
+                })
+                .await;
             changed.push(file);
-            let _ = self.call("maw_progress_report", json!({ "task": key, "percent": 70, "note": "implementation written" })).await;
-            if task.title.to_lowercase().contains("test") || task.title.to_lowercase().contains("backend") || task.title.to_lowercase().contains("integrate") {
-                let _ = self.tx.send(ProviderEvent::CommandStarted { call_id: "c1".into(), command: "cargo test".into(), cwd: Some(self.cwd.to_string_lossy().to_string()) }).await;
+            let _ = self
+                .call(
+                    "maw_progress_report",
+                    json!({ "task": key, "percent": 70, "note": "implementation written" }),
+                )
+                .await;
+            if task.title.to_lowercase().contains("test")
+                || task.title.to_lowercase().contains("backend")
+                || task.title.to_lowercase().contains("integrate")
+            {
+                let _ = self
+                    .tx
+                    .send(ProviderEvent::CommandStarted {
+                        call_id: "c1".into(),
+                        command: "cargo test".into(),
+                        cwd: Some(self.cwd.to_string_lossy().to_string()),
+                    })
+                    .await;
                 self.pause().await;
-                let _ = self.tx.send(ProviderEvent::CommandCompleted { call_id: "c1".into(), exit_code: Some(0) }).await;
+                let _ = self
+                    .tx
+                    .send(ProviderEvent::CommandCompleted {
+                        call_id: "c1".into(),
+                        exit_code: Some(0),
+                    })
+                    .await;
                 evidence.push(json!({ "kind": "test_result", "summary": "cargo test: 18 passed, 0 failed", "passed": true }));
             }
         }
@@ -405,13 +611,21 @@ impl Inner {
     async fn reviewer_turn(&self) -> Result<(), String> {
         let e = |x: CoreError| x.to_string();
         let me = self.engine.get_agent(&self.agent_id).map_err(e)?;
-        let Some(tid) = me.current_task_id.clone() else { return Ok(()) };
+        let Some(tid) = me.current_task_id.clone() else {
+            return Ok(());
+        };
         let task = self.engine.get_task(&tid.0).map_err(e)?;
         if task.status != TaskStatus::InReview {
             return Ok(());
         }
-        self.say(&format!("reviewing {}: {} evidence item(s)", task.key, task.evidence.len())).await;
-        let reject = self.script.reject_first_review && !self.rejected_once.swap(true, Ordering::SeqCst);
+        self.say(&format!(
+            "reviewing {}: {} evidence item(s)",
+            task.key,
+            task.evidence.len()
+        ))
+        .await;
+        let reject =
+            self.script.reject_first_review && !self.rejected_once.swap(true, Ordering::SeqCst);
         if reject {
             self.call("maw_review_submit", json!({ "task": task.key, "verdict": "reject", "feedback": "Add input validation for empty passwords and cover it with a test." })).await.map_err(e)?;
         } else {

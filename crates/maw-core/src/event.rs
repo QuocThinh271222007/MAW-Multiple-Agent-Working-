@@ -200,7 +200,11 @@ mod tests {
 
     #[test]
     fn envelope_serializes_with_dotted_type() {
-        let e = Event::new("p".into(), EventKind::TaskProgress, serde_json::json!({"pct": 5}));
+        let e = Event::new(
+            "p".into(),
+            EventKind::TaskProgress,
+            serde_json::json!({"pct": 5}),
+        );
         let v = serde_json::to_value(&e).unwrap();
         assert_eq!(v["event_type"], "task.progress");
         assert_eq!(v["schema_version"], 1);

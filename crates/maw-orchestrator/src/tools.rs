@@ -24,7 +24,8 @@ const REVIEW: &[Role] = &[Role::Reviewer, Role::Leader];
 const ANY: &[Role] = &[];
 
 fn schema_of<T: JsonSchema>() -> Value {
-    let mut v = serde_json::to_value(schemars::schema_for!(T)).unwrap_or_else(|_| json!({ "type": "object" }));
+    let mut v = serde_json::to_value(schemars::schema_for!(T))
+        .unwrap_or_else(|_| json!({ "type": "object" }));
     if let Value::Object(m) = &mut v {
         m.remove("$schema");
         m.remove("title");
@@ -342,7 +343,13 @@ struct DecisionArgs {
 
 macro_rules! spec {
     ($name:expr, $desc:expr, $roles:expr, $ro:expr, $ty:ty) => {
-        ToolSpec { name: $name, description: $desc, roles: $roles, read_only: $ro, schema: schema_of::<$ty> }
+        ToolSpec {
+            name: $name,
+            description: $desc,
+            roles: $roles,
+            read_only: $ro,
+            schema: schema_of::<$ty>,
+        }
     };
 }
 
@@ -390,15 +397,26 @@ pub fn tool_specs() -> Vec<ToolSpec> {
 // ---------------------------------------------------------------- views
 
 fn parse<T: for<'de> Deserialize<'de>>(args: Value) -> CoreResult<T> {
-    serde_json::from_value(if args.is_null() { json!({}) } else { args }).map_err(|e| CoreError::InvalidInput(format!("invalid arguments: {e}")))
+    serde_json::from_value(if args.is_null() { json!({}) } else { args })
+        .map_err(|e| CoreError::InvalidInput(format!("invalid arguments: {e}")))
 }
 
 fn agent_name(agents: &[Agent], id: &AgentId) -> String {
-    agents.iter().find(|a| &a.id == id).map(|a| a.name.clone()).unwrap_or_else(|| id.0.clone())
+    agents
+        .iter()
+        .find(|a| &a.id == id)
+        .map(|a| a.name.clone())
+        .unwrap_or_else(|| id.0.clone())
 }
 
 pub fn task_view(t: &Task, tasks: &[Task], agents: &[Agent]) -> Value {
-    let key_of = |id: &TaskId| tasks.iter().find(|x| &x.id == id).map(|x| x.key.clone()).unwrap_or_else(|| id.0.clone());
+    let key_of = |id: &TaskId| {
+        tasks
+            .iter()
+            .find(|x| &x.id == id)
+            .map(|x| x.key.clone())
+            .unwrap_or_else(|| id.0.clone())
+    };
     json!({
         "task": t.key, "id": t.id, "title": t.title, "description": t.description,
         "acceptance_criteria": t.acceptance_criteria, "status": t.status.as_str(), "priority": t.priority.as_str(),
@@ -442,16 +460,28 @@ impl Engine {
     /// Execute a coordination tool as `actor`. Role gates are checked first.
     pub fn call_tool(&self, actor: &Actor, name: &str, args: Value) -> CoreResult<Value> {
         let specs = tool_specs();
-        let spec = specs.iter().find(|s| s.name == name).ok_or_else(|| CoreError::not_found("tool", name))?;
+        let spec = specs
+            .iter()
+            .find(|s| s.name == name)
+            .ok_or_else(|| CoreError::not_found("tool", name))?;
         if let Actor::Agent { role, .. } = actor {
             if !spec.roles.is_empty() && !spec.roles.contains(role) {
                 return Err(CoreError::Forbidden(format!(
                     "tool {name} requires role {}; you are {role}",
-                    spec.roles.iter().map(|r| r.as_str()).collect::<Vec<_>>().join("|")
+                    spec.roles
+                        .iter()
+                        .map(|r| r.as_str())
+                        .collect::<Vec<_>>()
+                        .join("|")
                 )));
             }
         }
-        self.emit_custom(EventKind::McpToolCalled, actor.agent_id().as_ref(), None, json!({ "tool": name, "agent": actor.id() }));
+        self.emit_custom(
+            EventKind::McpToolCalled,
+            actor.agent_id().as_ref(),
+            None,
+            json!({ "tool": name, "agent": actor.id() }),
+        );
         let res = self.dispatch_tool(actor, name, args);
         self.emit_custom(
             EventKind::McpToolCompleted,
@@ -480,7 +510,14 @@ impl Engine {
                 };
                 let g = self.update_goal(
                     actor,
-                    GoalPatch { text: a.objective, success_criteria: a.success_criteria, current_milestone: a.current_milestone, current_focus: a.current_focus, status, reason: a.reason },
+                    GoalPatch {
+                        text: a.objective,
+                        success_criteria: a.success_criteria,
+                        current_milestone: a.current_milestone,
+                        current_focus: a.current_focus,
+                        status,
+                        reason: a.reason,
+                    },
                 )?;
                 Ok(json!({ "goal": g }))
             }
@@ -491,7 +528,15 @@ impl Engine {
             }
             "maw_plan_propose_revision" => {
                 let a: PlanArgs = parse(args)?;
-                let ms = a.milestones.into_iter().map(|m| Milestone { title: m.title, done: m.done, task_keys: m.task_keys }).collect();
+                let ms = a
+                    .milestones
+                    .into_iter()
+                    .map(|m| Milestone {
+                        title: m.title,
+                        done: m.done,
+                        task_keys: m.task_keys,
+                    })
+                    .collect();
                 let p = self.propose_plan(actor, &a.summary, ms, a.next_actions, &a.reason)?;
                 Ok(json!({ "plan": p, "progress": self.progress()? }))
             }
@@ -532,7 +577,12 @@ impl Engine {
                 let list: Vec<Value> = all
                     .iter()
                     .filter(|t| status.map(|s| t.status == s).unwrap_or(true))
-                    .filter(|t| owner.as_ref().map(|o| t.owner_agent_id.as_ref() == Some(o)).unwrap_or(true))
+                    .filter(|t| {
+                        owner
+                            .as_ref()
+                            .map(|o| t.owner_agent_id.as_ref() == Some(o))
+                            .unwrap_or(true)
+                    })
                     .map(|t| {
                         let mut v = task_view(t, &all, &ag);
                         if let Value::Object(m) = &mut v {
@@ -594,10 +644,17 @@ impl Engine {
                 let a: SubmitArgs = parse(args)?;
                 let mut ev = vec![];
                 for e in a.evidence {
-                    ev.push(EvidenceInput { kind: evidence_kind(&e.kind)?, summary: e.summary, passed: e.passed, detail: e.detail });
+                    ev.push(EvidenceInput {
+                        kind: evidence_kind(&e.kind)?,
+                        summary: e.summary,
+                        passed: e.passed,
+                        detail: e.detail,
+                    });
                 }
                 let t = self.submit_result(actor, &a.task, &a.summary, ev, a.changed_files)?;
-                Ok(json!({ "task": task_view(&t, &tasks()?, &agents()?), "next": match t.status { TaskStatus::InReview => "awaiting review", _ => "awaiting Leader verification" } }))
+                Ok(
+                    json!({ "task": task_view(&t, &tasks()?, &agents()?), "next": match t.status { TaskStatus::InReview => "awaiting review", _ => "awaiting Leader verification" } }),
+                )
             }
             "maw_task_request_review" => {
                 let a: RequestReviewArgs = parse(args)?;
@@ -608,7 +665,11 @@ impl Engine {
                 let approve = match a.verdict.to_ascii_lowercase().as_str() {
                     "approve" | "approved" => true,
                     "reject" | "rejected" => false,
-                    o => return Err(CoreError::InvalidInput(format!("verdict must be approve or reject, got '{o}'"))),
+                    o => {
+                        return Err(CoreError::InvalidInput(format!(
+                            "verdict must be approve or reject, got '{o}'"
+                        )))
+                    }
                 };
                 one_task(&self.submit_review(actor, &a.task, approve, &a.feedback)?)
             }
@@ -616,9 +677,14 @@ impl Engine {
                 let a: VerifyArgs = parse(args)?;
                 let t = self.verify_task(actor, &a.task, a.pass, &a.notes)?;
                 let all = self.list_tasks()?;
-                let goal_done = all.iter().filter(|x| x.goal_id == t.goal_id).all(|x| matches!(x.status, TaskStatus::Done | TaskStatus::Canceled));
-                Ok(json!({ "task": task_view(&t, &all, &agents()?), "all_tasks_done": goal_done, "progress": self.progress()?,
-                    "hint": if goal_done { "Every task is verified. Call maw_goal_update with status=completed when the goal's success criteria are met." } else { "" } }))
+                let goal_done = all
+                    .iter()
+                    .filter(|x| x.goal_id == t.goal_id)
+                    .all(|x| matches!(x.status, TaskStatus::Done | TaskStatus::Canceled));
+                Ok(
+                    json!({ "task": task_view(&t, &all, &agents()?), "all_tasks_done": goal_done, "progress": self.progress()?,
+                    "hint": if goal_done { "Every task is verified. Call maw_goal_update with status=completed when the goal's success criteria are met." } else { "" } }),
+                )
             }
             "maw_task_get_dependencies" => {
                 let a: TaskRefArgs = parse(args)?;
@@ -631,7 +697,13 @@ impl Engine {
             "maw_milestone_report" => {
                 let a: MilestoneReportArgs = parse(args)?;
                 if let (true, Actor::Agent { .. }) = (actor.is_leader(), actor) {
-                    self.update_goal(actor, GoalPatch { current_milestone: Some(a.milestone.clone()), ..Default::default() })?;
+                    self.update_goal(
+                        actor,
+                        GoalPatch {
+                            current_milestone: Some(a.milestone.clone()),
+                            ..Default::default()
+                        },
+                    )?;
                 }
                 let task = match &a.task {
                     Some(t) => Some(self.get_task(t)?),
@@ -647,7 +719,13 @@ impl Engine {
             }
             "maw_artifact_register" => {
                 let a: ArtifactArgs = parse(args)?;
-                let art = self.register_artifact(actor, a.task.as_deref(), &a.kind, a.path, &a.description)?;
+                let art = self.register_artifact(
+                    actor,
+                    a.task.as_deref(),
+                    &a.kind,
+                    a.path,
+                    &a.description,
+                )?;
                 Ok(json!({ "artifact_id": art.id }))
             }
             "maw_test_report" => {
@@ -662,20 +740,37 @@ impl Engine {
                         detail: json!({ "command": a.command, "total": a.total, "failed": a.failed }),
                     },
                 )?;
-                Ok(json!({ "task": t.key, "evidence_items": t.evidence.len(), "latest_passed": a.passed }))
+                Ok(
+                    json!({ "task": t.key, "evidence_items": t.evidence.len(), "latest_passed": a.passed }),
+                )
             }
             "maw_message_send" => {
                 let a: MessageSendArgs = parse(args)?;
-                let mt = a.message_type.parse::<MessageType>().map_err(CoreError::InvalidInput)?;
-                let m = self.send_message(actor, &a.to, mt, &a.subject, &a.content, a.task.as_deref(), a.idempotency_key)?;
-                Ok(json!({ "message_id": m.id, "delivered": false, "note": "queued; the orchestrator delivers it to the recipient's session" }))
+                let mt = a
+                    .message_type
+                    .parse::<MessageType>()
+                    .map_err(CoreError::InvalidInput)?;
+                let m = self.send_message(
+                    actor,
+                    &a.to,
+                    mt,
+                    &a.subject,
+                    &a.content,
+                    a.task.as_deref(),
+                    a.idempotency_key,
+                )?;
+                Ok(
+                    json!({ "message_id": m.id, "delivered": false, "note": "queued; the orchestrator delivers it to the recipient's session" }),
+                )
             }
             "maw_message_inbox" => {
                 let a: InboxArgs = parse(args)?;
                 let msgs = self.inbox(actor, !a.include_acknowledged, a.limit.unwrap_or(50))?;
                 let ag = agents()?;
                 let ts = tasks()?;
-                Ok(json!({ "messages": msgs.iter().map(|m| message_view(m, &ag, &ts)).collect::<Vec<_>>() }))
+                Ok(
+                    json!({ "messages": msgs.iter().map(|m| message_view(m, &ag, &ts)).collect::<Vec<_>>() }),
+                )
             }
             "maw_message_ack" => {
                 let a: AckArgs = parse(args)?;
@@ -685,7 +780,9 @@ impl Engine {
             "maw_handoff_create" => {
                 let a: HandoffArgs = parse(args)?;
                 let m = self.create_handoff(actor, &a.task, &a.to, &a.summary, &a.context)?;
-                Ok(json!({ "handoff_message_id": m.id, "note": "ownership transfers when the recipient accepts" }))
+                Ok(
+                    json!({ "handoff_message_id": m.id, "note": "ownership transfers when the recipient accepts" }),
+                )
             }
             "maw_handoff_accept" => {
                 let a: AckArgs = parse(args)?;
@@ -693,7 +790,9 @@ impl Engine {
             }
             "maw_agent_list" => {
                 let ts = tasks()?;
-                Ok(json!({ "agents": agents()?.iter().map(|a| agent_view(a, &ts)).collect::<Vec<_>>() }))
+                Ok(
+                    json!({ "agents": agents()?.iter().map(|a| agent_view(a, &ts)).collect::<Vec<_>>() }),
+                )
             }
             "maw_agent_status" | "maw_agent_capabilities" => {
                 let a: AgentRefArgs = parse(args)?;
@@ -705,7 +804,9 @@ impl Engine {
                 if name == "maw_agent_status" {
                     Ok(agent_view(&ag, &tasks()?))
                 } else {
-                    Ok(json!({ "agent": ag.name, "provider": ag.provider.as_str(), "capabilities": ag.capabilities }))
+                    Ok(
+                        json!({ "agent": ag.name, "provider": ag.provider.as_str(), "capabilities": ag.capabilities }),
+                    )
                 }
             }
             "maw_agent_request_help" => {
@@ -715,23 +816,42 @@ impl Engine {
             }
             "maw_context_publish" => {
                 let a: ContextPublishArgs = parse(args)?;
-                let c = self.publish_context(actor, "context", &a.key, &a.content, a.tags, a.task.as_deref())?;
+                let c = self.publish_context(
+                    actor,
+                    "context",
+                    &a.key,
+                    &a.content,
+                    a.tags,
+                    a.task.as_deref(),
+                )?;
                 Ok(json!({ "context_id": c.id }))
             }
             "maw_decision_record" => {
                 let a: DecisionArgs = parse(args)?;
-                let c = self.publish_context(actor, "decision", &a.title, &a.decision, a.tags, a.task.as_deref())?;
+                let c = self.publish_context(
+                    actor,
+                    "decision",
+                    &a.title,
+                    &a.decision,
+                    a.tags,
+                    a.task.as_deref(),
+                )?;
                 Ok(json!({ "decision_id": c.id }))
             }
             "maw_context_read" => {
                 let a: ContextReadArgs = parse(args)?;
                 let items = self.search_context(a.kind.as_deref(), None, a.limit.unwrap_or(20))?;
-                Ok(json!({ "entries": items.iter().map(|c| json!({ "id": c.id, "kind": c.kind, "key": c.key, "content": c.content, "tags": c.tags, "by": c.author, "at": c.created_at })).collect::<Vec<_>>() }))
+                Ok(
+                    json!({ "entries": items.iter().map(|c| json!({ "id": c.id, "kind": c.kind, "key": c.key, "content": c.content, "tags": c.tags, "by": c.author, "at": c.created_at })).collect::<Vec<_>>() }),
+                )
             }
             "maw_context_search" => {
                 let a: ContextSearchArgs = parse(args)?;
-                let items = self.search_context(a.kind.as_deref(), Some(&a.query), a.limit.unwrap_or(20))?;
-                Ok(json!({ "entries": items.iter().map(|c| json!({ "id": c.id, "kind": c.kind, "key": c.key, "content": c.content, "tags": c.tags, "by": c.author, "at": c.created_at })).collect::<Vec<_>>() }))
+                let items =
+                    self.search_context(a.kind.as_deref(), Some(&a.query), a.limit.unwrap_or(20))?;
+                Ok(
+                    json!({ "entries": items.iter().map(|c| json!({ "id": c.id, "kind": c.kind, "key": c.key, "content": c.content, "tags": c.tags, "by": c.author, "at": c.created_at })).collect::<Vec<_>>() }),
+                )
             }
             other => Err(CoreError::not_found("tool", other)),
         }

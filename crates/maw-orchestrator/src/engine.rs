@@ -61,7 +61,13 @@ pub struct Emit {
 }
 
 impl Emit {
-    pub fn push(&mut self, kind: EventKind, agent: Option<&AgentId>, task: Option<&TaskId>, payload: Value) {
+    pub fn push(
+        &mut self,
+        kind: EventKind,
+        agent: Option<&AgentId>,
+        task: Option<&TaskId>,
+        payload: Value,
+    ) {
         let mut e = Event::new(self.project.clone(), kind, payload).run(&self.run);
         e.agent_id = agent.cloned();
         e.task_id = task.cloned();
@@ -102,16 +108,48 @@ pub struct Engine {
     pub(crate) wake: Arc<Notify>,
     paused: AtomicBool,
     tokens: Mutex<HashMap<String, AgentId>>,
+    track_run: bool,
 }
 
 impl Engine {
     /// Open the engine for a project, creating the project row if needed. Starts a new run.
-    pub fn open(store: Arc<Store>, name: &str, path: &str, cfg: OrchestratorConfig) -> CoreResult<Arc<Engine>> {
+    pub fn open(
+        store: Arc<Store>,
+        name: &str,
+        path: &str,
+        cfg: OrchestratorConfig,
+    ) -> CoreResult<Arc<Engine>> {
+        Self::open_inner(store, name, path, cfg, true)
+    }
+
+    /// For short-lived utility commands (CLI queries/edits): no run is recorded, so such
+    /// invocations are never mistaken for crashes by recovery and add no run events.
+    pub fn open_utility(
+        store: Arc<Store>,
+        name: &str,
+        path: &str,
+        cfg: OrchestratorConfig,
+    ) -> CoreResult<Arc<Engine>> {
+        Self::open_inner(store, name, path, cfg, false)
+    }
+
+    fn open_inner(
+        store: Arc<Store>,
+        name: &str,
+        path: &str,
+        cfg: OrchestratorConfig,
+        track_run: bool,
+    ) -> CoreResult<Arc<Engine>> {
         let (project, paused) = store.write(|db| {
             let project = match db.find_project(name)? {
                 Some(p) => p,
                 None => {
-                    let p = Project { id: ProjectId::new(), name: name.to_string(), path: path.to_string(), created_at: Utc::now() };
+                    let p = Project {
+                        id: ProjectId::new(),
+                        name: name.to_string(),
+                        path: path.to_string(),
+                        created_at: Utc::now(),
+                    };
                     db.insert_project(&p)?;
                     p
                 }
@@ -120,9 +158,17 @@ impl Engine {
             Ok((project, paused))
         })?;
         let run_id = RunId::new();
-        store.write(|db| {
-            db.begin_run(&Run { id: run_id.clone(), project_id: project.id.clone(), started_at: Utc::now(), stopped_at: None, clean_shutdown: false })
-        })?;
+        if track_run {
+            store.write(|db| {
+                db.begin_run(&Run {
+                    id: run_id.clone(),
+                    project_id: project.id.clone(),
+                    started_at: Utc::now(),
+                    stopped_at: None,
+                    clean_shutdown: false,
+                })
+            })?;
+        }
         let (tx, _) = broadcast::channel(4096);
         let eng = Arc::new(Engine {
             store,
@@ -133,11 +179,19 @@ impl Engine {
             wake: Arc::new(Notify::new()),
             paused: AtomicBool::new(paused),
             tokens: Mutex::new(HashMap::new()),
+            track_run,
         });
-        eng.tx(|_, emit| {
-            emit.push(EventKind::RunStarted, None, None, json!({ "project": eng.project.name }));
-            Ok(())
-        })?;
+        if track_run {
+            eng.tx(|_, emit| {
+                emit.push(
+                    EventKind::RunStarted,
+                    None,
+                    None,
+                    json!({ "project": eng.project.name }),
+                );
+                Ok(())
+            })?;
+        }
         Ok(eng)
     }
 
@@ -175,7 +229,11 @@ impl Engine {
     /// Run `f` in a transaction; events pushed to `emit` are persisted atomically with the
     /// state change and broadcast after commit.
     pub fn tx<R>(&self, f: impl FnOnce(&Db, &mut Emit) -> CoreResult<R>) -> CoreResult<R> {
-        let mut emit = Emit { project: self.project.id.clone(), run: self.run_id.clone(), events: vec![] };
+        let mut emit = Emit {
+            project: self.project.id.clone(),
+            run: self.run_id.clone(),
+            events: vec![],
+        };
         let r = self.store.write(|db| {
             let r = f(db, &mut emit)?;
             emit.flush(db)?;
@@ -205,7 +263,10 @@ impl Engine {
         use rand::RngCore;
         let mut bytes = [0u8; 24];
         rand::thread_rng().fill_bytes(&mut bytes);
-        let token = format!("maw_tok_{}", bytes.iter().map(|b| format!("{b:02x}")).collect::<String>());
+        let token = format!(
+            "maw_tok_{}",
+            bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()
+        );
         if let Ok(mut t) = self.tokens.lock() {
             // One live token per agent.
             t.retain(|_, a| a != agent);
@@ -222,7 +283,10 @@ impl Engine {
     pub fn authenticate(&self, token: &str) -> Option<Actor> {
         let id = self.tokens.lock().ok()?.get(token).cloned()?;
         let agent = self.read(|db| db.get_agent(&id)).ok()??;
-        Some(Actor::Agent { id: agent.id, role: agent.role })
+        Some(Actor::Agent {
+            id: agent.id,
+            role: agent.role,
+        })
     }
 
     // ------------------------------------------------------------------ agents
@@ -237,15 +301,21 @@ impl Engine {
         workspace: Option<String>,
     ) -> CoreResult<Agent> {
         if name.trim().is_empty() || name.len() > 64 {
-            return Err(CoreError::InvalidInput("agent name must be 1..64 characters".into()));
+            return Err(CoreError::InvalidInput(
+                "agent name must be 1..64 characters".into(),
+            ));
         }
         self.tx(|db, emit| {
             let existing = db.list_agents(&self.project.id)?;
             if existing.iter().any(|a| a.name.eq_ignore_ascii_case(name)) {
-                return Err(CoreError::Conflict(format!("agent '{name}' already exists")));
+                return Err(CoreError::Conflict(format!(
+                    "agent '{name}' already exists"
+                )));
             }
             if role == Role::Leader && existing.iter().any(|a| a.role == Role::Leader) {
-                return Err(CoreError::Conflict("project already has a Leader; change its role first".into()));
+                return Err(CoreError::Conflict(
+                    "project already has a Leader; change its role first".into(),
+                ));
             }
             let agent = Agent {
                 id: AgentId::new(),
@@ -278,7 +348,8 @@ impl Engine {
     }
 
     pub fn get_agent(&self, id: &AgentId) -> CoreResult<Agent> {
-        self.read(|db| db.get_agent(id))?.ok_or_else(|| CoreError::not_found("agent", id))
+        self.read(|db| db.get_agent(id))?
+            .ok_or_else(|| CoreError::not_found("agent", id))
     }
 
     /// Resolve an agent by id or (case-insensitive) name.
@@ -295,26 +366,48 @@ impl Engine {
     }
 
     pub fn leader(&self) -> CoreResult<Option<Agent>> {
-        Ok(self.list_agents()?.into_iter().find(|a| a.role == Role::Leader))
+        Ok(self
+            .list_agents()?
+            .into_iter()
+            .find(|a| a.role == Role::Leader))
     }
 
     pub fn set_agent_role(&self, id: &AgentId, role: Role) -> CoreResult<Agent> {
         self.tx(|db, emit| {
-            let mut a = db.get_agent(id)?.ok_or_else(|| CoreError::not_found("agent", id))?;
+            let mut a = db
+                .get_agent(id)?
+                .ok_or_else(|| CoreError::not_found("agent", id))?;
             if role == Role::Leader {
-                if let Some(other) = db.list_agents(&self.project.id)?.into_iter().find(|x| x.role == Role::Leader && x.id != a.id) {
-                    return Err(CoreError::Conflict(format!("{} is already the Leader", other.name)));
+                if let Some(other) = db
+                    .list_agents(&self.project.id)?
+                    .into_iter()
+                    .find(|x| x.role == Role::Leader && x.id != a.id)
+                {
+                    return Err(CoreError::Conflict(format!(
+                        "{} is already the Leader",
+                        other.name
+                    )));
                 }
             }
             a.role = role;
             db.update_agent(&a)?;
-            emit.push(EventKind::AgentStateChanged, Some(&a.id), None, json!({ "name": a.name, "role": role.as_str(), "state": a.state.as_str() }));
+            emit.push(
+                EventKind::AgentStateChanged,
+                Some(&a.id),
+                None,
+                json!({ "name": a.name, "role": role.as_str(), "state": a.state.as_str() }),
+            );
             Ok(a)
         })
     }
 
     /// Validated agent state transition. Invalid transitions are rejected (not silently coerced).
-    pub fn set_agent_state(&self, id: &AgentId, to: AgentState, error: Option<String>) -> CoreResult<Agent> {
+    pub fn set_agent_state(
+        &self,
+        id: &AgentId,
+        to: AgentState,
+        error: Option<String>,
+    ) -> CoreResult<Agent> {
         self.tx(|db, emit| {
             let mut a = db.get_agent(id)?.ok_or_else(|| CoreError::not_found("agent", id))?;
             if a.state == to && error.is_none() {
@@ -343,9 +436,17 @@ impl Engine {
     }
 
     /// Record session facts after (re)connecting.
-    pub fn update_agent_session(&self, id: &AgentId, native: Option<String>, caps: Capabilities, workspace: Option<String>) -> CoreResult<()> {
+    pub fn update_agent_session(
+        &self,
+        id: &AgentId,
+        native: Option<String>,
+        caps: Capabilities,
+        workspace: Option<String>,
+    ) -> CoreResult<()> {
         self.tx(|db, _| {
-            let mut a = db.get_agent(id)?.ok_or_else(|| CoreError::not_found("agent", id))?;
+            let mut a = db
+                .get_agent(id)?
+                .ok_or_else(|| CoreError::not_found("agent", id))?;
             if native.is_some() {
                 a.native_session_id = native;
             }
@@ -361,10 +462,17 @@ impl Engine {
 
     pub fn record_usage(&self, id: &AgentId, usage: UsageMetrics) -> CoreResult<()> {
         self.tx(|db, emit| {
-            let mut a = db.get_agent(id)?.ok_or_else(|| CoreError::not_found("agent", id))?;
+            let mut a = db
+                .get_agent(id)?
+                .ok_or_else(|| CoreError::not_found("agent", id))?;
             a.usage = usage.clone();
             db.update_agent(&a)?;
-            emit.push(EventKind::AgentUsage, Some(id), None, json!({ "usage": usage }));
+            emit.push(
+                EventKind::AgentUsage,
+                Some(id),
+                None,
+                json!({ "usage": usage }),
+            );
             Ok(())
         })
     }
@@ -389,10 +497,17 @@ impl Engine {
         self.tx(|db, emit| {
             if let Some(g) = db.current_goal(&self.project.id)? {
                 if matches!(g.status, GoalStatus::Active | GoalStatus::Verifying) {
-                    return Err(CoreError::Conflict(format!("goal {} is still {}; update or cancel it first", g.id, g.status.as_str())));
+                    return Err(CoreError::Conflict(format!(
+                        "goal {} is still {}; update or cancel it first",
+                        g.id,
+                        g.status.as_str()
+                    )));
                 }
             }
-            let leader = db.list_agents(&self.project.id)?.into_iter().find(|a| a.role == Role::Leader);
+            let leader = db
+                .list_agents(&self.project.id)?
+                .into_iter()
+                .find(|a| a.role == Role::Leader);
             let goal = Goal {
                 id: GoalId::new(),
                 project_id: self.project.id.clone(),
@@ -416,7 +531,12 @@ impl Engine {
                 author: Actor::User.id(),
                 created_at: Utc::now(),
             })?;
-            emit.push(EventKind::GoalCreated, None, None, json!({ "goal_id": goal.id, "text": goal.text }));
+            emit.push(
+                EventKind::GoalCreated,
+                None,
+                None,
+                json!({ "goal_id": goal.id, "text": goal.text }),
+            );
             Ok(goal)
         })
     }
@@ -428,7 +548,9 @@ impl Engine {
     /// Update goal text/criteria (new revision) and/or focus/milestone/status.
     pub fn update_goal(&self, actor: &Actor, patch: GoalPatch) -> CoreResult<Goal> {
         if !actor.is_leader() {
-            return Err(CoreError::Forbidden("only the Leader (or the user) can update the goal".into()));
+            return Err(CoreError::Forbidden(
+                "only the Leader (or the user) can update the goal".into(),
+            ));
         }
         self.tx(|db, emit| {
             let mut g = db.current_goal(&self.project.id)?.ok_or_else(|| CoreError::not_found("goal", "current"))?;
@@ -522,9 +644,18 @@ impl Engine {
 
     /// Record a new plan revision (Leader). Task progress is recomputed from the live task set,
     /// so scope expansion shows up as a lower percentage tied to this revision.
-    pub fn propose_plan(&self, actor: &Actor, summary: &str, milestones: Vec<Milestone>, next_actions: Vec<String>, reason: &str) -> CoreResult<PlanRevision> {
+    pub fn propose_plan(
+        &self,
+        actor: &Actor,
+        summary: &str,
+        milestones: Vec<Milestone>,
+        next_actions: Vec<String>,
+        reason: &str,
+    ) -> CoreResult<PlanRevision> {
         if !actor.is_leader() {
-            return Err(CoreError::Forbidden("only the Leader (or the user) can revise the plan".into()));
+            return Err(CoreError::Forbidden(
+                "only the Leader (or the user) can revise the plan".into(),
+            ));
         }
         if summary.trim().is_empty() {
             return Err(CoreError::InvalidInput("plan summary is empty".into()));
@@ -590,7 +721,11 @@ impl Engine {
             };
             let tasks = db.list_tasks(&self.project.id)?;
             let goal_id = goal.as_ref().map(|g| g.id.clone());
-            let progress = Progress::compute(tasks.iter().filter(|t| Some(&t.goal_id) == goal_id.as_ref()));
+            let progress = Progress::compute(
+                tasks
+                    .iter()
+                    .filter(|t| Some(&t.goal_id) == goal_id.as_ref()),
+            );
             Ok(Snapshot {
                 project: self.project.clone(),
                 goal,
@@ -598,7 +733,11 @@ impl Engine {
                 agents: db.list_agents(&self.project.id)?,
                 tasks,
                 progress,
-                approvals: db.list_approvals(&self.project.id, false)?.into_iter().take(50).collect(),
+                approvals: db
+                    .list_approvals(&self.project.id, false)?
+                    .into_iter()
+                    .take(50)
+                    .collect(),
                 recent_events: db.recent_events(&self.project.id, 300)?,
                 recent_messages: db.recent_messages(&self.project.id, 100)?,
                 workspaces: db.list_workspaces(&self.project.id)?,
@@ -610,6 +749,9 @@ impl Engine {
 
     /// Record a clean shutdown (used by recovery to distinguish crashes).
     pub fn shutdown(&self) -> CoreResult<()> {
+        if !self.track_run {
+            return Ok(());
+        }
         self.tx(|db, emit| {
             db.end_run(&self.run_id)?;
             emit.push(EventKind::RunStopped, None, None, json!({}));
@@ -617,7 +759,13 @@ impl Engine {
         })
     }
 
-    pub fn emit_custom(&self, kind: EventKind, agent: Option<&AgentId>, task: Option<&TaskId>, payload: Value) {
+    pub fn emit_custom(
+        &self,
+        kind: EventKind,
+        agent: Option<&AgentId>,
+        task: Option<&TaskId>,
+        payload: Value,
+    ) {
         let _ = self.tx(|_, emit| {
             emit.push(kind, agent, task, payload);
             Ok(())
