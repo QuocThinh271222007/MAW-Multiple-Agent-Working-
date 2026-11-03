@@ -133,3 +133,11 @@ Interactive demo (mock provider, not a real Claude/Codex run):
 * Transcript search is case-insensitive substring only, over wrapped display rows.
 * Flow diagram supports one row of workers/reviewers (falls back to the edge list when they don't fit).
 * The Integrate command reports a summary toast only; conflicts are visible via Logs/Leader messages.
+
+
+## Added: model/effort, permissions, `!` shell, scrolling bars
+
+- `M` or palette → **agent model**: model selector (provider catalog, loaded in the background; Codex is queried live), an optional *Custom model id* that overrides the selector, and an *Effort* selector (levels the model reports, else low…max). Idle agents reconnect immediately; busy agents apply it on their next connect.
+- palette → **agent permission**: `safe` / `balanced` / `autonomous`.
+- `!` or palette → **shell**: runs a command in the project folder (`bash -lc`, 60 s limit, output capped at 64 KiB per stream and secret-redacted) and opens the result in a scrollable panel (`↑↓ PgUp PgDn Home End`, `y` copy, `Esc` close). This is a deliberate user action.
+- The title bar always lists every view key and ends with `dir: <project folder>`. When it does not fit, roll the mouse wheel (or Shift+wheel / horizontal wheel) over the bar to scroll it; the key-hint bar at the bottom works the same way.

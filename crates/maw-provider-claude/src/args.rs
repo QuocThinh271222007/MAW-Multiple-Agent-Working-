@@ -163,6 +163,10 @@ pub fn build_args(cfg: &SessionConfig, session: &SessionArg) -> Vec<String> {
         a.push("--model".into());
         a.push(m.to_string());
     }
+    if let Some(e) = cfg.effort.as_deref().filter(|e| !e.trim().is_empty()) {
+        a.push("--effort".into());
+        a.push(e.to_string());
+    }
     if !cfg.instructions.trim().is_empty() {
         a.push("--append-system-prompt".into());
         a.push(cfg.instructions.clone());
@@ -209,6 +213,7 @@ mod tests {
             instructions: "be useful".into(),
             env: HashMap::new(),
             resume_native_id: None,
+            effort: None,
         }
     }
 
@@ -309,5 +314,21 @@ mod tests {
         assert!(a.iter().any(|x| x.starts_with("--allowedTools=")));
         assert!(a.iter().any(|x| x.starts_with("--disallowedTools=")));
         assert!(a.iter().any(|x| x.starts_with("--mcp-config=")));
+    }
+
+    #[test]
+    fn effort_flag_is_passed_only_when_set() {
+        let mut c = cfg(PermissionProfile::Balanced);
+        c.effort = Some("high".into());
+        let a = build_args(&c, &SessionArg::New("s".into()));
+        let i = a
+            .iter()
+            .position(|x| x == "--effort")
+            .expect("--effort present");
+        assert_eq!(a[i + 1], "high");
+        c.effort = None;
+        assert!(!build_args(&c, &SessionArg::New("s".into())).contains(&"--effort".to_string()));
+        c.effort = Some("  ".into());
+        assert!(!build_args(&c, &SessionArg::New("s".into())).contains(&"--effort".to_string()));
     }
 }

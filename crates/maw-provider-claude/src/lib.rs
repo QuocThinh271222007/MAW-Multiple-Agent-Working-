@@ -126,6 +126,46 @@ impl AgentProvider for ClaudeProvider {
         ProviderKind::Claude
     }
 
+    /// Claude Code has no model-listing command, so this is a static catalog: the documented
+    /// aliases (which always resolve to the latest model of that tier) plus explicit model ids.
+    /// Claude Code accepts any id the account can use; an unknown id fails at session start and is
+    /// reported on the agent, not silently ignored.
+    async fn list_models(&self) -> ProviderResult<Vec<ModelChoice>> {
+        let m = |id: &str, name: &str, desc: &str| ModelChoice {
+            id: id.into(),
+            display_name: name.into(),
+            description: desc.into(),
+            is_default: false,
+            source: "catalog".into(),
+            reasoning_efforts: vec![],
+        };
+        Ok(vec![
+            m(
+                "opus",
+                "Opus (latest)",
+                "Alias: the latest Opus model: deepest reasoning, highest cost",
+            ),
+            m(
+                "sonnet",
+                "Sonnet (latest)",
+                "Alias: the latest Sonnet model: balanced speed and capability",
+            ),
+            m(
+                "haiku",
+                "Haiku (latest)",
+                "Alias: the latest Haiku model: fastest and cheapest, good for simple tasks",
+            ),
+            m(
+                "claude-fable-5-1",
+                "Fable 5.1",
+                "Explicit model id; may need usage credits on your plan",
+            ),
+            m("claude-opus-5-5", "Opus 5.5", "Explicit model id"),
+            m("claude-sonnet-5-5", "Sonnet 5.5", "Explicit model id"),
+            m("claude-haiku-5-5", "Haiku 5.5", "Explicit model id"),
+        ])
+    }
+
     async fn detect(&self) -> ProviderResult<ProviderInfo> {
         let mut info = ProviderInfo {
             kind: ProviderKind::Claude,

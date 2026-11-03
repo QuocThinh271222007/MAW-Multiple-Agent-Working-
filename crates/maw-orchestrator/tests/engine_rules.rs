@@ -749,3 +749,105 @@ fn orchestrator_initiated_blocks_still_notify_the_leader() {
         .iter()
         .all(|m| !m.content.contains("parked by leader")));
 }
+
+#[test]
+fn model_effort_and_permission_are_validated_and_persisted() {
+    let f = setup();
+    let id = f.w1.id();
+    // model: any provider-accepted id, `default` clears it, garbage is rejected
+    assert_eq!(
+        f.engine
+            .set_agent_model(&id, Some("gpt-6.1-sol".into()))
+            .unwrap()
+            .model
+            .as_deref(),
+        Some("gpt-6.1-sol")
+    );
+    assert_eq!(
+        f.engine
+            .set_agent_model(&id, Some("claude-sonnet-5-5".into()))
+            .unwrap()
+            .model
+            .as_deref(),
+        Some("claude-sonnet-5-5")
+    );
+    assert!(f
+        .engine
+        .set_agent_model(&id, Some("x; rm -rf /".into()))
+        .is_err());
+    assert_eq!(
+        f.engine
+            .set_agent_model(&id, Some("default".into()))
+            .unwrap()
+            .model,
+        None
+    );
+    // effort
+    assert_eq!(
+        f.engine
+            .set_agent_effort(&id, " HIGH ")
+            .unwrap()
+            .effort
+            .as_deref(),
+        Some("high")
+    );
+    assert!(f.engine.set_agent_effort(&id, "high; ls").is_err());
+    assert_eq!(
+        f.engine.get_agent(&id).unwrap().effort.as_deref(),
+        Some("high"),
+        "a rejected value changes nothing"
+    );
+    assert_eq!(
+        f.engine.set_agent_effort(&id, "default").unwrap().effort,
+        None
+    );
+    // permission
+    assert_eq!(
+        f.engine
+            .set_agent_permission(&id, PermissionProfile::Autonomous)
+            .unwrap()
+            .permission,
+        PermissionProfile::Autonomous
+    );
+    // every change is an event
+    let ev = f
+        .engine
+        .read(|db| db.events_since(f.engine.project_id(), 0, 10_000))
+        .unwrap();
+    assert!(ev
+        .iter()
+        .any(|e| e.payload["change"] == "effort" && e.payload["effort"] == "high"));
+    assert!(ev.iter().any(|e| e.payload["change"] == "model"));
+    assert!(ev.iter().any(|e| e.payload["change"] == "permission"));
+}
+
+#[test]
+fn effort_survives_reopening_the_database() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("maw.db");
+    let id;
+    {
+        let store = Arc::new(Store::open(&path).unwrap());
+        let engine =
+            Engine::open_utility(store, "t", "/tmp/t", OrchestratorConfig::default()).unwrap();
+        let a = engine
+            .add_agent(
+                "w",
+                ProviderKind::Codex,
+                Role::Worker,
+                Some("gpt-6-luna".into()),
+                PermissionProfile::Safe,
+                None,
+            )
+            .unwrap();
+        engine.set_agent_effort(&a.id, "xhigh").unwrap();
+        id = a.id;
+    }
+    let store = Arc::new(Store::open(&path).unwrap());
+    let engine = Engine::open_utility(store, "t", "/tmp/t", OrchestratorConfig::default()).unwrap();
+    let a = engine.get_agent(&id).unwrap();
+    assert_eq!(
+        (a.model.as_deref(), a.effort.as_deref()),
+        (Some("gpt-6-luna"), Some("xhigh"))
+    );
+}

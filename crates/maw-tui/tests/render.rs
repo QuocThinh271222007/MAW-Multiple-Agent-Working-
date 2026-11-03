@@ -555,3 +555,226 @@ fn key_driven_navigation_renders_consistently() {
         );
     }
 }
+
+// ---- narrow title bar scrolls sideways instead of hiding the key list ----
+
+fn wheel(kind: crossterm::event::MouseEventKind, row: u16) -> crossterm::event::MouseEvent {
+    crossterm::event::MouseEvent {
+        kind,
+        column: 5,
+        row,
+        modifiers: crossterm::event::KeyModifiers::NONE,
+    }
+}
+
+#[test]
+fn narrow_title_bar_can_be_scrolled_to_reveal_every_view_key() {
+    use crossterm::event::MouseEventKind::{ScrollDown, ScrollUp};
+    let mut a = app();
+    let first = at(&mut a, View::Dashboard, 60, 24);
+    let row0 = first.lines().next().unwrap().to_string();
+    assert!(
+        row0.contains('›'),
+        "hidden content to the right is marked: {row0:?}"
+    );
+    assert!(!row0.contains('‹'), "nothing hidden on the left yet");
+    assert!(
+        !row0.contains("c:Config"),
+        "the last key does not fit at 60 columns"
+    );
+
+    // wheel over the bar (row 0) scrolls it; keep going until it stops
+    for _ in 0..40 {
+        maw_tui::app::handle_mouse(&mut a, wheel(ScrollDown, 0));
+    }
+    let end = at(&mut a, View::Dashboard, 60, 24);
+    let row0 = end.lines().next().unwrap().to_string();
+    assert!(
+        row0.contains('‹') && !row0.contains('›'),
+        "scrolled to the end: {row0:?}"
+    );
+    assert!(
+        row0.contains("Config"),
+        "the last key is now readable: {row0:?}"
+    );
+    assert!(
+        row0.contains("dir:"),
+        "working folder is shown at the end of the bar: {row0:?}"
+    );
+
+    // and back
+    for _ in 0..40 {
+        maw_tui::app::handle_mouse(&mut a, wheel(ScrollUp, 0));
+    }
+    let back = at(&mut a, View::Dashboard, 60, 24);
+    assert_eq!(back.lines().next().unwrap(), first.lines().next().unwrap());
+}
+
+#[test]
+fn wheel_in_the_body_still_scrolls_the_content_not_the_bar() {
+    use crossterm::event::MouseEventKind::ScrollDown;
+    let mut a = app();
+    let _ = at(&mut a, View::Dashboard, 60, 24);
+    maw_tui::app::handle_mouse(&mut a, wheel(ScrollDown, 10));
+    assert_eq!(a.header_scroll, 0);
+    assert_eq!(a.footer_scroll, 0);
+}
+
+#[test]
+fn hint_bar_scrolls_too_and_wide_terminals_need_no_scrolling() {
+    use crossterm::event::MouseEventKind::ScrollDown;
+    let mut a = app();
+    let narrow = at(&mut a, View::Dashboard, 50, 24);
+    assert!(narrow.lines().last().unwrap().contains('›'));
+    for _ in 0..40 {
+        maw_tui::app::handle_mouse(&mut a, wheel(ScrollDown, 23));
+    }
+    let moved = at(&mut a, View::Dashboard, 50, 24);
+    let last = moved.lines().last().unwrap().to_string();
+    assert!(
+        last.contains("quit"),
+        "end of the hint list reached: {last:?}"
+    );
+    assert_eq!(a.header_scroll, 0, "only the footer moved");
+    // plenty of room: no markers at all
+    let _ = at(&mut a, View::Dashboard, 260, 40);
+    a.footer_scroll = 0;
+    a.header_scroll = 0;
+    let wide = at(&mut a, View::Dashboard, 260, 40);
+    assert!(
+        !wide.lines().next().unwrap().contains('›') && !wide.lines().last().unwrap().contains('›')
+    );
+}
+
+// ---- `!` shell, model & effort, permissions ----
+
+#[test]
+fn bang_opens_the_shell_dialog_and_submits_a_run_action() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let mut a = app();
+    let key = |c| KeyEvent::new(c, KeyModifiers::NONE);
+    handle_key(&mut a, key(KeyCode::Char('!')));
+    assert!(matches!(&a.overlay, Overlay::Dialog(d) if d.kind == maw_tui::app::DialogKind::Shell));
+    for c in "git status".chars() {
+        handle_key(&mut a, key(KeyCode::Char(c)));
+    }
+    let actions = handle_key(&mut a, key(KeyCode::Enter));
+    assert!(
+        matches!(actions.as_slice(), [maw_tui::app::Action::RunShell(c)] if c == "git status"),
+        "{actions:?}"
+    );
+    // an empty command is refused, not run
+    handle_key(&mut a, key(KeyCode::Char('!')));
+    let actions = handle_key(&mut a, key(KeyCode::Enter));
+    assert!(actions.is_empty());
+}
+
+#[test]
+fn model_dialog_offers_the_catalog_and_efforts_and_a_typed_id_wins() {
+    use maw_core::provider::ModelChoice;
+    use maw_tui::app::Action;
+    let a = app();
+    let agent = a
+        .agents()
+        .iter()
+        .find(|x| x.provider == ProviderKind::Codex)
+        .unwrap()
+        .clone();
+    let models = vec![
+        ModelChoice {
+            id: "gpt-6.1-sol".into(),
+            display_name: "Sol".into(),
+            description: String::new(),
+            is_default: true,
+            source: "provider".into(),
+            reasoning_efforts: vec!["low".into(), "high".into(), "ultra".into()],
+        },
+        ModelChoice {
+            id: "gpt-6-luna".into(),
+            display_name: "Luna".into(),
+            description: String::new(),
+            is_default: false,
+            source: "provider".into(),
+            reasoning_efforts: vec!["low".into()],
+        },
+    ];
+    let mut d = Dialog::agent_model(&agent, &models);
+    assert_eq!(
+        d.fields[0].choices,
+        vec!["default", "gpt-6.1-sol", "gpt-6-luna"]
+    );
+    assert_eq!(
+        d.fields[2].choices,
+        vec!["default", "low", "high", "ultra"],
+        "efforts come from the default model"
+    );
+    // pick a model and an effort
+    d.fields[0].choice = 2;
+    d.fields[2].choice = 2;
+    match d.submit().unwrap() {
+        Action::SetAgentModel { model, effort, .. } => assert_eq!(
+            (model.as_deref(), effort.as_deref()),
+            (Some("gpt-6-luna"), Some("high"))
+        ),
+        o => panic!("{o:?}"),
+    }
+    // a typed id overrides the selector; `default` clears both
+    d.fields[1].input.set("my-custom-model");
+    match d.submit().unwrap() {
+        Action::SetAgentModel { model, .. } => {
+            assert_eq!(model.as_deref(), Some("my-custom-model"))
+        }
+        o => panic!("{o:?}"),
+    }
+    d.fields[1].input.set("");
+    d.fields[0].choice = 0;
+    d.fields[2].choice = 0;
+    match d.submit().unwrap() {
+        Action::SetAgentModel { model, effort, .. } => assert_eq!((model, effort), (None, None)),
+        o => panic!("{o:?}"),
+    }
+    // it renders without panicking at small sizes
+    let mut app2 = App::new(Theme::new(false));
+    app2.apply_snapshot(sample_snapshot());
+    app2.overlay = Overlay::Dialog(d);
+    for (w, h) in [(80, 24), (40, 12), (20, 5)] {
+        let _ = render_text(&app2, w, h);
+    }
+}
+
+#[test]
+fn permission_dialog_maps_to_an_action() {
+    use maw_tui::app::Action;
+    let a = app();
+    let agent = a.agents()[1].clone();
+    let mut d = Dialog::agent_permission(&agent);
+    d.fields[0].choice = 2;
+    assert!(matches!(
+        d.submit().unwrap(),
+        Action::SetAgentPermission {
+            permission: PermissionProfile::Autonomous,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn output_overlay_renders_and_scrolls() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use maw_tui::app::OutputState;
+    let mut a = app();
+    a.overlay = Overlay::Output(OutputState {
+        title: "$ ls".into(),
+        lines: (0..100).map(|i| format!("line {i}")).collect(),
+        scroll: 0,
+    });
+    let t = render_text(&a, 100, 30);
+    assert!(t.contains("line 0") && t.contains("$ ls"));
+    for _ in 0..5 {
+        handle_key(&mut a, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    }
+    let t = render_text(&a, 100, 30);
+    assert!(!t.contains("line 0\n") && t.contains("line 5"));
+    handle_key(&mut a, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(matches!(a.overlay, Overlay::None));
+}

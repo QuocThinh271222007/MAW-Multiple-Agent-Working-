@@ -76,7 +76,7 @@ fn task_from_row(r: &Row) -> rusqlite::Result<Task> {
 }
 
 const AGENT_COLS: &str = "id, project_id, name, provider, model, role, state, permission, session_id, native_session_id, \
-    workspace, current_task_id, capabilities, last_heartbeat, last_error, usage, created_at";
+    workspace, current_task_id, capabilities, last_heartbeat, last_error, usage, created_at, effort";
 
 fn agent_from_row(r: &Row) -> rusqlite::Result<Agent> {
     Ok(Agent {
@@ -100,6 +100,7 @@ fn agent_from_row(r: &Row) -> rusqlite::Result<Agent> {
         last_error: r.get(14)?,
         usage: serde_json::from_str(&r.get::<_, String>(15)?).unwrap_or_default(),
         created_at: pts(&r.get::<_, String>(16)?),
+        effort: r.get(17)?,
     })
 }
 
@@ -368,12 +369,12 @@ impl<'a> Db<'a> {
     pub fn insert_agent(&self, a: &Agent) -> CoreResult<()> {
         self.0
             .execute(
-                &format!("INSERT INTO agents({AGENT_COLS}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)"),
+                &format!("INSERT INTO agents({AGENT_COLS}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)"),
                 params![
                     a.id.0, a.project_id.0, a.name, a.provider.as_str(), a.model, a.role.as_str(), a.state.as_str(),
                     a.permission.as_str(), a.session_id, a.native_session_id, a.workspace,
                     a.current_task_id.as_ref().map(|t| t.0.clone()), js(&a.capabilities), opt_ts(a.last_heartbeat),
-                    a.last_error, js(&a.usage), ts(a.created_at)
+                    a.last_error, js(&a.usage), ts(a.created_at), a.effort
                 ],
             )
             .map_err(se)?;
@@ -383,11 +384,11 @@ impl<'a> Db<'a> {
         self.0
             .execute(
                 "UPDATE agents SET name=?2, model=?3, role=?4, state=?5, permission=?6, session_id=?7, native_session_id=?8, \
-                 workspace=?9, current_task_id=?10, capabilities=?11, last_heartbeat=?12, last_error=?13, usage=?14 WHERE id=?1",
+                 workspace=?9, current_task_id=?10, capabilities=?11, last_heartbeat=?12, last_error=?13, usage=?14, effort=?15 WHERE id=?1",
                 params![
                     a.id.0, a.name, a.model, a.role.as_str(), a.state.as_str(), a.permission.as_str(), a.session_id,
                     a.native_session_id, a.workspace, a.current_task_id.as_ref().map(|t| t.0.clone()),
-                    js(&a.capabilities), opt_ts(a.last_heartbeat), a.last_error, js(&a.usage)
+                    js(&a.capabilities), opt_ts(a.last_heartbeat), a.last_error, js(&a.usage), a.effort
                 ],
             )
             .map_err(se)?;
@@ -1223,7 +1224,7 @@ mod tests {
             let s = Store::open(&path).unwrap();
             assert_eq!(
                 s.applied_migrations().unwrap(),
-                vec!["0001_init".to_string()]
+                vec!["0001_init".to_string(), "0002_agent_effort".to_string()]
             );
             s.write(|db| {
                 project(db);
@@ -1232,7 +1233,7 @@ mod tests {
             .unwrap();
         }
         let s = Store::open(&path).unwrap();
-        assert_eq!(s.applied_migrations().unwrap().len(), 1);
+        assert_eq!(s.applied_migrations().unwrap().len(), 2);
         assert_eq!(s.read(|db| db.list_projects()).unwrap().len(), 1);
     }
 

@@ -45,6 +45,7 @@ fn cfg(cwd: PathBuf, mcp: Option<McpEndpoint>, permission: PermissionProfile) ->
             "You are a terse test agent inside MAW. Follow the user's instruction literally.".into(),
         env: Default::default(),
         resume_native_id: None,
+        effort: None,
     }
 }
 

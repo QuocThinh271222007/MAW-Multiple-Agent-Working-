@@ -44,6 +44,8 @@ pub(crate) struct Shared {
     stderr_notify: tokio::sync::Notify,
     capture: Option<PathBuf>,
     request_timeout: Duration,
+    /// Reasoning effort sent with every `turn/start` (None = Codex default for the model).
+    effort: StdMutex<Option<String>>,
 }
 
 fn lock<T>(m: &StdMutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -75,6 +77,7 @@ impl Shared {
             stderr_notify: tokio::sync::Notify::new(),
             capture,
             request_timeout,
+            effort: StdMutex::new(None),
         })
     }
 
@@ -141,6 +144,10 @@ impl Shared {
     async fn respond_error(&self, id: Value, code: i64, message: &str) -> ProviderResult<()> {
         self.write_line(&json!({ "id": id, "error": { "code": code, "message": message } }))
             .await
+    }
+
+    pub(crate) fn set_effort(&self, effort: Option<String>) {
+        *lock(&self.effort) = effort;
     }
 
     pub(crate) fn set_thread(&self, id: String) {
@@ -453,11 +460,13 @@ impl AgentSession for CodexSession {
             return Ok(());
         }
         self.shared.turn_active.store(true, Ordering::SeqCst);
+        // copy out of the lock first: a std MutexGuard must not live across an await
+        let effort = lock(&self.shared.effort).clone();
         match self
             .shared
             .request(
                 "turn/start",
-                protocol::turn_start_params(&thread, &input.text),
+                protocol::turn_start_params(&thread, &input.text, effort.as_deref()),
             )
             .await
         {

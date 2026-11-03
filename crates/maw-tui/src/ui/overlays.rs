@@ -1,7 +1,7 @@
 //! Modal overlays: help, command palette, input dialogs.
 
 use super::widgets::*;
-use crate::app::{palette_matches, App, Dialog, PaletteState};
+use crate::app::{palette_matches, App, Dialog, OutputState, PaletteState};
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
@@ -31,6 +31,18 @@ pub const HELP: &[(&str, &str)] = &[
     ),
     ("G", "Set the objective (or redirect it when one is active)"),
     ("a", "Add an agent (guided dialog)"),
+    (
+        "M  or  / agent model",
+        "Choose the selected agent's model and reasoning effort (idle agents reconnect now)",
+    ),
+    (
+        "/ agent permission",
+        "Set safe / balanced / autonomous for the selected agent",
+    ),
+    (
+        "!",
+        "Run a shell command in the project folder (result in a scrollable panel)",
+    ),
     ("p / r", "Pause / resume scheduling"),
     (
         "C / D / i / m",
@@ -228,4 +240,33 @@ pub fn render_dialog(f: &mut Frame, area: Rect, app: &App, d: &Dialog) {
             f.set_cursor_position((x, y));
         }
     }
+}
+
+/// Scrollable text panel (shell command results).
+pub fn render_output(f: &mut Frame, area: Rect, app: &App, o: &OutputState) {
+    let t = &app.theme;
+    let r = centered(area, 96, area.height.saturating_sub(2).max(5));
+    f.render_widget(Clear, r);
+    let block = panel(
+        Line::from(Span::styled(
+            format!(
+                " {} · ↑↓ scroll · y copy · Esc close ",
+                truncate(&o.title, 60)
+            ),
+            t.bold(),
+        )),
+        true,
+        t,
+    );
+    let inner = block.inner(r);
+    f.render_widget(block, r);
+    let w = inner.width as usize;
+    let lines: Vec<Line> = o
+        .lines
+        .iter()
+        .skip(o.scroll)
+        .take(inner.height as usize)
+        .map(|l| Line::from(Span::raw(truncate(l, w))))
+        .collect();
+    f.render_widget(Paragraph::new(lines), inner);
 }

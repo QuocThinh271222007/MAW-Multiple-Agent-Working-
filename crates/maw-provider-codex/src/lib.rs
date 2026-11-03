@@ -139,6 +139,119 @@ impl AgentProvider for CodexProvider {
         ProviderKind::Codex
     }
 
+    /// Live query: Codex reports the models available to the logged-in account via `model/list`.
+    async fn list_models(&self) -> ProviderResult<Vec<ModelChoice>> {
+        let mut child = Command::new(&self.cfg.binary)
+            .arg("app-server")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    ProviderError::NotInstalled(self.cfg.binary.clone())
+                } else {
+                    ProviderError::Io(e.to_string())
+                }
+            })?;
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| ProviderError::Io("no stdin".into()))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| ProviderError::Io("no stdout".into()))?;
+        let mut lines = BufReader::new(stdout).lines();
+        let timeout = self.cfg.request_timeout;
+
+        async fn send(stdin: &mut tokio::process::ChildStdin, v: Value) -> ProviderResult<()> {
+            use tokio::io::AsyncWriteExt;
+            stdin.write_all(format!("{v}\n").as_bytes()).await?;
+            stdin.flush().await?;
+            Ok(())
+        }
+        async fn reply(
+            lines: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
+            id: i64,
+        ) -> ProviderResult<Value> {
+            while let Some(line) = lines.next_line().await? {
+                if let Ok(v) = serde_json::from_str::<Value>(&line) {
+                    if v.get("id").and_then(Value::as_i64) == Some(id) {
+                        if let Some(err) = v.get("error") {
+                            return Err(ProviderError::Protocol(err.to_string()));
+                        }
+                        return Ok(v.get("result").cloned().unwrap_or(Value::Null));
+                    }
+                }
+            }
+            Err(ProviderError::SessionClosed(
+                "codex app-server exited".into(),
+            ))
+        }
+
+        let result = tokio::time::timeout(timeout, async {
+            send(&mut stdin, json!({"id":1,"method":"initialize","params":{"clientInfo":{"name":"maw","title":"MAW","version":env!("CARGO_PKG_VERSION")}}})).await?;
+            reply(&mut lines, 1).await?;
+            send(&mut stdin, json!({"method":"initialized"})).await?;
+            send(&mut stdin, json!({"id":2,"method":"model/list","params":{}})).await?;
+            reply(&mut lines, 2).await
+        })
+        .await
+        .map_err(|_| ProviderError::Timeout("model/list".into()))??;
+        let _ = child.kill().await;
+
+        let models = result
+            .get("data")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter(|m| !m.get("hidden").and_then(Value::as_bool).unwrap_or(false))
+                    .filter_map(|m| {
+                        let id = m
+                            .get("model")
+                            .or_else(|| m.get("id"))?
+                            .as_str()?
+                            .to_string();
+                        Some(ModelChoice {
+                            display_name: m
+                                .get("displayName")
+                                .and_then(Value::as_str)
+                                .unwrap_or(&id)
+                                .to_string(),
+                            description: m
+                                .get("description")
+                                .and_then(Value::as_str)
+                                .unwrap_or("")
+                                .to_string(),
+                            is_default: m
+                                .get("isDefault")
+                                .and_then(Value::as_bool)
+                                .unwrap_or(false),
+                            source: "provider".into(),
+                            reasoning_efforts: m
+                                .get("supportedReasoningEfforts")
+                                .and_then(Value::as_array)
+                                .map(|e| {
+                                    e.iter()
+                                        .filter_map(|x| {
+                                            x.get("reasoningEffort")
+                                                .and_then(Value::as_str)
+                                                .map(String::from)
+                                        })
+                                        .collect()
+                                })
+                                .unwrap_or_default(),
+                            id,
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        Ok(models)
+    }
+
     async fn detect(&self) -> ProviderResult<ProviderInfo> {
         match self.run_cli(&["--version"]).await {
             Ok((true, out)) => Ok(ProviderInfo {
@@ -236,6 +349,7 @@ impl AgentProvider for CodexProvider {
             self.cfg.capture_path.clone(),
             self.cfg.request_timeout,
         );
+        shared.set_effort(cfg.effort.clone());
         tokio::spawn(shared.clone().run_reader(stdout));
         if let Some(stderr) = stderr {
             let sh = shared.clone();

@@ -88,6 +88,7 @@ pub struct SessionConfig {
     pub role: Role,
     pub cwd: PathBuf,
     pub model: Option<String>,
+    pub effort: Option<String>,
     pub permission: PermissionProfile,
     pub mcp: Option<McpEndpoint>,
     /// Role instructions appended to the provider's system/developer prompt.
@@ -231,9 +232,31 @@ pub trait AgentSession: Send + Sync {
 pub type SessionHandle = Arc<dyn AgentSession>;
 pub type EventReceiver = mpsc::Receiver<ProviderEvent>;
 
+/// A model a provider offers. `id` is what goes into `--model` / `agent.model`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelChoice {
+    pub id: String,
+    pub display_name: String,
+    pub description: String,
+    /// The provider's own default (used when no model is set).
+    pub is_default: bool,
+    /// Where the entry came from: `provider` (queried live) or `catalog` (static list).
+    pub source: String,
+    /// Reasoning/effort levels the provider reports for this model, if any.
+    pub reasoning_efforts: Vec<String>,
+}
+
 #[async_trait]
 pub trait AgentProvider: Send + Sync {
     fn kind(&self) -> ProviderKind;
+
+    /// Models selectable for this provider. Providers that cannot enumerate models say so.
+    async fn list_models(&self) -> ProviderResult<Vec<ModelChoice>> {
+        Err(ProviderError::Unsupported(
+            "this provider cannot list models".into(),
+        ))
+    }
+
     async fn detect(&self) -> ProviderResult<ProviderInfo>;
     async fn auth_status(&self) -> ProviderResult<AuthStatus>;
     /// Start a session (or resume when `cfg.resume_native_id` is set and supported).

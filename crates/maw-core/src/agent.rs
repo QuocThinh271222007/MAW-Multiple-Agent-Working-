@@ -289,6 +289,8 @@ pub struct Agent {
     pub name: String,
     pub provider: ProviderKind,
     pub model: Option<String>,
+    /// Reasoning effort for the provider (e.g. low, medium, high, xhigh, max); `None` = provider default.
+    pub effort: Option<String>,
     pub role: Role,
     pub state: AgentState,
     pub permission: PermissionProfile,
@@ -348,5 +350,39 @@ mod tests {
         for s in AgentState::ALL {
             assert_eq!(s.as_str().parse::<AgentState>().unwrap(), s);
         }
+    }
+}
+
+/// Validate a user supplied effort level. `default`/empty mean "provider default" (`None`).
+/// The set of valid levels is provider- and model-specific (see `maw models`), so only the
+/// shape is checked here; the provider reports an unsupported level when the session starts.
+pub fn normalize_effort(input: &str) -> Result<Option<String>, String> {
+    let s = input.trim().to_ascii_lowercase();
+    if s.is_empty() || s == "default" || s == "auto" {
+        return Ok(None);
+    }
+    if s.len() > 20
+        || !s
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(format!(
+            "'{input}' is not a valid effort level (use e.g. low, medium, high, xhigh, max)"
+        ));
+    }
+    Ok(Some(s))
+}
+
+#[cfg(test)]
+mod effort_tests {
+    use super::*;
+
+    #[test]
+    fn effort_normalisation() {
+        assert_eq!(normalize_effort(" High ").unwrap().as_deref(), Some("high"));
+        assert_eq!(normalize_effort("default").unwrap(), None);
+        assert_eq!(normalize_effort("").unwrap(), None);
+        assert!(normalize_effort("high; rm -rf").is_err());
+        assert!(normalize_effort(&"x".repeat(30)).is_err());
     }
 }

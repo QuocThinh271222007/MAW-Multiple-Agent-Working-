@@ -108,6 +108,12 @@ enum Cmd {
         #[arg(long)]
         fast: bool,
     },
+    /// List the models each provider offers (Codex: queried live from your account)
+    Models {
+        /// claude | codex (default: both)
+        #[arg(long)]
+        provider: Option<String>,
+    },
     /// Print the MCP tool reference
     Tools {
         #[arg(long)]
@@ -152,6 +158,9 @@ enum AgentCmd {
         role: String,
         #[arg(long)]
         model: Option<String>,
+        /// Reasoning effort, e.g. low | medium | high | xhigh | max (provider/model specific; see `maw models`)
+        #[arg(long)]
+        effort: Option<String>,
         /// safe | balanced | autonomous
         #[arg(long, default_value = "balanced")]
         permission: String,
@@ -162,6 +171,21 @@ enum AgentCmd {
     Role {
         name: String,
         role: String,
+    },
+    /// Set the model used the next time the agent connects (`default` = provider default). See `maw models`.
+    Model {
+        name: String,
+        model: String,
+    },
+    /// Set the reasoning effort used the next time the agent connects (`default` = provider default)
+    Effort {
+        name: String,
+        level: String,
+    },
+    /// Set the permission profile used the next time the agent connects: safe | balanced | autonomous
+    Permission {
+        name: String,
+        profile: String,
     },
 }
 
@@ -319,7 +343,11 @@ async fn real_main(cli: Cli) -> Result<()> {
                     .unwrap_or("-");
                 println!(
                     "{:<16} {:<10} {:<9} {:<20} {}",
-                    a.name, a.role, a.provider, a.state, t
+                    a.name,
+                    a.role.as_str(),
+                    a.provider.as_str(),
+                    a.state.as_str(),
+                    t
                 );
             }
             let pend = snap
@@ -359,6 +387,7 @@ async fn real_main(cli: Cli) -> Result<()> {
         }) => cmd_logs(&ctx, project_arg.as_deref(), lines, events, follow).await,
         Some(Cmd::Config { cmd }) => cmd_config(&ctx, cmd),
         Some(Cmd::Demo { headless, fast }) => cmd_demo(headless, fast).await,
+        Some(Cmd::Models { provider }) => cmd_models(&ctx, provider).await,
         Some(Cmd::Tools { markdown }) => {
             print_tools(markdown);
             Ok(())
@@ -487,18 +516,19 @@ fn cmd_agent(ctx: &Ctx, project: Option<&str>, cmd: AgentCmd) -> Result<()> {
     match cmd {
         AgentCmd::List => {
             println!(
-                "{:<16} {:<10} {:<9} {:<11} {:<14} MODEL",
-                "NAME", "ROLE", "PROVIDER", "PERMISSION", "STATE"
+                "{:<16} {:<10} {:<9} {:<11} {:<14} {:<22} EFFORT",
+                "NAME", "ROLE", "PROVIDER", "PERMISSION", "STATE", "MODEL"
             );
             for a in anyhow_core(eng.list_agents())? {
                 println!(
-                    "{:<16} {:<10} {:<9} {:<11} {:<14} {}",
+                    "{:<16} {:<10} {:<9} {:<11} {:<14} {:<22} {}",
                     a.name,
-                    a.role,
-                    a.provider,
+                    a.role.as_str(),
+                    a.provider.as_str(),
                     a.permission.as_str(),
-                    a.state,
-                    a.model.unwrap_or_else(|| "(default)".into())
+                    a.state.as_str(),
+                    a.model.unwrap_or_else(|| "(default)".into()),
+                    a.effort.unwrap_or_else(|| "(default)".into())
                 );
             }
         }
@@ -507,6 +537,7 @@ fn cmd_agent(ctx: &Ctx, project: Option<&str>, cmd: AgentCmd) -> Result<()> {
             provider,
             role,
             model,
+            effort,
             permission,
         } => {
             let provider: ProviderKind =
@@ -517,13 +548,18 @@ fn cmd_agent(ctx: &Ctx, project: Option<&str>, cmd: AgentCmd) -> Result<()> {
             if provider == ProviderKind::Mock {
                 bail!("mock agents are only available through `maw demo`");
             }
-            let a = anyhow_core(eng.add_agent(&name, provider, role, model, permission, None))?;
+            let mut a = anyhow_core(eng.add_agent(&name, provider, role, model, permission, None))?;
+            if let Some(e) = effort {
+                a = anyhow_core(eng.set_agent_effort(&a.id, &e))?;
+            }
             println!(
-                "Added {} ({} / {} / {})",
+                "Added {} ({} / {} / {}; model {}, effort {})",
                 a.name,
                 a.provider,
                 a.role,
-                a.permission.as_str()
+                a.permission.as_str(),
+                a.model.as_deref().unwrap_or("default"),
+                a.effort.as_deref().unwrap_or("default")
             );
         }
         AgentCmd::Status { name } => {
@@ -535,6 +571,31 @@ fn cmd_agent(ctx: &Ctx, project: Option<&str>, cmd: AgentCmd) -> Result<()> {
             let role: Role = role.parse().map_err(|e: String| anyhow::anyhow!(e))?;
             let a = anyhow_core(eng.set_agent_role(&a.id, role))?;
             println!("{} is now {}", a.name, a.role);
+        }
+        AgentCmd::Model { name, model } => {
+            let a = anyhow_core(eng.resolve_agent(&name))?;
+            let a = anyhow_core(eng.set_agent_model(&a.id, Some(model)))?;
+            println!("{} model = {} (applies the next time it connects; a running MAW picks it up via the TUI palette `agent: set model`)", a.name, a.model.as_deref().unwrap_or("(provider default)"));
+        }
+        AgentCmd::Effort { name, level } => {
+            let a = anyhow_core(eng.resolve_agent(&name))?;
+            let a = anyhow_core(eng.set_agent_effort(&a.id, &level))?;
+            println!(
+                "{} effort = {} (applies the next time it connects; levels differ per model, see `maw models`)",
+                a.name,
+                a.effort.as_deref().unwrap_or("provider default")
+            );
+        }
+        AgentCmd::Permission { name, profile } => {
+            let a = anyhow_core(eng.resolve_agent(&name))?;
+            let profile: PermissionProfile =
+                profile.parse().map_err(|e: String| anyhow::anyhow!(e))?;
+            let a = anyhow_core(eng.set_agent_permission(&a.id, profile))?;
+            println!(
+                "{} permission = {} (applies the next time it connects)",
+                a.name,
+                a.permission.as_str()
+            );
         }
     }
     Ok(())
@@ -965,4 +1026,43 @@ fn _unused(_: PathBuf) {}
 /// `--follow` runs until the process is interrupted (Ctrl+C); this indirection keeps the loop explicit.
 fn follow_done() -> bool {
     false
+}
+
+async fn cmd_models(ctx: &Ctx, provider: Option<String>) -> Result<()> {
+    let want: Vec<ProviderKind> = match provider {
+        Some(p) => vec![p
+            .parse::<ProviderKind>()
+            .map_err(|e: String| anyhow::anyhow!(e))?],
+        None => vec![ProviderKind::Claude, ProviderKind::Codex],
+    };
+    for kind in want {
+        let p = match kind {
+            ProviderKind::Claude => providers::claude(ctx.cfg.claude.path.clone()),
+            ProviderKind::Codex => providers::codex(ctx.cfg.codex.path.clone()),
+            ProviderKind::Mock => continue,
+        };
+        println!("{kind}:");
+        match tokio::time::timeout(Duration::from_secs(45), p.list_models()).await {
+            Ok(Ok(models)) => {
+                for m in models {
+                    let eff = if m.reasoning_efforts.is_empty() {
+                        String::new()
+                    } else {
+                        format!("  [effort: {}]", m.reasoning_efforts.join("/"))
+                    };
+                    println!(
+                        "  {:<22}{} {}{}",
+                        m.id,
+                        if m.is_default { " (default)" } else { "" },
+                        m.description,
+                        eff
+                    );
+                }
+                println!("  use: maw agent model <name> <id>   (or `default`)");
+            }
+            Ok(Err(e)) => println!("  unavailable: {e}"),
+            Err(_) => println!("  timed out"),
+        }
+    }
+    Ok(())
 }

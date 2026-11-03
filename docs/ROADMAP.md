@@ -6,9 +6,14 @@
 - Measured (debug build, 3 live agents): `maw` ≈ 30 MB RSS, ≈ 2% CPU; each provider process 215–270 MB.
 
 ## Unverified since last full run (do these first)
-1. `./scripts/wsl-cargo.sh clippy --workspace --all-targets && ... test --workspace` (orchestrator tests incl. the new nudge test passed; whole workspace not re-run).
+1. ~~Full gate~~ done after the model/effort work: fmt clean, clippy 0 warnings, 215 tests passed.
 2. Re-run the real 3-agent scenario (`~/real_auth2.sh` pattern): the last attempt was cut off by the **Claude 5-hour usage limit** (MAW correctly showed RATE_LIMITED and recorded the reset time), so the nudge/continuous-integration path has only been tested with the mock provider.
 3. Commit state: see `git log`.
+
+## Added later in session 1
+- Per-agent **model** and **effort** (migration `0002_agent_effort`), `maw models`, `maw agent model|effort|permission`, TUI picker, provider plumbing (Codex `turn/start.effort`, Claude `--effort`). Verified: unit/contract tests and live `maw models`; Claude ids `claude-haiku-5-5`, `claude-sonnet-5-5`, `claude-opus-5-5` were exercised live (`claude-fable-5-1` is accepted but the account was out of credits for it). **Not yet verified live:** that a non-default effort level actually changes behaviour in a running Codex/Claude agent session.
+- TUI `!` shell, scrolling title/hint bars, working-folder display.
+- Test totals after this work: 215 passed, 0 failed, 6 live tests ignored.
 
 ## Not done / known issues
 - Native Windows build untested (use WSL2). TUI interactive feel not yet exercised in a real terminal (tests only). Mouse is scroll-only.

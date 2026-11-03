@@ -5,9 +5,10 @@ use crate::input::TextInput;
 use crate::theme::Theme;
 use chrono::{DateTime, Utc};
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind};
-use maw_core::provider::ApprovalDecision;
+use maw_core::provider::{ApprovalDecision, ModelChoice};
 use maw_core::*;
 use maw_orchestrator::{Snapshot, TranscriptLine};
+use std::cell::Cell;
 use std::collections::HashMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -133,6 +134,20 @@ pub enum Action {
         text: String,
         interrupt: bool,
     },
+    /// Change the model and reasoning effort used by the agent's next session
+    /// (`None` = provider default for each).
+    SetAgentModel {
+        agent: AgentId,
+        model: Option<String>,
+        effort: Option<String>,
+    },
+    /// Change the permission profile used by the agent's next session.
+    SetAgentPermission {
+        agent: AgentId,
+        permission: PermissionProfile,
+    },
+    /// Run a shell command in the project directory (user initiated, `!`).
+    RunShell(String),
     Pause,
     Resume,
     RequeueTask(String),
@@ -179,6 +194,9 @@ pub enum Cmd {
     DisconnectAgent,
     InterruptAgent,
     MessageAgent,
+    AgentModel,
+    AgentPermission,
+    Shell,
     Pause,
     Resume,
     TaskRequeue,
@@ -280,6 +298,21 @@ pub const COMMANDS: &[CommandSpec] = &[
         cmd: Cmd::MessageAgent,
         name: "agent message",
         desc: "send a message to the selected agent (m)",
+    },
+    CommandSpec {
+        cmd: Cmd::AgentModel,
+        name: "agent model",
+        desc: "choose the selected agent's model; idle agents reconnect now (M)",
+    },
+    CommandSpec {
+        cmd: Cmd::AgentPermission,
+        name: "agent permission",
+        desc: "set safe / balanced / autonomous for the selected agent",
+    },
+    CommandSpec {
+        cmd: Cmd::Shell,
+        name: "shell",
+        desc: "run a shell command in the project directory (!)",
     },
     CommandSpec {
         cmd: Cmd::Pause,
@@ -403,6 +436,15 @@ pub enum Overlay {
     Help,
     Palette(PaletteState),
     Dialog(Dialog),
+    /// Scrollable text result (e.g. of a `!` shell command).
+    Output(OutputState),
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct OutputState {
+    pub title: String,
+    pub lines: Vec<String>,
+    pub scroll: usize,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -466,6 +508,9 @@ pub enum DialogKind {
     RedirectGoal,
     AddAgent,
     MessageAgent { agent: String },
+    AgentModel { agent: AgentId },
+    AgentPermission { agent: AgentId },
+    Shell,
     VerifyTask { key: String },
     ReleaseTask { key: String },
     CancelTask { key: String },
@@ -517,6 +562,90 @@ impl Dialog {
                 Field::text("Model", false, "optional"),
                 Field::select("Permissions", &["safe", "balanced", "autonomous"], 1),
             ],
+            focus: 0,
+            error: None,
+        }
+    }
+    /// Model + effort picker. `models` is the provider's catalog (may be empty while it loads);
+    /// a custom id can always be typed and wins over the selector.
+    pub fn agent_model(agent: &Agent, models: &[ModelChoice]) -> Dialog {
+        let mut ids: Vec<String> = vec!["default".into()];
+        ids.extend(models.iter().map(|m| m.id.clone()));
+        let cur = agent.model.clone().unwrap_or_else(|| "default".into());
+        let idx = ids.iter().position(|i| *i == cur).unwrap_or(0);
+        let choices: Vec<&str> = ids.iter().map(|s| s.as_str()).collect();
+        // effort levels reported for the chosen/default model, else the common set
+        let mut efforts: Vec<String> = vec!["default".into()];
+        let reported: Vec<String> = models
+            .iter()
+            .find(|m| {
+                Some(&m.id) == agent.model.as_ref() || (agent.model.is_none() && m.is_default)
+            })
+            .map(|m| m.reasoning_efforts.clone())
+            .unwrap_or_default();
+        if reported.is_empty() {
+            efforts.extend(["low", "medium", "high", "xhigh", "max"].map(String::from));
+        } else {
+            efforts.extend(reported);
+        }
+        let eidx = agent
+            .effort
+            .as_ref()
+            .and_then(|e| efforts.iter().position(|x| x == e))
+            .unwrap_or(0);
+        let echoices: Vec<&str> = efforts.iter().map(|s| s.as_str()).collect();
+        let detail = models
+            .iter()
+            .map(|m| m.id.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        Dialog {
+            title: format!("Model & effort for {} ({})", agent.name, agent.provider),
+            kind: DialogKind::AgentModel {
+                agent: agent.id.clone(),
+            },
+            fields: vec![
+                Field::select("Model", &choices, idx),
+                Field {
+                    required: false,
+                    hint: if detail.is_empty() {
+                        "type any model id the provider accepts".into()
+                    } else {
+                        format!("optional override; known: {detail}")
+                    },
+                    ..Field::text("Custom model id", false, "")
+                },
+                Field::select("Effort", &echoices, eidx),
+            ],
+            focus: 0,
+            error: None,
+        }
+    }
+    pub fn agent_permission(agent: &Agent) -> Dialog {
+        let idx = match agent.permission {
+            PermissionProfile::Safe => 0,
+            PermissionProfile::Balanced => 1,
+            PermissionProfile::Autonomous => 2,
+        };
+        Dialog {
+            title: format!("Permissions for {}", agent.name),
+            kind: DialogKind::AgentPermission {
+                agent: agent.id.clone(),
+            },
+            fields: vec![Field::select(
+                "Profile (applies on reconnect)",
+                &["safe", "balanced", "autonomous"],
+                idx,
+            )],
+            focus: 0,
+            error: None,
+        }
+    }
+    pub fn shell() -> Dialog {
+        Dialog {
+            title: "Run in the project folder (output shown after it finishes, 60 s limit)".into(),
+            kind: DialogKind::Shell,
+            fields: vec![Field::text("$", true, "e.g. git status")],
             focus: 0,
             error: None,
         }
@@ -607,6 +736,21 @@ impl Dialog {
                     permission: v(4).parse().map_err(|e: String| e)?,
                 }
             }
+            DialogKind::AgentModel { agent } => {
+                // a typed id wins over the selector
+                let custom = v(1);
+                let chosen = if custom.is_empty() { v(0) } else { custom };
+                Action::SetAgentModel {
+                    agent: agent.clone(),
+                    model: Some(chosen).filter(|m| !m.is_empty() && m != "default"),
+                    effort: Some(v(2)).filter(|e| !e.is_empty() && e != "default"),
+                }
+            }
+            DialogKind::AgentPermission { agent } => Action::SetAgentPermission {
+                agent: agent.clone(),
+                permission: v(0).parse().map_err(|e: String| e)?,
+            },
+            DialogKind::Shell => Action::RunShell(v(0)),
             DialogKind::MessageAgent { agent } => Action::MessageAgent {
                 agent: agent.clone(),
                 text: v(0),
@@ -673,6 +817,14 @@ pub struct App {
     pub plan_history: Vec<PlanRevision>,
     pub config: OrchestratorConfig,
     pub clipboard: String,
+    /// Models each provider offers (filled in the background at startup).
+    pub models: HashMap<ProviderKind, Vec<ModelChoice>>,
+    /// Horizontal scroll offsets of the title bar and the hint bar (mouse wheel over the bar).
+    pub header_scroll: usize,
+    pub footer_scroll: usize,
+    /// Largest useful offsets, written by the renderer so the reducer can clamp.
+    pub header_max: Cell<usize>,
+    pub footer_max: Cell<usize>,
     pub now: DateTime<Utc>,
     pub size: (u16, u16),
     pub quit: bool,
@@ -709,6 +861,11 @@ impl App {
             plan_history: vec![],
             config: OrchestratorConfig::default(),
             clipboard: String::new(),
+            models: HashMap::new(),
+            header_scroll: 0,
+            footer_scroll: 0,
+            header_max: Cell::new(0),
+            footer_max: Cell::new(0),
             now: Utc::now(),
             size: (120, 36),
             quit: false,
@@ -954,6 +1111,18 @@ pub fn run_cmd(app: &mut App, cmd: Cmd) -> Vec<Action> {
                 app.overlay = Overlay::Dialog(Dialog::message(&a.name));
             }
         }
+        Cmd::AgentModel => {
+            if let Some(a) = need_agent(app) {
+                let models = app.models.get(&a.provider).cloned().unwrap_or_default();
+                app.overlay = Overlay::Dialog(Dialog::agent_model(&a, &models));
+            }
+        }
+        Cmd::AgentPermission => {
+            if let Some(a) = need_agent(app) {
+                app.overlay = Overlay::Dialog(Dialog::agent_permission(&a));
+            }
+        }
+        Cmd::Shell => app.overlay = Overlay::Dialog(Dialog::shell()),
         Cmd::Pause => return vec![Action::Pause],
         Cmd::Resume => return vec![Action::Resume],
         Cmd::TaskRequeue => {
@@ -1023,6 +1192,39 @@ pub fn run_cmd(app: &mut App, cmd: Cmd) -> Vec<Action> {
 }
 
 pub fn handle_mouse(app: &mut App, m: MouseEvent) -> Vec<Action> {
+    // Wheel over the title bar or the hint bar scrolls that bar sideways (Shift+wheel and
+    // horizontal wheels work anywhere on it), so long key lists can always be read.
+    let on_header = m.row == 0;
+    let on_footer = app.size.1 > 0 && m.row == app.size.1 - 1;
+    let dir: Option<isize> = match m.kind {
+        MouseEventKind::ScrollLeft => Some(-1),
+        MouseEventKind::ScrollRight => Some(1),
+        MouseEventKind::ScrollUp
+            if on_header || on_footer || m.modifiers.contains(KeyModifiers::SHIFT) =>
+        {
+            Some(-1)
+        }
+        MouseEventKind::ScrollDown
+            if on_header || on_footer || m.modifiers.contains(KeyModifiers::SHIFT) =>
+        {
+            Some(1)
+        }
+        _ => None,
+    };
+    if let Some(d) = dir {
+        const STEP: usize = 8;
+        let (off, max) = if on_footer && !on_header {
+            (&mut app.footer_scroll, app.footer_max.get())
+        } else {
+            (&mut app.header_scroll, app.header_max.get())
+        };
+        *off = if d < 0 {
+            off.saturating_sub(STEP)
+        } else {
+            (*off + STEP).min(max)
+        };
+        return vec![];
+    }
     let code = match m.kind {
         MouseEventKind::ScrollUp => KeyCode::Up,
         MouseEventKind::ScrollDown => KeyCode::Down,
@@ -1033,6 +1235,32 @@ pub fn handle_mouse(app: &mut App, m: MouseEvent) -> Vec<Action> {
         out.extend(handle_key(app, KeyEvent::new(code, KeyModifiers::NONE)));
     }
     out
+}
+
+fn output_key(app: &mut App, mut o: OutputState, key: KeyEvent) -> Vec<Action> {
+    let page = (app.size.1 as usize).saturating_sub(8).max(3);
+    let max = o.lines.len().saturating_sub(1);
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter => return vec![],
+        KeyCode::Up | KeyCode::Char('k') => o.scroll = o.scroll.saturating_sub(1),
+        KeyCode::Down | KeyCode::Char('j') => o.scroll = (o.scroll + 1).min(max),
+        KeyCode::PageUp => o.scroll = o.scroll.saturating_sub(page),
+        KeyCode::PageDown => o.scroll = (o.scroll + page).min(max),
+        KeyCode::Home => o.scroll = 0,
+        KeyCode::End => o.scroll = max,
+        KeyCode::Char('y') => {
+            let text = o.lines.join(
+                "
+",
+            );
+            app.clipboard = text.clone();
+            app.overlay = Overlay::Output(o);
+            return vec![Action::Copy(text)];
+        }
+        _ => {}
+    }
+    app.overlay = Overlay::Output(o);
+    vec![]
 }
 
 pub fn handle_key(app: &mut App, key: KeyEvent) -> Vec<Action> {
@@ -1047,6 +1275,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Vec<Action> {
     match std::mem::take(&mut app.overlay) {
         Overlay::Dialog(d) => return dialog_key(app, d, key),
         Overlay::Palette(p) => return palette_key(app, p, key),
+        Overlay::Output(o) => return output_key(app, o, key),
         Overlay::Help => {
             if !matches!(
                 key.code,
@@ -1198,6 +1427,8 @@ fn normal_key(app: &mut App, key: KeyEvent) -> Vec<Action> {
             app.overlay = Overlay::Help;
             return vec![];
         }
+        KeyCode::Char('!') => return run_cmd(app, Cmd::Shell),
+        KeyCode::Char('M') if in_agent_view => return run_cmd(app, Cmd::AgentModel),
         KeyCode::Char('q') => return run_cmd(app, Cmd::Quit),
         KeyCode::Esc => {
             if app.search.is_some() {
@@ -2016,7 +2247,7 @@ mod tests {
             MouseEvent {
                 kind: MouseEventKind::ScrollUp,
                 column: 0,
-                row: 0,
+                row: 10, // inside the body (row 0 is the title bar, which scrolls sideways)
                 modifiers: KeyModifiers::NONE,
             },
         );

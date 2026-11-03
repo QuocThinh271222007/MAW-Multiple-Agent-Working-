@@ -25,6 +25,19 @@ maw doctor && maw auth codex && maw auth claude
 
 Keep project repositories **inside the WSL filesystem** (`~/code/...`). Under `/mnt/c/...` git and builds are much slower and file-watching semantics differ; `maw doctor` warns when the working directory is a Windows mount.
 
+## Typing `maw` from any directory
+
+Inside WSL: `cargo install --path crates/maw-cli --locked` puts `maw` in `~/.cargo/bin` (already on PATH). Re-run it after pulling changes.
+
+From Windows PowerShell/CMD, put a `maw.cmd` launcher on PATH (e.g. in `%LOCALAPPDATA%\Microsoft\WindowsApps`, which is already on PATH). It runs the WSL build in the directory you are currently in:
+
+```bat
+@echo off
+wsl.exe -d Ubuntu-24.04 --cd "%CD%" -e bash -lc "exec maw \"$@\"" maw %*
+```
+
+Change `Ubuntu-24.04` to your distro name (`wsl -l`). Then `cd` into any project and type `maw`. Projects under `/mnt/c/...` work but are slower than repos inside the WSL filesystem.
+
 ## Paths
 
 Pass Windows paths if you like: under WSL, `maw --project 'C:\Users\me\repo'` is translated to `/mnt/c/Users/me/repo` (`platform::windows_to_wsl_path`, unit-tested). Terminal: any UTF-8 terminal (Windows Terminal recommended); set `NO_COLOR=1` or `maw config set ui.monochrome=true` for the monochrome theme.

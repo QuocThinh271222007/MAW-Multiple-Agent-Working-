@@ -5,7 +5,9 @@
 //! Blocking SQLite work runs on `spawn_blocking`; provider I/O only ever happens inside
 //! spawned action tasks, never on the render path.
 
-use crate::app::{handle_key, handle_mouse, Action, App, Level, TaskDetail, View};
+use crate::app::{
+    handle_key, handle_mouse, Action, App, Level, OutputState, Overlay, TaskDetail, View,
+};
 use crate::theme::Theme;
 use crate::ui;
 use anyhow::{Context, Result};
@@ -16,7 +18,8 @@ use crossterm::terminal::{
 };
 use crossterm::{cursor, execute};
 use futures::StreamExt;
-use maw_core::CoreError;
+use maw_core::provider::ModelChoice;
+use maw_core::{CoreError, ProviderKind};
 use maw_orchestrator::{Actor, Engine, Snapshot, Supervisor, TaskPatch};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
@@ -224,6 +227,78 @@ fn apply_refresh(app: &mut App, sup: &Supervisor, engine: &Engine, d: RefreshDat
 
 enum UiMsg {
     Toast(String, Level),
+    Models(ProviderKind, Vec<ModelChoice>),
+    Shell { cmd: String, lines: Vec<String> },
+}
+
+/// Run a user-typed shell command in the project folder: 60 s limit, output capped and redacted.
+/// This is an explicit user action (`!`), never something an agent can trigger.
+async fn run_shell(cwd: String, cmd: String) -> Vec<String> {
+    use tokio::io::AsyncReadExt;
+    use tokio::process::Command;
+    const CAP: usize = 64 * 1024;
+    let mut c = if cfg!(windows) {
+        let mut c = Command::new("cmd");
+        c.args(["/C", &cmd]);
+        c
+    } else {
+        let mut c = Command::new("bash");
+        c.args(["-lc", &cmd]);
+        c
+    };
+    c.current_dir(&cwd)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = match c.spawn() {
+        Ok(ch) => ch,
+        Err(e) => return vec![format!("could not start the command: {e}")],
+    };
+    let (mut out, mut err) = (child.stdout.take(), child.stderr.take());
+    let work = async {
+        let (mut so, mut se) = (Vec::new(), Vec::new());
+        let a = async {
+            if let Some(o) = out.as_mut() {
+                let _ = o.take(CAP as u64).read_to_end(&mut so).await;
+            }
+        };
+        let b = async {
+            if let Some(e) = err.as_mut() {
+                let _ = e.take(CAP as u64).read_to_end(&mut se).await;
+            }
+        };
+        tokio::join!(a, b);
+        let status = child.wait().await;
+        (so, se, status)
+    };
+    let mut lines = vec![format!("$ {cmd}"), format!("(in {cwd})"), String::new()];
+    match tokio::time::timeout(Duration::from_secs(60), work).await {
+        Ok((so, se, status)) => {
+            let text = format!(
+                "{}{}",
+                String::from_utf8_lossy(&so),
+                String::from_utf8_lossy(&se)
+            );
+            lines.extend(
+                maw_core::redact::redact(&text)
+                    .lines()
+                    .map(|l| l.replace("	", "    ")),
+            );
+            lines.push(String::new());
+            lines.push(match status {
+                Ok(s) => format!(
+                    "[exit {}]",
+                    s.code()
+                        .map(|c| c.to_string())
+                        .unwrap_or_else(|| "signal".into())
+                ),
+                Err(e) => format!("[wait failed: {e}]"),
+            });
+        }
+        Err(_) => lines.push("[timed out after 60 s and was killed]".into()),
+    }
+    lines
 }
 
 fn err_text(e: impl std::fmt::Display) -> String {
@@ -246,7 +321,38 @@ async fn execute(
         }};
     }
     match action {
-        Action::Quit | Action::Copy(_) => Ok(String::new()),
+        Action::Quit | Action::Copy(_) | Action::RunShell(_) => Ok(String::new()),
+        Action::SetAgentModel {
+            agent,
+            model,
+            effort,
+        } => {
+            let (e1, a1, m1, f1) = (engine.clone(), agent.clone(), model.clone(), effort.clone());
+            blk(move || -> Result<(), CoreError> {
+                e1.set_agent_model(&a1, m1)?;
+                e1.set_agent_effort(&a1, f1.as_deref().unwrap_or("default"))?;
+                Ok(())
+            })
+            .await
+            .map_err(err_text)?
+            .map_err(err_text)?;
+            let note = sup.reconfigure_agent(&agent).await.map_err(err_text)?;
+            Ok(format!(
+                "model = {}, effort = {} — {note}",
+                model.as_deref().unwrap_or("default"),
+                effort.as_deref().unwrap_or("default")
+            ))
+        }
+        Action::SetAgentPermission { agent, permission } => {
+            let e1 = engine.clone();
+            let a1 = agent.clone();
+            blk(move || e1.set_agent_permission(&a1, permission))
+                .await
+                .map_err(err_text)?
+                .map_err(err_text)?;
+            let note = sup.reconfigure_agent(&agent).await.map_err(err_text)?;
+            Ok(format!("permissions = {} — {note}", permission.as_str()))
+        }
         Action::CreateGoal { text, criteria } => {
             on_engine!(e, e.create_goal(&text, criteria))?;
             Ok("objective set — the Leader will start planning".into())
@@ -412,6 +518,24 @@ async fn event_loop(engine: &Arc<Engine>, sup: &Arc<Supervisor>, opts: &TuiOptio
     let mut clock = tokio::time::interval(Duration::from_secs(1));
     clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let (msg_tx, mut msg_rx) = mpsc::channel::<UiMsg>(64);
+    // Model catalogs: one background query per provider in use (Codex answers live).
+    if let Ok(agents) = engine.list_agents() {
+        let mut kinds: Vec<ProviderKind> = agents
+            .iter()
+            .map(|a| a.provider)
+            .filter(|k| *k != ProviderKind::Mock)
+            .collect();
+        kinds.sort_by_key(|k| k.as_str());
+        kinds.dedup();
+        for kind in kinds {
+            let (s, tx) = (sup.clone(), msg_tx.clone());
+            tokio::spawn(async move {
+                if let Ok(list) = s.list_models(kind).await {
+                    let _ = tx.send(UiMsg::Models(kind, list)).await;
+                }
+            });
+        }
+    }
 
     let (mut need_refresh, mut need_draw) = (true, true);
     let mut last_draw = Instant::now()
@@ -472,7 +596,16 @@ async fn event_loop(engine: &Arc<Engine>, sup: &Arc<Supervisor>, opts: &TuiOptio
                 Err(_) => ui_open = false,
             },
             _ = clock.tick() => { need_draw = true; app.now = Utc::now(); }
-            Some(UiMsg::Toast(t, l)) = msg_rx.recv() => { app.set_toast(t, l); need_draw = true; }
+            Some(msg) = msg_rx.recv() => {
+                match msg {
+                    UiMsg::Toast(t, l) => app.set_toast(t, l),
+                    UiMsg::Models(kind, list) => { app.models.insert(kind, list); }
+                    UiMsg::Shell { cmd, lines } => {
+                        app.overlay = Overlay::Output(OutputState { title: format!("$ {cmd}"), lines, scroll: 0 });
+                    }
+                }
+                need_draw = true;
+            }
             _ = tokio::time::sleep(wait), if pending => {}
         }
 
@@ -483,6 +616,14 @@ async fn event_loop(engine: &Arc<Engine>, sup: &Arc<Supervisor>, opts: &TuiOptio
                     let mut out = stdout();
                     let _ = out.write_all(osc52(&text).as_bytes());
                     let _ = out.flush();
+                }
+                Action::RunShell(cmd) => {
+                    let (cwd, tx) = (engine.project().path.clone(), msg_tx.clone());
+                    app.set_toast(format!("running: {cmd}"), Level::Info);
+                    tokio::spawn(async move {
+                        let lines = run_shell(cwd, cmd.clone()).await;
+                        let _ = tx.send(UiMsg::Shell { cmd, lines }).await;
+                    });
                 }
                 other => {
                     let (e, s, tx) = (engine.clone(), sup.clone(), msg_tx.clone());

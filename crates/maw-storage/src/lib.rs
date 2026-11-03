@@ -12,10 +12,16 @@ use rusqlite::Connection;
 use std::path::Path;
 use std::sync::Mutex;
 
-const MIGRATIONS: &[(&str, &str)] = &[(
-    "0001_init",
-    include_str!("../../../migrations/0001_init.sql"),
-)];
+const MIGRATIONS: &[(&str, &str)] = &[
+    (
+        "0001_init",
+        include_str!("../../../migrations/0001_init.sql"),
+    ),
+    (
+        "0002_agent_effort",
+        include_str!("../../../migrations/0002_agent_effort.sql"),
+    ),
+];
 
 pub struct Store {
     conn: Mutex<Connection>,

@@ -50,6 +50,7 @@ pub fn render(f: &mut Frame, app: &App) {
         Overlay::Help => overlays::render_help(f, rows[1], app),
         Overlay::Palette(p) => overlays::render_palette(f, rows[1], app, p),
         Overlay::Dialog(d) => overlays::render_dialog(f, rows[1], app, d),
+        Overlay::Output(o) => overlays::render_output(f, rows[1], app, o),
     }
 }
 
@@ -70,11 +71,11 @@ fn render_body(f: &mut Frame, area: Rect, app: &App) {
 fn render_header(f: &mut Frame, area: Rect, app: &App) {
     let t = &app.theme;
     let w = area.width as usize;
-    let (project, paused) = app
+    let (project, paused, path) = app
         .snap
         .as_ref()
-        .map(|s| (s.project.name.clone(), s.paused))
-        .unwrap_or_else(|| ("—".into(), false));
+        .map(|s| (s.project.name.clone(), s.paused, s.project.path.clone()))
+        .unwrap_or_else(|| ("—".into(), false, String::new()));
     let mode = if app.config.max_concurrency > 1 {
         "Parallel"
     } else {
@@ -82,34 +83,72 @@ fn render_header(f: &mut Frame, area: Rect, app: &App) {
     };
     let sched = if paused { "⏸ PAUSED" } else { "▶ running" };
     let mut text = format!(
-        " MAW ─ Multiple Agent Working │ {project} │ Agents: {} │ {mode} │ {sched} ",
+        " MAW ─ Multiple Agent Working │ {project} │ {} │ Agents: {} │ {mode} │ {sched} ",
+        app.view.title(),
         app.agents().len()
     );
-    if w >= 110 {
-        text.push('│');
-        for v in View::TABS {
-            if v == app.view || (v == View::Agents && app.view == View::AgentDetail) {
-                text.push_str(&format!(" [{}:{}]", v.key(), v.title()));
-            } else {
-                text.push_str(&format!("  {}:{}", v.key(), v.title()));
-            }
+    // The view keys are always present in full; on a narrow terminal the bar scrolls sideways
+    // (mouse wheel over it) instead of cutting them off. The working folder comes last so it
+    // never pushes the keys out of sight.
+    text.push('│');
+    for v in View::TABS {
+        if v == app.view || (v == View::Agents && app.view == View::AgentDetail) {
+            text.push_str(&format!(" [{}:{}]", v.key(), v.title()));
+        } else {
+            text.push_str(&format!("  {}:{}", v.key(), v.title()));
         }
-    } else if w >= 70 {
-        text.push_str(&format!("│ {}", app.view.title()));
     }
-    let mut line = truncate(&text, w);
-    let pad = w.saturating_sub(unicode_width::UnicodeWidthStr::width(line.as_str()));
-    line.push_str(&" ".repeat(pad));
+    if !path.is_empty() {
+        text.push_str(&format!("  │ dir: {path} "));
+    }
+    let line = scrolled(&text, app.header_scroll, w, &app.header_max);
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(line, t.header()))),
         area,
     );
 }
 
+/// Show a window of `text` starting at `offset` (clamped), exactly `width` columns wide, with
+/// `‹` / `›` markers when content is hidden on that side. Records the largest useful offset.
+fn scrolled(text: &str, offset: usize, width: usize, max_cell: &std::cell::Cell<usize>) -> String {
+    use unicode_width::UnicodeWidthChar;
+    let chars: Vec<char> = text.chars().collect();
+    let total: usize = chars.iter().map(|c| c.width().unwrap_or(0)).sum();
+    let max_off = total.saturating_sub(width);
+    max_cell.set(max_off);
+    let off = offset.min(max_off);
+    // skip `off` columns, then take up to `width` columns
+    let (mut skipped, mut used) = (0usize, 0usize);
+    let mut out = String::new();
+    for c in chars {
+        let cw = c.width().unwrap_or(0);
+        if skipped < off {
+            skipped += cw;
+            continue;
+        }
+        if used + cw > width {
+            break;
+        }
+        out.push(c);
+        used += cw;
+    }
+    out.push_str(&" ".repeat(width.saturating_sub(used)));
+    // markers (replace the first/last visible cell)
+    let mut v: Vec<char> = out.chars().collect();
+    if off > 0 && !v.is_empty() {
+        v[0] = '‹';
+    }
+    if off < max_off && !v.is_empty() {
+        let last = v.len() - 1;
+        v[last] = '›';
+    }
+    v.into_iter().collect()
+}
+
 fn footer_hint(app: &App) -> &'static str {
     match app.view {
-        View::Dashboard => "Tab panel · 1-9 agent · Enter open · G goal · a add · p/r pause/resume · / cmds · ? help · q quit",
-        View::Agents => "←→ select · Enter detail · C connect · D disconnect · i interrupt · m message · ? help",
+        View::Dashboard => "Tab panel · 1-9 agent · Enter open · G goal · a add · p/r pause/resume · M model/effort · ! shell · / cmds · ? help · q quit",
+        View::Agents => "←→ select · Enter detail · C connect · D disconnect · i interrupt · m message · M model/effort · ! shell · ? help",
         View::AgentDetail => "↑↓ PgUp/PgDn scroll · / search n/N · y copy · Y copy all · i interrupt · m message · Esc back",
         View::Tasks => "↑↓←→ select · Enter detail · R requeue · e release · x cancel · v verify · ? help",
         View::Goal => "↑↓ scroll · Enter/G redirect objective · ? help",
@@ -143,7 +182,12 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
     } else {
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
-                truncate(&format!(" {}", footer_hint(app)), w),
+                scrolled(
+                    &format!(" {}", footer_hint(app)),
+                    app.footer_scroll,
+                    w,
+                    &app.footer_max,
+                ),
                 t.footer(),
             ))),
             area,

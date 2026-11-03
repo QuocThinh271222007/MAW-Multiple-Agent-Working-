@@ -16,6 +16,7 @@ pub fn agent(name: &str, role: Role, state: AgentState) -> Agent {
             ProviderKind::Codex
         },
         model: None,
+        effort: None,
         role,
         state,
         permission: PermissionProfile::Balanced,

@@ -71,6 +71,19 @@ maw status ; maw task list ; maw logs --events -f
 maw resume                         # continue after Ctrl+C / crash
 ```
 
+### Models, effort and permissions
+
+```bash
+maw models                                   # what each provider offers (Codex: live from your account)
+maw agent add --name lead --provider claude --role leader --model sonnet --effort high
+maw agent model  coder1 gpt-6.1-sol          # or `default`
+maw agent effort coder1 xhigh                # low | medium | high | xhigh | max (| ultra on some Codex models)
+maw agent permission coder1 autonomous       # safe | balanced | autonomous
+```
+In the TUI: `M` (or `/` → *agent model*) opens a model + effort picker for the selected agent; `/` → *agent permission* sets the profile. A change applies immediately to an **idle** agent (it reconnects with the new settings); a busy agent keeps its turn and picks the change up on its next connect. `!` runs a shell command in the project folder and shows the output in a scrollable panel (60 s limit; it is *your* command, agents cannot trigger it).
+
+On a narrow terminal the title bar and the key-hint bar scroll sideways: roll the mouse wheel (or Shift+wheel) over them; `‹` / `›` show that more is hidden.
+
 Try it with no providers at all (scripted *mock* agents; it exercises MAW itself, not Claude/Codex):
 
 ```bash

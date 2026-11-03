@@ -260,6 +260,7 @@ fn fake(scenario: &str) -> (Fixture, SessionConfig) {
         instructions: "You are a test agent.".into(),
         env,
         resume_native_id: None,
+        effort: None,
     };
     (
         Fixture {

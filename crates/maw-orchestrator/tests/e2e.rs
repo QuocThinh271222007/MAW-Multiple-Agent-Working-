@@ -515,3 +515,36 @@ async fn idle_leader_is_nudged_after_integration_to_complete_the_goal() {
     sup.shutdown().await;
     runner.abort();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reconfiguring_an_idle_agent_reconnects_it_and_a_stopped_one_just_saves() {
+    let repo = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    init_repo(repo.path());
+    let store = Arc::new(Store::open(data.path().join("maw.db")).unwrap());
+    let engine = Engine::open(store, "demo", &repo.path().to_string_lossy(), fast_cfg()).unwrap();
+    add_team(&engine);
+    let sup = Supervisor::new(engine.clone());
+    sup.register_provider(MockProvider::new(engine.clone(), MockScript::default()));
+    sup.connect_all().await;
+    let w = engine.resolve_agent("codex-backend").unwrap();
+
+    engine
+        .set_agent_model(&w.id, Some("gpt-6-luna".into()))
+        .unwrap();
+    engine.set_agent_effort(&w.id, "high").unwrap();
+    let note = sup.reconfigure_agent(&w.id).await.unwrap();
+    assert!(note.starts_with("applied"), "{note}");
+    assert!(sup.is_live(&w.id).await, "reconnected");
+    assert_eq!(engine.get_agent(&w.id).unwrap().state, AgentState::Idle);
+
+    sup.disconnect_agent(&w.id, true).await;
+    engine.set_agent_effort(&w.id, "low").unwrap();
+    let note = sup.reconfigure_agent(&w.id).await.unwrap();
+    assert!(note.starts_with("saved"), "{note}");
+    assert!(
+        !sup.is_live(&w.id).await,
+        "a stopped agent is not revived by a settings change"
+    );
+    sup.shutdown().await;
+}

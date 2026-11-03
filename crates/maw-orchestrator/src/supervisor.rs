@@ -301,6 +301,7 @@ impl Supervisor {
             role: agent.role,
             cwd: cwd.clone(),
             model: agent.model.clone(),
+            effort: agent.effort.clone(),
             permission: agent.permission,
             mcp,
             instructions: prompts::role_instructions(agent.role, &agent.name),
@@ -406,6 +407,34 @@ impl Supervisor {
             Ok(Err(e)) => (root, Some(format!("no isolated worktree ({e}); working in the project directory, so avoid overlapping edits"))),
             Err(e) => (root, Some(format!("workspace setup failed: {e}"))),
         }
+    }
+
+    /// Apply a changed model/permission now if that is safe. A busy agent is never torn down
+    /// mid-turn: the change then takes effect the next time it connects. Returns what happened.
+    pub async fn reconfigure_agent(self: &Arc<Self>, id: &AgentId) -> CoreResult<&'static str> {
+        if !self.is_live(id).await {
+            return Ok("saved; applies when the agent connects");
+        }
+        let agent = self.engine.get_agent(id)?;
+        if !agent.state.is_available() {
+            return Ok("saved; the agent is busy, so it applies on its next connect (use disconnect + connect to force)");
+        }
+        self.disconnect_agent(id, false).await;
+        self.connect_agent(id).await?;
+        Ok("applied: the agent reconnected with the new settings")
+    }
+
+    /// Models the agent's provider offers (live from the provider when it supports that).
+    pub async fn list_models(
+        &self,
+        kind: ProviderKind,
+    ) -> CoreResult<Vec<maw_core::provider::ModelChoice>> {
+        let p = self
+            .provider(kind)
+            .ok_or_else(|| CoreError::Unsupported(format!("no provider registered for {kind}")))?;
+        p.list_models()
+            .await
+            .map_err(|e| CoreError::Precondition(e.to_string()))
     }
 
     pub async fn disconnect_agent(self: &Arc<Self>, id: &AgentId, by_user: bool) {

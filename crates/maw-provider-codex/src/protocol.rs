@@ -68,11 +68,15 @@ pub fn thread_params(cfg: &SessionConfig, include_mcp_config: bool, preapprove: 
     p
 }
 
-pub fn turn_start_params(thread_id: &str, text: &str) -> Value {
-    json!({
+pub fn turn_start_params(thread_id: &str, text: &str, effort: Option<&str>) -> Value {
+    let mut p = json!({
         "threadId": thread_id,
         "input": [{ "type": "text", "text": text, "text_elements": [] }],
-    })
+    });
+    if let Some(e) = effort.filter(|e| !e.is_empty()) {
+        p["effort"] = json!(e);
+    }
+    p
 }
 
 fn s<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
@@ -744,5 +748,20 @@ mod tests {
             &json!({ "rateLimits": { "rateLimitReachedType": "rate_limit_reached" } }),
         );
         assert!(matches!(ev[0], ProviderEvent::RateLimited { .. }));
+    }
+}
+
+#[cfg(test)]
+mod effort_tests {
+    use super::*;
+
+    #[test]
+    fn turn_start_carries_effort_only_when_set() {
+        let p = turn_start_params("thr", "hi", Some("high"));
+        assert_eq!(p["effort"], "high");
+        assert!(turn_start_params("thr", "hi", None).get("effort").is_none());
+        assert!(turn_start_params("thr", "hi", Some(""))
+            .get("effort")
+            .is_none());
     }
 }

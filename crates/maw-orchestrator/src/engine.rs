@@ -323,6 +323,7 @@ impl Engine {
                 name: name.to_string(),
                 provider,
                 model,
+                effort: None,
                 role,
                 state: AgentState::Disconnected,
                 permission,
@@ -396,6 +397,75 @@ impl Engine {
                 Some(&a.id),
                 None,
                 json!({ "name": a.name, "role": role.as_str(), "state": a.state.as_str() }),
+            );
+            Ok(a)
+        })
+    }
+
+    /// Change the model an agent's NEXT session starts with (`None` = the provider's default).
+    /// A live session keeps its current model until it reconnects; see `Supervisor::reconfigure_agent`.
+    pub fn set_agent_model(&self, id: &AgentId, model: Option<String>) -> CoreResult<Agent> {
+        let model = model
+            .map(|m| m.trim().to_string())
+            .filter(|m| !m.is_empty() && !m.eq_ignore_ascii_case("default"));
+        if let Some(m) = &model {
+            let ok = m.len() <= 100
+                && m.chars().all(|c| {
+                    c.is_ascii_alphanumeric()
+                        || matches!(c, '.' | '-' | '_' | ':' | '/' | '[' | ']')
+                });
+            if !ok {
+                return Err(CoreError::InvalidInput(format!("'{m}' is not a valid model id (letters, digits and . - _ : / [ ] only, up to 100 characters)")));
+            }
+        }
+        self.tx(|db, emit| {
+            let mut a = db.get_agent(id)?.ok_or_else(|| CoreError::not_found("agent", id))?;
+            a.model = model.clone();
+            db.update_agent(&a)?;
+            emit.push(
+                EventKind::AgentStateChanged,
+                Some(&a.id),
+                None,
+                json!({ "name": a.name, "state": a.state.as_str(), "change": "model", "model": a.model }),
+            );
+            Ok(a)
+        })
+    }
+
+    /// Change the reasoning effort for the agent's NEXT session (`default` / empty = provider default).
+    /// Valid levels depend on the provider and model (`maw models`); an unsupported level is
+    /// reported by the provider when the session starts.
+    pub fn set_agent_effort(&self, id: &AgentId, effort: &str) -> CoreResult<Agent> {
+        let effort = normalize_effort(effort).map_err(CoreError::InvalidInput)?;
+        self.tx(|db, emit| {
+            let mut a = db.get_agent(id)?.ok_or_else(|| CoreError::not_found("agent", id))?;
+            a.effort = effort.clone();
+            db.update_agent(&a)?;
+            emit.push(
+                EventKind::AgentStateChanged,
+                Some(&a.id),
+                None,
+                json!({ "name": a.name, "state": a.state.as_str(), "change": "effort", "effort": a.effort }),
+            );
+            Ok(a)
+        })
+    }
+
+    /// Change an agent's permission profile for its NEXT session.
+    pub fn set_agent_permission(
+        &self,
+        id: &AgentId,
+        permission: PermissionProfile,
+    ) -> CoreResult<Agent> {
+        self.tx(|db, emit| {
+            let mut a = db.get_agent(id)?.ok_or_else(|| CoreError::not_found("agent", id))?;
+            a.permission = permission;
+            db.update_agent(&a)?;
+            emit.push(
+                EventKind::AgentStateChanged,
+                Some(&a.id),
+                None,
+                json!({ "name": a.name, "state": a.state.as_str(), "change": "permission", "permission": permission.as_str() }),
             );
             Ok(a)
         })
