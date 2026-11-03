@@ -44,6 +44,9 @@ pub struct CodexConfig {
     /// servers are never affected. When `false`, each non-read-only call surfaces as an
     /// `ApprovalRequested` for the user instead.
     pub preapprove_maw_tools: bool,
+    /// `model_reasoning_summary` sent with every thread (`auto`, `concise`, `detailed`; `None` or
+    /// empty leaves Codex's default, which returns no readable reasoning). Default `auto`.
+    pub reasoning_summary: Option<String>,
 }
 
 impl Default for CodexConfig {
@@ -54,6 +57,7 @@ impl Default for CodexConfig {
             request_timeout: Duration::from_secs(60),
             mcp_injection: McpInjection::ThreadConfig,
             preapprove_maw_tools: true,
+            reasoning_summary: Some("auto".into()),
         }
     }
 }
@@ -319,6 +323,17 @@ impl AgentProvider for CodexProvider {
                 }
             }
         }
+        if self.cfg.mcp_injection == McpInjection::CommandLine {
+            if let Some(s) = self
+                .cfg
+                .reasoning_summary
+                .as_deref()
+                .filter(|s| !s.is_empty())
+            {
+                cmd.arg("-c")
+                    .arg(format!("model_reasoning_summary={}", json!(s)));
+            }
+        }
         cmd.current_dir(&cfg.cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -373,6 +388,12 @@ impl AgentProvider for CodexProvider {
             &cfg,
             self.cfg.mcp_injection == McpInjection::ThreadConfig,
             self.cfg.preapprove_maw_tools,
+            // in CommandLine mode the setting already travels as `-c model_reasoning_summary=...`
+            if self.cfg.mcp_injection == McpInjection::ThreadConfig {
+                self.cfg.reasoning_summary.as_deref()
+            } else {
+                None
+            },
         )
         .await
         {
@@ -402,6 +423,7 @@ async fn handshake(
     cfg: &SessionConfig,
     thread_config: bool,
     preapprove: bool,
+    reasoning_summary: Option<&str>,
 ) -> ProviderResult<String> {
     shared
         .request(
@@ -415,7 +437,7 @@ async fn handshake(
         .map_err(auth_hint)?;
     shared.notify("initialized", None).await?;
 
-    let params = protocol::thread_params(cfg, thread_config, preapprove);
+    let params = protocol::thread_params(cfg, thread_config, preapprove, reasoning_summary);
     if let Some(native) = &cfg.resume_native_id {
         let mut p = params.clone();
         p["threadId"] = json!(native);

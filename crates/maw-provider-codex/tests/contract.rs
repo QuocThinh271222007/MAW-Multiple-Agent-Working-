@@ -29,6 +29,7 @@ fn fixture_with(injection: McpInjection, preapprove: bool) -> Fx {
         request_timeout: Duration::from_secs(10),
         mcp_injection: injection,
         preapprove_maw_tools: preapprove,
+        reasoning_summary: Some("auto".into()),
     });
     Fx {
         _dir: dir,
@@ -646,4 +647,20 @@ async fn preapproval_can_be_disabled_and_is_then_absent_from_the_config() {
     assert!(maw.get("default_tools_approval_mode").is_none());
     assert!(maw["url"].is_string());
     session.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn thread_start_asks_codex_for_reasoning_summaries_without_leaking_the_token() {
+    // The only way Codex streams readable reasoning is model_reasoning_summary in the thread config.
+    let fx = fixture_with(McpInjection::ThreadConfig, true);
+    let cfg = session_cfg(&fx);
+    let (h, _rx) = fx.provider.start_session(cfg).await.expect("start");
+    let log = std::fs::read_to_string(&fx.log).unwrap_or_default();
+    assert!(
+        log.contains("\"model_reasoning_summary\":\"auto\""),
+        "thread/start config carries the summary setting:
+{log}"
+    );
+    assert!(!log.contains("maw_tok_"), "no token in the log");
+    let _ = h.shutdown().await;
 }

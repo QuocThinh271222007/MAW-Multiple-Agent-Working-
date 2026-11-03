@@ -50,7 +50,12 @@ pub fn mcp_config(endpoint: &McpEndpoint, preapprove: bool) -> Value {
 }
 
 /// Parameters shared by `thread/start` and `thread/resume`.
-pub fn thread_params(cfg: &SessionConfig, include_mcp_config: bool, preapprove: bool) -> Value {
+pub fn thread_params(
+    cfg: &SessionConfig,
+    include_mcp_config: bool,
+    preapprove: bool,
+    reasoning_summary: Option<&str>,
+) -> Value {
     let mut p = json!({
         "cwd": cfg.cwd.to_string_lossy(),
         "approvalPolicy": approval_policy(cfg.permission),
@@ -60,10 +65,21 @@ pub fn thread_params(cfg: &SessionConfig, include_mcp_config: bool, preapprove: 
     if let Some(m) = &cfg.model {
         p["model"] = json!(m);
     }
+    // Per-thread Codex config. `model_reasoning_summary` is what makes Codex stream the reasoning
+    // summaries it is willing to give (without it the reasoning item comes back empty).
+    let mut config = serde_json::Map::new();
     if include_mcp_config {
         if let Some(e) = &cfg.mcp {
-            p["config"] = mcp_config(e, preapprove);
+            if let Value::Object(m) = mcp_config(e, preapprove) {
+                config.extend(m);
+            }
         }
+    }
+    if let Some(s) = reasoning_summary.filter(|s| !s.is_empty()) {
+        config.insert("model_reasoning_summary".into(), json!(s));
+    }
+    if !config.is_empty() {
+        p["config"] = Value::Object(config);
     }
     p
 }
