@@ -6,6 +6,7 @@ pub mod error;
 pub mod event;
 pub mod goal;
 pub mod ids;
+pub mod perf;
 pub mod provider;
 pub mod redact;
 pub mod task;

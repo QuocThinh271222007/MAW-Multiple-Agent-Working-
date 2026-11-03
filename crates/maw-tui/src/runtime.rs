@@ -209,13 +209,25 @@ async fn load(
     joined
 }
 
-fn apply_refresh(app: &mut App, sup: &Supervisor, engine: &Engine, d: RefreshData) {
+fn apply_refresh(app: &mut App, sup: &Arc<Supervisor>, engine: &Engine, d: RefreshData) {
     app.apply_snapshot(d.snap);
     app.extra_events = d.extra;
     app.goal_history = d.goal_history;
     app.plan_history = d.plan_history;
     app.task_detail = d.detail;
     app.usage_events = d.usage;
+    // performance sampling starts when it is wanted: the view is open, or a local agent exists
+    if app.view == View::Perf
+        || app
+            .agents()
+            .iter()
+            .any(|a| a.provider == ProviderKind::Ollama)
+    {
+        sup.start_perf();
+    }
+    if app.view == View::Perf {
+        app.perf = sup.perf();
+    }
     app.config = engine.config();
     // transcripts: full for the open agent, a short tail for grid cards
     let sel = app.selected_agent;

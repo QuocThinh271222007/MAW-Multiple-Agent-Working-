@@ -5,6 +5,7 @@ pub mod flow_view;
 pub mod goal;
 pub mod misc;
 pub mod overlays;
+pub mod perf_view;
 pub mod tasks;
 pub mod usage_view;
 pub mod widgets;
@@ -67,6 +68,7 @@ fn render_body(f: &mut Frame, area: Rect, app: &App) {
         View::Logs => misc::render_logs(f, area, app),
         View::Config => misc::render_config(f, area, app),
         View::Tokens => usage_view::render_tokens(f, area, app),
+        View::Perf => perf_view::render_perf(f, area, app),
     }
 }
 
@@ -169,6 +171,7 @@ fn footer_hint(app: &App) -> &'static str {
         View::Logs => "↑↓ scroll · End latest · ? help",
         View::Config => "+/- concurrency · [ ] lease · u auto-assign · ? help",
         View::Tokens => "token figures are reported by the providers · $ this view · d dashboard · ? help",
+        View::Perf => "machine load while models run · w window 1m/5m/30m · % this view · d dashboard · ? help",
     }
 }
 

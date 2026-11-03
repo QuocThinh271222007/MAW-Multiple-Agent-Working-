@@ -20,6 +20,7 @@ pub struct OllamaProvider {
     http: reqwest::Client,
     resolved: Mutex<Option<String>>,
     start_lock: tokio::sync::Mutex<()>,
+    speed: crate::session::SpeedCell,
 }
 
 fn fmt_bytes(b: u64) -> String {
@@ -37,6 +38,7 @@ impl OllamaProvider {
             http,
             resolved: Mutex::new(None),
             start_lock: tokio::sync::Mutex::new(()),
+            speed: Default::default(),
         }
     }
 
@@ -194,6 +196,32 @@ when your task is finished, report it with the maw tool for that, then stop.";
 impl AgentProvider for OllamaProvider {
     fn kind(&self) -> ProviderKind {
         ProviderKind::Ollama
+    }
+
+    async fn runtime_status(&self) -> Option<maw_core::perf::RuntimeStatus> {
+        // never starts a server: only report on one that is already running
+        let base = self.resolved.lock().ok().and_then(|g| g.clone())?;
+        let ps = self.get_json(&base, "/api/ps").await.ok()?;
+        let loaded = api::parse_ps(&ps)
+            .into_iter()
+            .map(|m| maw_core::perf::LoadedModel {
+                name: m.name,
+                size_bytes: m.size_bytes,
+                vram_bytes: m.vram_bytes,
+            })
+            .collect();
+        // a speed older than a minute describes nothing that is happening now
+        let (decode_tps, prompt_tps) = match self.speed.lock().ok().and_then(|g| *g) {
+            Some((at, d, p)) if at.elapsed() < Duration::from_secs(60) => {
+                (Some(d), Some(p).filter(|p| *p > 0.0))
+            }
+            _ => (None, None),
+        };
+        Some(maw_core::perf::RuntimeStatus {
+            loaded,
+            decode_tps,
+            prompt_tps,
+        })
     }
 
     fn pull_suggestions(&self) -> Vec<ModelChoice> {
@@ -448,6 +476,7 @@ impl AgentProvider for OllamaProvider {
             system,
             tools,
             mcp,
+            speed: self.speed.clone(),
         };
         let (handle, rx) = OllamaSession::start(params);
         Ok((handle, rx))

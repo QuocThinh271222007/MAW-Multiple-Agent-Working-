@@ -153,3 +153,25 @@ Interactive demo (mock provider, not a real Claude/Codex run):
 - **Tokens view** (`$`, palette *view tokens*): per-agent input / output / total, share bar, tokens per minute (last 5 min), 30-minute sparkline (wide terminals), Claude's client-side cost estimate, and "tokens by task". The title bar always shows `Tokens: <project total>`. Figures are the providers' own cumulative reports; the rate, sparkline and per-task numbers come from the increments MAW recorded with each report (`agent.usage` events with `payload.delta`, attributed to the agent's current task). Agents that never reported show "no usage reported yet", not zero.
 - **Conversation filters** (agent views): `T` thinking, `L` tool logs (tool calls, commands, output, system), `P` MAW protocol (calls to `maw_*` tools and dispatch notices). The panel title shows the state (`T thinking ✓ · L tool logs ✗ · …`). Messages, your messages and errors are never hidden. The same filters apply to the grid cards, search and copy. Palette: *transcript thinking / tool logs / protocol / conversation only / show all*.
 - **Remove agent** (`X`, palette *agent remove*): confirmation dialog (default is *no*) with a choice of refusing or releasing unfinished tasks. The worktree stays on disk.
+
+## Added: performance view
+
+`%` (palette *view performance*) shows what running local models costs the machine: line charts of
+**generation speed** (tokens/s; the dim line is prompt processing), **VRAM**, **GPU load**, **RAM**
+and **CPU** over a window you cycle with `w` (1 min / 5 min / 30 min), the models currently held in
+memory and how much of each sits on the GPU (the rest runs from system RAM, which is slower), and
+GPU temperature and power. Sampling starts when the view is first opened or when the project has an
+Ollama agent, every 2 s, and keeps the last 30 minutes in memory only (nothing is written to disk).
+
+Where the figures come from (the view names them):
+
+* CPU and RAM: under WSL these are the **Windows host's**, read through one long-lived
+  `powershell.exe` (it ends by itself after 4 h and is restarted); on plain Linux they come from
+  `/proc`. If PowerShell cannot be started under WSL, the view says it shows the WSL virtual machine
+  only.
+* GPU: `nvidia-smi` (the whole GPU, including other programs). Without it the GPU charts say so;
+  AMD/Intel GPUs are not supported.
+* Models in memory and generation speed: the local-model provider (Ollama `/api/ps` and the timings
+  of the most recent request).
+
+A panel with no source shows "no data", never a zero. Charts turn yellow at 85% and red at 95%.

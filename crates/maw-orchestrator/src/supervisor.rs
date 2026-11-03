@@ -158,6 +158,7 @@ pub struct Supervisor {
     reconnecting: Mutex<HashSet<AgentId>>,
     /// goal -> (nudges sent, when the last one was sent)
     nudges: Mutex<HashMap<GoalId, (u32, std::time::Instant)>>,
+    perf: Arc<crate::perf::PerfMonitor>,
 }
 
 impl Supervisor {
@@ -178,7 +179,39 @@ impl Supervisor {
             user_stopped: Mutex::new(HashSet::new()),
             reconnecting: Mutex::new(HashSet::new()),
             nudges: Mutex::new(HashMap::new()),
+            perf: crate::perf::PerfMonitor::new(),
         })
+    }
+
+    /// Start sampling machine performance (CPU, RAM, GPU, loaded models, generation speed).
+    /// Idempotent; call it when something wants to show the figures.
+    pub fn start_perf(self: &Arc<Self>) {
+        self.perf.start(Arc::downgrade(self));
+    }
+
+    /// The sampled history so far (empty until `start_perf`).
+    pub fn perf(&self) -> maw_core::perf::PerfHistory {
+        self.perf.snapshot()
+    }
+
+    /// What the local-model providers are doing right now, combined.
+    pub async fn runtime_status(&self) -> maw_core::perf::RuntimeStatus {
+        let ps: Vec<Arc<dyn AgentProvider>> = self
+            .providers
+            .read()
+            .map(|m| m.values().cloned().collect())
+            .unwrap_or_default();
+        let mut out = maw_core::perf::RuntimeStatus::default();
+        for p in ps {
+            if let Ok(Some(s)) =
+                tokio::time::timeout(Duration::from_secs(3), p.runtime_status()).await
+            {
+                out.loaded.extend(s.loaded);
+                out.decode_tps = out.decode_tps.or(s.decode_tps);
+                out.prompt_tps = out.prompt_tps.or(s.prompt_tps);
+            }
+        }
+        out
     }
 
     pub fn register_provider(&self, p: Arc<dyn AgentProvider>) {

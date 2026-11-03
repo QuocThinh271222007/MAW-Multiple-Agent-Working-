@@ -1635,3 +1635,135 @@ fn arrows_leave_a_long_list_at_either_end_so_you_can_go_back_up_a_form() {
     handle_key(&mut a, key(KeyCode::BackTab)); // Shift+Tab still works everywhere
     assert_eq!(focus(&a), 2);
 }
+
+// ---- performance view -------------------------------------------------------------------------
+
+fn perf_history(with_gpu: bool) -> maw_core::perf::PerfHistory {
+    use maw_core::perf::{LoadedModel, PerfHistory, PerfSample};
+    let now = chrono::Utc::now();
+    let mut h = PerfHistory::new(900);
+    h.sources.system = "Windows host (read through PowerShell from WSL)".into();
+    h.sources.gpu = if with_gpu {
+        "nvidia-smi (whole GPU, including other programs)".into()
+    } else {
+        String::new()
+    };
+    for i in 0..120i64 {
+        let k = i as f32;
+        h.push(PerfSample {
+            at: now - chrono::Duration::seconds((119 - i) * 2),
+            cpu_pct: Some(20.0 + (k % 30.0)),
+            ram_used_mb: Some(9000 + (i as u64) * 10),
+            ram_total_mb: Some(12000),
+            gpu_pct: with_gpu.then_some((k * 0.8).min(97.0)),
+            vram_used_mb: with_gpu.then_some(2000 + (i as u64) * 30),
+            vram_total_mb: with_gpu.then_some(6144),
+            gpu_temp_c: with_gpu.then_some(61.0),
+            gpu_power_w: with_gpu.then_some(55.0),
+            decode_tps: (i > 40).then_some(18.0 + (k % 5.0)),
+            prompt_tps: (i > 40).then_some(120.0),
+            loaded: vec![LoadedModel {
+                name: "qwen3:8b".into(),
+                size_bytes: 5_200_000_000,
+                vram_bytes: 3_900_000_000,
+            }],
+        });
+    }
+    h
+}
+
+#[test]
+fn performance_view_charts_every_source_and_shows_the_gpu_ram_split() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let mut a = app();
+    a.perf = perf_history(true);
+    a.now = chrono::Utc::now();
+    handle_key(
+        &mut a,
+        KeyEvent::new(KeyCode::Char('%'), KeyModifiers::SHIFT),
+    );
+    assert_eq!(a.view, View::Perf);
+    let t = render_text(&a, 170, 50);
+    for needle in [
+        "PERFORMANCE",
+        "last 5m",
+        "GENERATION SPEED",
+        "VRAM",
+        "GPU LOAD",
+        "RAM",
+        "CPU",
+        "MODELS IN MEMORY",
+        "qwen3:8b",
+        "75% GPU",
+    ] {
+        assert!(t.contains(needle), "missing {needle}\n{t}");
+    }
+    assert!(t.contains("part of a model is in system RAM"), "{t}");
+    assert!(
+        t.contains("Windows host") && t.contains("nvidia-smi"),
+        "sources are named: {t}"
+    );
+    assert!(t.contains("tok/s") && t.contains("61°C"), "{t}");
+    // w cycles the window
+    handle_key(
+        &mut a,
+        KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE),
+    );
+    assert!(render_text(&a, 170, 50).contains("last 30m"));
+    handle_key(
+        &mut a,
+        KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE),
+    );
+    assert!(render_text(&a, 170, 50).contains("last 60s"));
+    assert!(maw_tui::app::COMMANDS
+        .iter()
+        .any(|c| c.name == "view performance"));
+}
+
+#[test]
+fn performance_view_says_so_when_there_is_no_gpu_tool_or_no_data() {
+    let mut a = app();
+    a.view = View::Perf;
+    a.now = chrono::Utc::now();
+    assert!(render_text(&a, 120, 40).contains("Collecting samples"));
+    a.perf = perf_history(false);
+    let t = render_text(&a, 170, 50);
+    assert!(t.contains("no GPU tool found"), "{t}");
+    assert!(
+        t.contains("no GPU load reading") || t.contains("(no data)"),
+        "{t}"
+    );
+}
+
+#[test]
+fn performance_view_adapts_to_any_terminal_size_without_panicking() {
+    let mut a = app();
+    a.view = View::Perf;
+    a.perf = perf_history(true);
+    a.now = chrono::Utc::now();
+    for (w, h) in [
+        (200, 60),
+        (150, 40),
+        (110, 30),
+        (100, 24),
+        (80, 24),
+        (60, 16),
+        (40, 10),
+        (20, 5),
+        (10, 3),
+    ] {
+        a.size = (w, h);
+        let t = render_text(&a, w, h);
+        if w >= 100 && h >= 24 {
+            assert!(t.contains("PERFORMANCE"), "{w}x{h}\n{t}");
+        }
+    }
+    // the models line is always on screen, even in a short terminal
+    let short = render_text(&a, 100, 24);
+    assert!(
+        short.contains("Models in memory")
+            && short.contains("qwen3:8b")
+            && short.contains("75% on GPU"),
+        "{short}"
+    );
+}

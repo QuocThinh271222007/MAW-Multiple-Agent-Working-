@@ -44,4 +44,4 @@
 - TUI: `mock` is only offered in demo projects; in long pick-lists the arrow keys continue to the neighbouring field past either end.
 - Verified live: one `qwen3:4b` turn using `write_file`. **Not verified with a real local model:** the other file tools, `run_command`, `maw_*` tools, a full Leader/Worker/verify cycle, and the TUI download dialog in a real terminal.
 - Known limits: no OS sandbox for local commands; small models follow the MAW protocol less reliably; `think: off` does not disable reasoning on `qwen3:4b`; autostarted servers keep running after MAW exits.
-- Next: machine performance charts while local agents run.
+- Performance view (`%`): CPU/RAM (Windows host through PowerShell when under WSL, `/proc` on Linux), GPU/VRAM/temperature/power via `nvidia-smi`, generation speed and loaded models from Ollama, as line charts over 1/5/30 minutes. Sampled live on the dev machine (RTX 3050 6 GB laptop under WSL2); rendering checked with test frames, not yet by eye in a real terminal. NVIDIA only; history is in memory only.

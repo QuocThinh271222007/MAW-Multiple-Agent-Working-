@@ -95,6 +95,12 @@ max_pull_params_b = 8.0
 max_pull_gb = 6.5
 ```
 
+## Watching the machine
+
+`%` in the TUI shows CPU, RAM, GPU, VRAM, generation speed and the GPU/RAM split of the loaded
+models while agents run (see `docs/TUI.md`). A model that only partly fits in VRAM runs partly from
+RAM; the view shows the split so you can tell why it is slow.
+
 ## Testing
 
 * Unit and integration tests use a scripted fake Ollama server with MAW's real engine and MCP server.

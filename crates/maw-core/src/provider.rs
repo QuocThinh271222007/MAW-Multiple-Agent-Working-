@@ -270,6 +270,12 @@ pub trait AgentProvider: Send + Sync {
         None
     }
 
+    /// What the provider's runtime is doing right now (models held in memory, last generation
+    /// speed). Only local-model providers have anything to report.
+    async fn runtime_status(&self) -> Option<crate::perf::RuntimeStatus> {
+        None
+    }
+
     /// Models this provider can download, for providers that run local models. Each entry's
     /// `source` is `catalog`; entries already installed are not filtered out here.
     fn pull_suggestions(&self) -> Vec<ModelChoice> {

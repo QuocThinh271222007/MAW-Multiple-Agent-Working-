@@ -22,6 +22,9 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
+/// Speed of the most recent request: (when, generation tok/s, prompt tok/s).
+pub type SpeedCell = Arc<Mutex<Option<(std::time::Instant, f32, f32)>>>;
+
 const MAX_LINE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_TOOL_RESULT_BYTES: usize = 16 * 1024;
 
@@ -38,6 +41,8 @@ pub struct SessionParams {
     pub system: String,
     pub tools: LocalTools,
     pub mcp: Option<McpConnection>,
+    /// Where each request's measured speed is published for the performance view.
+    pub speed: SpeedCell,
 }
 
 #[derive(Default)]
@@ -373,6 +378,18 @@ async fn step(sh: &Arc<Shared>, cancel: &CancellationToken) -> Result<Step, Stri
         return Err("the response from Ollama ended before it was complete".into());
     };
 
+    // speed of this request, from the server's own timings
+    if fin.eval_ns > 0 && fin.output_tokens > 0 {
+        let dec = fin.output_tokens as f32 / (fin.eval_ns as f32 / 1e9);
+        let pro = if fin.prompt_eval_ns > 0 {
+            fin.prompt_tokens as f32 / (fin.prompt_eval_ns as f32 / 1e9)
+        } else {
+            0.0
+        };
+        if let Ok(mut g) = sh.p.speed.lock() {
+            *g = Some((std::time::Instant::now(), dec, pro));
+        }
+    }
     // usage: Ollama reports per-request counts; the session keeps the running total
     {
         let (i, o) = {

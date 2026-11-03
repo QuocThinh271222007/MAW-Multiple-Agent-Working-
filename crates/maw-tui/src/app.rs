@@ -23,10 +23,11 @@ pub enum View {
     Logs,
     Config,
     Tokens,
+    Perf,
 }
 
 impl View {
-    pub const TABS: [View; 9] = [
+    pub const TABS: [View; 10] = [
         View::Dashboard,
         View::Agents,
         View::Tasks,
@@ -35,6 +36,7 @@ impl View {
         View::Approvals,
         View::Logs,
         View::Tokens,
+        View::Perf,
         View::Config,
     ];
 
@@ -50,6 +52,7 @@ impl View {
             View::Logs => "Logs",
             View::Config => "Config",
             View::Tokens => "Tokens",
+            View::Perf => "Perf",
         }
     }
     pub fn key(&self) -> char {
@@ -63,6 +66,7 @@ impl View {
             View::Logs => 'l',
             View::Config => 'c',
             View::Tokens => '$',
+            View::Perf => '%',
         }
     }
 }
@@ -203,6 +207,7 @@ pub enum Cmd {
     ViewLogs,
     ViewConfig,
     ViewTokens,
+    ViewPerf,
     ToggleThinking,
     ToggleLogs,
     ToggleProtocol,
@@ -283,6 +288,11 @@ pub const COMMANDS: &[CommandSpec] = &[
         cmd: Cmd::ViewConfig,
         name: "view config",
         desc: "configuration (c)",
+    },
+    CommandSpec {
+        cmd: Cmd::ViewPerf,
+        name: "view performance",
+        desc: "CPU, RAM, GPU, VRAM and generation speed charts while local models run (%)",
     },
     CommandSpec {
         cmd: Cmd::ViewTokens,
@@ -1009,6 +1019,10 @@ pub struct App {
     pub models: HashMap<ProviderKind, Vec<ModelChoice>>,
     /// Models the local provider suggests downloading.
     pub pull_suggestions: Vec<ModelChoice>,
+    /// Machine performance samples (filled while the Perf view or a local agent needs them).
+    pub perf: maw_core::perf::PerfHistory,
+    /// Index into `ui::perf_view::WINDOWS`.
+    pub perf_window: usize,
     /// Horizontal scroll offsets of the title bar and the hint bar (mouse wheel over the bar).
     pub header_scroll: usize,
     pub footer_scroll: usize,
@@ -1057,6 +1071,8 @@ impl App {
             clipboard: String::new(),
             models: HashMap::new(),
             pull_suggestions: Vec::new(),
+            perf: maw_core::perf::PerfHistory::new(1),
+            perf_window: 1,
             header_scroll: 0,
             footer_scroll: 0,
             header_max: Cell::new(0),
@@ -1297,6 +1313,7 @@ pub fn run_cmd(app: &mut App, cmd: Cmd) -> Vec<Action> {
         Cmd::ViewLogs => app.goto(View::Logs),
         Cmd::ViewConfig => app.goto(View::Config),
         Cmd::ViewTokens => app.goto(View::Tokens),
+        Cmd::ViewPerf => app.goto(View::Perf),
         Cmd::ToggleThinking => {
             app.show_thinking = !app.show_thinking;
             let msg = format!(
@@ -1923,6 +1940,10 @@ fn normal_key(app: &mut App, key: KeyEvent) -> Vec<Action> {
         KeyCode::Char('l') => return run_cmd(app, Cmd::ViewLogs),
         KeyCode::Char('c') => return run_cmd(app, Cmd::ViewConfig),
         KeyCode::Char('$') => return run_cmd(app, Cmd::ViewTokens),
+        KeyCode::Char('%') => return run_cmd(app, Cmd::ViewPerf),
+        KeyCode::Char('w') if app.view == View::Perf => {
+            app.perf_window = (app.perf_window + 1) % crate::ui::perf_view::WINDOWS.len();
+        }
         KeyCode::Char('o') => return run_cmd(app, Cmd::ViewApprovals),
         KeyCode::Char('a') => return run_cmd(app, Cmd::AddAgent),
         KeyCode::Char('p') => return run_cmd(app, Cmd::Pause),
