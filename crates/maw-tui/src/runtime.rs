@@ -327,6 +327,17 @@ async fn execute(
             model,
             effort,
         } => {
+            if let Some(m) = &model {
+                let kind = {
+                    let (e1, id) = (engine.clone(), agent.clone());
+                    blk(move || e1.get_agent(&id))
+                        .await
+                        .map_err(err_text)?
+                        .map_err(err_text)?
+                        .provider
+                };
+                sup.validate_model(kind, m).await.map_err(err_text)?;
+            }
             let (e1, a1, m1, f1) = (engine.clone(), agent.clone(), model.clone(), effort.clone());
             blk(move || -> Result<(), CoreError> {
                 e1.set_agent_model(&a1, m1)?;
@@ -372,10 +383,21 @@ async fn execute(
             provider,
             role,
             model,
+            effort,
             permission,
         } => {
+            if let Some(m) = &model {
+                sup.validate_model(provider, m).await.map_err(err_text)?;
+            }
             let n = name.clone();
             let agent = on_engine!(e, e.add_agent(&n, provider, role, model, permission, None))?;
+            if let Some(f) = effort {
+                let (e2, id) = (engine.clone(), agent.id.clone());
+                blk(move || e2.set_agent_effort(&id, &f))
+                    .await
+                    .map_err(err_text)?
+                    .map_err(err_text)?;
+            }
             match sup.connect_agent(&agent.id).await {
                 Ok(()) => Ok(format!("{name} added and connected")),
                 Err(e) => Err(format!(
@@ -518,23 +540,15 @@ async fn event_loop(engine: &Arc<Engine>, sup: &Arc<Supervisor>, opts: &TuiOptio
     let mut clock = tokio::time::interval(Duration::from_secs(1));
     clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let (msg_tx, mut msg_rx) = mpsc::channel::<UiMsg>(64);
-    // Model catalogs: one background query per provider in use (Codex answers live).
-    if let Ok(agents) = engine.list_agents() {
-        let mut kinds: Vec<ProviderKind> = agents
-            .iter()
-            .map(|a| a.provider)
-            .filter(|k| *k != ProviderKind::Mock)
-            .collect();
-        kinds.sort_by_key(|k| k.as_str());
-        kinds.dedup();
-        for kind in kinds {
-            let (s, tx) = (sup.clone(), msg_tx.clone());
-            tokio::spawn(async move {
-                if let Ok(list) = s.list_models(kind).await {
-                    let _ = tx.send(UiMsg::Models(kind, list)).await;
-                }
-            });
-        }
+    // Model catalogs for every real provider (not only those already in use) so the Add-agent
+    // dialog can offer pick-lists on a fresh project. Codex answers live; failures are ignored.
+    for kind in [ProviderKind::Claude, ProviderKind::Codex] {
+        let (s, tx) = (sup.clone(), msg_tx.clone());
+        tokio::spawn(async move {
+            if let Ok(list) = s.list_models(kind).await {
+                let _ = tx.send(UiMsg::Models(kind, list)).await;
+            }
+        });
     }
 
     let (mut need_refresh, mut need_draw) = (true, true);

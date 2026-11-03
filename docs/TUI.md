@@ -141,3 +141,6 @@ Interactive demo (mock provider, not a real Claude/Codex run):
 - palette → **agent permission**: `safe` / `balanced` / `autonomous`.
 - `!` or palette → **shell**: runs a command in the project folder (`bash -lc`, 60 s limit, output capped at 64 KiB per stream and secret-redacted) and opens the result in a scrollable panel (`↑↓ PgUp PgDn Home End`, `y` copy, `Esc` close). This is a deliberate user action.
 - The title bar always lists every view key and ends with `dir: <project folder>`. When it does not fit, roll the mouse wheel (or Shift+wheel / horizontal wheel) over the bar to scroll it; the key-hint bar at the bottom works the same way.
+
+- **Add agent** (`a`): Model and Effort are pick-lists (←/→). Changing Provider swaps in that provider's models; changing Model swaps in the effort levels it supports. If a provider's list is unavailable the only choice is `default`. The lists are loaded in the background at startup (Claude instantly, Codex via `model/list`).
+- In the model dialog the *Custom model id (advanced)* field is validated against the provider's list before anything is saved.

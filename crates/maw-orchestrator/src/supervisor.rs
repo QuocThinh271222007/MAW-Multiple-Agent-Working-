@@ -437,6 +437,12 @@ impl Supervisor {
             .map_err(|e| CoreError::Precondition(e.to_string()))
     }
 
+    /// Reject model ids the provider does not offer (see `models::check_model`).
+    pub async fn validate_model(&self, kind: ProviderKind, id: &str) -> CoreResult<()> {
+        let list = self.list_models(kind).await.unwrap_or_default();
+        crate::models::check_model(&list, kind, id)
+    }
+
     pub async fn disconnect_agent(self: &Arc<Self>, id: &AgentId, by_user: bool) {
         if by_user {
             if let Ok(mut s) = self.user_stopped.lock() {

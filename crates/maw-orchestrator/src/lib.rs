@@ -4,6 +4,7 @@
 pub mod comms;
 pub mod engine;
 pub mod mock;
+pub mod models;
 pub mod prompts;
 pub mod recovery;
 pub mod supervisor;

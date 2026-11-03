@@ -172,15 +172,17 @@ enum AgentCmd {
         name: String,
         role: String,
     },
-    /// Set the model used the next time the agent connects (`default` = provider default). See `maw models`.
+    /// Set the model used the next time the agent connects. Without a value, pick from the list.
     Model {
         name: String,
-        model: String,
+        /// a model id from `maw models`, or `default`
+        model: Option<String>,
     },
-    /// Set the reasoning effort used the next time the agent connects (`default` = provider default)
+    /// Set the reasoning effort used the next time the agent connects. Without a value, pick from the list.
     Effort {
         name: String,
-        level: String,
+        /// e.g. low | medium | high | xhigh | max, or `default`
+        level: Option<String>,
     },
     /// Set the permission profile used the next time the agent connects: safe | balanced | autonomous
     Permission {
@@ -283,7 +285,7 @@ async fn real_main(cli: Cli) -> Result<()> {
             }
         },
         Some(Cmd::Auth { cmd }) => cmd_auth(&ctx, cmd).await,
-        Some(Cmd::Agent { cmd }) => cmd_agent(&ctx, project_arg.as_deref(), cmd),
+        Some(Cmd::Agent { cmd }) => cmd_agent(&ctx, project_arg.as_deref(), cmd).await,
         Some(Cmd::Run {
             goal,
             criteria,
@@ -510,7 +512,7 @@ fn delegate_login(name: &str, path: Option<&str>, args: &[&str]) -> Result<()> {
 
 // ---------------------------------------------------------------- agents / tasks
 
-fn cmd_agent(ctx: &Ctx, project: Option<&str>, cmd: AgentCmd) -> Result<()> {
+async fn cmd_agent(ctx: &Ctx, project: Option<&str>, cmd: AgentCmd) -> Result<()> {
     let p = resolve_project(ctx, project, true)?;
     let eng = open_utility_engine(ctx, &p)?;
     match cmd {
@@ -548,6 +550,14 @@ fn cmd_agent(ctx: &Ctx, project: Option<&str>, cmd: AgentCmd) -> Result<()> {
             if provider == ProviderKind::Mock {
                 bail!("mock agents are only available through `maw demo`");
             }
+            if let Some(m) = &model {
+                let list = models_for(ctx, provider).await;
+                anyhow_core(maw_orchestrator::models::check_model(&list, provider, m))?;
+            }
+            if let Some(e) = &effort {
+                // shape check now; per-model levels are checked below when the model list is known
+                maw_core::normalize_effort(e).map_err(|e| anyhow::anyhow!(e))?;
+            }
             let mut a = anyhow_core(eng.add_agent(&name, provider, role, model, permission, None))?;
             if let Some(e) = effort {
                 a = anyhow_core(eng.set_agent_effort(&a.id, &e))?;
@@ -574,14 +584,71 @@ fn cmd_agent(ctx: &Ctx, project: Option<&str>, cmd: AgentCmd) -> Result<()> {
         }
         AgentCmd::Model { name, model } => {
             let a = anyhow_core(eng.resolve_agent(&name))?;
-            let a = anyhow_core(eng.set_agent_model(&a.id, Some(model)))?;
-            println!("{} model = {} (applies the next time it connects; a running MAW picks it up via the TUI palette `agent: set model`)", a.name, a.model.as_deref().unwrap_or("(provider default)"));
+            let list = models_for(ctx, a.provider).await;
+            let chosen = match model {
+                Some(m) => m,
+                None => {
+                    let mut opts = vec![(
+                        "default".to_string(),
+                        "the provider's own default".to_string(),
+                    )];
+                    opts.extend(list.iter().map(|m| {
+                        (
+                            m.id.clone(),
+                            format!(
+                                "{}{}",
+                                m.description,
+                                if m.is_default {
+                                    " (provider default)"
+                                } else {
+                                    ""
+                                }
+                            ),
+                        )
+                    }));
+                    pick(
+                        &format!("Model for {} ({}):", a.name, a.provider),
+                        &opts,
+                        a.model.as_deref().unwrap_or("default"),
+                    )?
+                }
+            };
+            anyhow_core(maw_orchestrator::models::check_model(
+                &list, a.provider, &chosen,
+            ))?;
+            let a = anyhow_core(eng.set_agent_model(&a.id, Some(chosen)))?;
+            println!("{} model = {} (applies the next time it connects; in the TUI use `M` to apply it now to an idle agent)", a.name, a.model.as_deref().unwrap_or("(provider default)"));
         }
         AgentCmd::Effort { name, level } => {
             let a = anyhow_core(eng.resolve_agent(&name))?;
-            let a = anyhow_core(eng.set_agent_effort(&a.id, &level))?;
+            let list = models_for(ctx, a.provider).await;
+            let allowed = maw_orchestrator::models::efforts_for(&list, a.model.as_deref());
+            let chosen = match level {
+                Some(l) => l,
+                None => {
+                    let mut opts =
+                        vec![("default".to_string(), "the model's own default".to_string())];
+                    opts.extend(allowed.iter().map(|e| (e.clone(), String::new())));
+                    pick(
+                        &format!(
+                            "Effort for {} (model {}):",
+                            a.name,
+                            a.model.as_deref().unwrap_or("default")
+                        ),
+                        &opts,
+                        a.effort.as_deref().unwrap_or("default"),
+                    )?
+                }
+            };
+            let norm = maw_core::normalize_effort(&chosen).map_err(|e| anyhow::anyhow!(e))?;
+            if let Some(l) = &norm {
+                if !allowed.contains(l) {
+                    bail!("'{l}' is not an effort level for {} (model {}). Choose one of: default, {}", a.provider, a.model.as_deref().unwrap_or("default"), allowed.join(", "));
+                }
+            }
+            let a = anyhow_core(eng.set_agent_effort(&a.id, &chosen))?;
             println!(
-                "{} effort = {} (applies the next time it connects; levels differ per model, see `maw models`)",
+                "{} effort = {} (applies the next time it connects)",
                 a.name,
                 a.effort.as_deref().unwrap_or("provider default")
             );
@@ -1065,4 +1132,45 @@ async fn cmd_models(ctx: &Ctx, provider: Option<String>) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// The provider's model list (empty when the provider cannot be queried).
+async fn models_for(ctx: &Ctx, kind: ProviderKind) -> Vec<maw_core::provider::ModelChoice> {
+    let p = match kind {
+        ProviderKind::Claude => providers::claude(ctx.cfg.claude.path.clone()),
+        ProviderKind::Codex => providers::codex(ctx.cfg.codex.path.clone()),
+        ProviderKind::Mock => return vec![],
+    };
+    match tokio::time::timeout(Duration::from_secs(45), p.list_models()).await {
+        Ok(Ok(list)) => list,
+        _ => vec![],
+    }
+}
+
+/// Numbered pick-list on the terminal, so nothing has to be typed from memory.
+fn pick(title: &str, options: &[(String, String)], current: &str) -> Result<String> {
+    use std::io::{BufRead, IsTerminal, Write};
+    if !std::io::stdin().is_terminal() {
+        bail!("no value given and no terminal to ask on; pass it explicitly (see `maw models`)");
+    }
+    println!("{title}");
+    for (i, (id, desc)) in options.iter().enumerate() {
+        let mark = if id == current { "*" } else { " " };
+        println!("  {mark}{:>2}) {:<22} {}", i + 1, id, desc);
+    }
+    print!("Number (Enter = keep current): ");
+    std::io::stdout().flush()?;
+    let mut line = String::new();
+    std::io::stdin().lock().read_line(&mut line)?;
+    let t = line.trim();
+    if t.is_empty() {
+        return Ok(current.to_string());
+    }
+    let n: usize = t
+        .parse()
+        .map_err(|_| anyhow::anyhow!("'{t}' is not a number from the list"))?;
+    options
+        .get(n.wrapping_sub(1))
+        .map(|(id, _)| id.clone())
+        .ok_or_else(|| anyhow::anyhow!("{n} is not in the list (1..={})", options.len()))
 }

@@ -123,6 +123,7 @@ pub enum Action {
         provider: ProviderKind,
         role: Role,
         model: Option<String>,
+        effort: Option<String>,
         permission: PermissionProfile,
     },
     ConnectAgent(AgentId),
@@ -552,19 +553,27 @@ impl Dialog {
         }
     }
     pub fn add_agent() -> Dialog {
-        Dialog {
+        Self::add_agent_with(&HashMap::new())
+    }
+    /// Add-agent dialog whose Model and Effort are pick-lists drawn from the providers' catalogs
+    /// (nothing to type, so nothing to mistype). They follow the chosen provider and model.
+    pub fn add_agent_with(models: &HashMap<ProviderKind, Vec<ModelChoice>>) -> Dialog {
+        let mut d = Dialog {
             title: "Add agent".into(),
             kind: DialogKind::AddAgent,
             fields: vec![
                 Field::text("Name", true, "e.g. codex-backend"),
                 Field::select("Provider", &["claude", "codex", "mock"], 1),
                 Field::select("Role", &["worker", "leader", "reviewer", "specialist"], 0),
-                Field::text("Model", false, "optional"),
+                Field::select("Model", &["default"], 0),
+                Field::select("Effort", &["default"], 0),
                 Field::select("Permissions", &["safe", "balanced", "autonomous"], 1),
             ],
             focus: 0,
             error: None,
-        }
+        };
+        refresh_add_agent(&mut d, models, true);
+        d
     }
     /// Model + effort picker. `models` is the provider's catalog (may be empty while it loads);
     /// a custom id can always be typed and wins over the selector.
@@ -613,7 +622,7 @@ impl Dialog {
                     } else {
                         format!("optional override; known: {detail}")
                     },
-                    ..Field::text("Custom model id", false, "")
+                    ..Field::text("Custom model id (advanced)", false, "")
                 },
                 Field::select("Effort", &echoices, eidx),
             ],
@@ -732,8 +741,9 @@ impl Dialog {
                     name,
                     provider: v(1).parse().map_err(|e: String| e)?,
                     role: v(2).parse().map_err(|e: String| e)?,
-                    model: Some(v(3)).filter(|m| !m.is_empty()),
-                    permission: v(4).parse().map_err(|e: String| e)?,
+                    model: Some(v(3)).filter(|m| !m.is_empty() && m != "default"),
+                    effort: Some(v(4)).filter(|e| !e.is_empty() && e != "default"),
+                    permission: v(5).parse().map_err(|e: String| e)?,
                 }
             }
             DialogKind::AgentModel { agent } => {
@@ -1089,7 +1099,7 @@ pub fn run_cmd(app: &mut App, cmd: Cmd) -> Vec<Action> {
             Some(t) => app.overlay = Overlay::Dialog(Dialog::redirect_goal(&t)),
             None => app.overlay = Overlay::Dialog(Dialog::set_goal()),
         },
-        Cmd::AddAgent => app.overlay = Overlay::Dialog(Dialog::add_agent()),
+        Cmd::AddAgent => app.overlay = Overlay::Dialog(Dialog::add_agent_with(&app.models)),
         Cmd::ConnectAgent => {
             if let Some(a) = need_agent(app) {
                 return vec![Action::ConnectAgent(a.id)];
@@ -1323,10 +1333,97 @@ fn dialog_key(app: &mut App, mut d: Dialog, key: KeyEvent) -> Vec<Action> {
                 }
                 d.error = None;
             }
+            // keep the Model / Effort pick-lists consistent with what was just chosen
+            match d.kind.clone() {
+                DialogKind::AddAgent if d.focus == 1 => {
+                    refresh_add_agent(&mut d, &app.models, true)
+                }
+                DialogKind::AddAgent if d.focus == 3 => {
+                    refresh_add_agent(&mut d, &app.models, false)
+                }
+                DialogKind::AgentModel { agent } if d.focus <= 1 => {
+                    let kind = app
+                        .agents()
+                        .iter()
+                        .find(|a| a.id == agent)
+                        .map(|a| a.provider);
+                    if let Some(k) = kind {
+                        let list = app.models.get(&k).cloned().unwrap_or_default();
+                        refresh_model_dialog_efforts(&mut d, &list);
+                    }
+                }
+                _ => {}
+            }
         }
     }
     app.overlay = Overlay::Dialog(d);
     vec![]
+}
+
+/// Rebuild the Model list (when the provider changed) and the Effort list of an add-agent dialog.
+fn refresh_add_agent(
+    d: &mut Dialog,
+    models: &HashMap<ProviderKind, Vec<ModelChoice>>,
+    provider_changed: bool,
+) {
+    let provider: Option<ProviderKind> = d.fields.get(1).and_then(|f| f.value().parse().ok());
+    let list: Vec<ModelChoice> = provider
+        .and_then(|p| models.get(&p).cloned())
+        .unwrap_or_default();
+    if provider_changed {
+        let mut ids: Vec<String> = vec!["default".into()];
+        ids.extend(list.iter().map(|m| m.id.clone()));
+        if let Some(f) = d.fields.get_mut(3) {
+            f.choices = ids;
+            f.choice = 0;
+            f.hint = if list.is_empty() {
+                "no model list for this provider (not installed / still loading): the default is used"
+                    .into()
+            } else {
+                "←/→ to change".into()
+            };
+        }
+    }
+    let model = d
+        .fields
+        .get(3)
+        .map(|f| f.value())
+        .filter(|m| m != "default");
+    let mut efforts: Vec<String> = vec!["default".into()];
+    efforts.extend(maw_orchestrator::models::efforts_for(
+        &list,
+        model.as_deref(),
+    ));
+    if let Some(f) = d.fields.get_mut(4) {
+        let keep = f.choices.get(f.choice).cloned();
+        f.choice = keep
+            .and_then(|k| efforts.iter().position(|e| *e == k))
+            .unwrap_or(0);
+        f.choices = efforts;
+    }
+}
+
+/// Efforts of the model dialog follow the selected (or typed) model.
+fn refresh_model_dialog_efforts(d: &mut Dialog, list: &[ModelChoice]) {
+    let custom = d.fields.get(1).map(|f| f.value()).unwrap_or_default();
+    let chosen = if custom.is_empty() {
+        d.fields.first().map(|f| f.value()).unwrap_or_default()
+    } else {
+        custom
+    };
+    let model = Some(chosen).filter(|m| !m.is_empty() && m != "default");
+    let mut efforts: Vec<String> = vec!["default".into()];
+    efforts.extend(maw_orchestrator::models::efforts_for(
+        list,
+        model.as_deref(),
+    ));
+    if let Some(f) = d.fields.get_mut(2) {
+        let keep = f.choices.get(f.choice).cloned();
+        f.choice = keep
+            .and_then(|k| efforts.iter().position(|e| *e == k))
+            .unwrap_or(0);
+        f.choices = efforts;
+    }
 }
 
 fn palette_key(app: &mut App, mut p: PaletteState, key: KeyEvent) -> Vec<Action> {
@@ -1960,6 +2057,7 @@ mod tests {
         handle_key(&mut a, press(KeyCode::Tab)); // role
         handle_key(&mut a, press(KeyCode::Right)); // worker -> leader
         handle_key(&mut a, press(KeyCode::Tab)); // model
+        handle_key(&mut a, press(KeyCode::Tab)); // effort
         handle_key(&mut a, press(KeyCode::Tab)); // permissions (last)
         let acts = handle_key(&mut a, press(KeyCode::Enter));
         match &acts[..] {
@@ -1968,8 +2066,10 @@ mod tests {
                 provider,
                 role,
                 model,
+                effort,
                 permission,
             }] => {
+                assert!(effort.is_none());
                 assert_eq!(name, "codex-9");
                 assert_eq!(*provider, ProviderKind::Codex);
                 assert_eq!(*role, Role::Leader);

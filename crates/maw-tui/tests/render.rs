@@ -778,3 +778,122 @@ fn output_overlay_renders_and_scrolls() {
     handle_key(&mut a, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     assert!(matches!(a.overlay, Overlay::None));
 }
+
+// ---- add-agent: model and effort are pick-lists that follow provider and model ----
+
+fn catalog() -> std::collections::HashMap<ProviderKind, Vec<maw_core::provider::ModelChoice>> {
+    use maw_core::provider::ModelChoice;
+    let m = |id: &str, def: bool, eff: &[&str], src: &str| ModelChoice {
+        id: id.into(),
+        display_name: id.into(),
+        description: String::new(),
+        is_default: def,
+        source: src.into(),
+        reasoning_efforts: eff.iter().map(|s| s.to_string()).collect(),
+    };
+    std::collections::HashMap::from([
+        (
+            ProviderKind::Codex,
+            vec![
+                m("gpt-6.1-sol", true, &["low", "high", "ultra"], "provider"),
+                m("gpt-6-luna", false, &["low"], "provider"),
+            ],
+        ),
+        (
+            ProviderKind::Claude,
+            vec![
+                m("sonnet", false, &[], "catalog"),
+                m("opus", false, &[], "catalog"),
+            ],
+        ),
+    ])
+}
+
+#[test]
+fn add_agent_dialog_offers_only_models_of_the_chosen_provider() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use maw_tui::app::Action;
+    let key = |c| KeyEvent::new(c, KeyModifiers::NONE);
+    let mut a = app();
+    a.models = catalog();
+    a.overlay = Overlay::Dialog(Dialog::add_agent_with(&a.models));
+    // starts on codex: its models and the efforts of its default model
+    match &a.overlay {
+        Overlay::Dialog(d) => {
+            assert_eq!(
+                d.fields[3].choices,
+                vec!["default", "gpt-6.1-sol", "gpt-6-luna"]
+            );
+            assert_eq!(d.fields[4].choices, vec!["default", "low", "high", "ultra"]);
+        }
+        _ => unreachable!(),
+    }
+    for c in "w1".chars() {
+        handle_key(&mut a, key(KeyCode::Char(c)));
+    }
+    handle_key(&mut a, key(KeyCode::Tab)); // provider
+    handle_key(&mut a, key(KeyCode::Left)); // codex -> claude
+    match &a.overlay {
+        Overlay::Dialog(d) => {
+            assert_eq!(
+                d.fields[3].choices,
+                vec!["default", "sonnet", "opus"],
+                "Codex ids are gone"
+            );
+            assert_eq!(d.fields[4].choices[0], "default");
+            assert!(d.fields[4].choices.contains(&"max".to_string()));
+        }
+        _ => unreachable!(),
+    }
+    handle_key(&mut a, key(KeyCode::Tab)); // role
+    handle_key(&mut a, key(KeyCode::Tab)); // model
+    handle_key(&mut a, key(KeyCode::Right)); // default -> sonnet
+    handle_key(&mut a, key(KeyCode::Tab)); // effort
+    handle_key(&mut a, key(KeyCode::Right)); // default -> low
+    handle_key(&mut a, key(KeyCode::Tab)); // permissions
+    let acts = handle_key(&mut a, key(KeyCode::Enter));
+    match acts.as_slice() {
+        [Action::AddAgent {
+            provider,
+            model,
+            effort,
+            ..
+        }] => {
+            assert_eq!(*provider, ProviderKind::Claude);
+            assert_eq!(model.as_deref(), Some("sonnet"));
+            assert_eq!(effort.as_deref(), Some("low"));
+        }
+        o => panic!("{o:?}"),
+    }
+}
+
+#[test]
+fn effort_choices_follow_the_selected_model() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let key = |c| KeyEvent::new(c, KeyModifiers::NONE);
+    let mut a = app();
+    a.models = catalog();
+    a.overlay = Overlay::Dialog(Dialog::add_agent_with(&a.models));
+    handle_key(&mut a, key(KeyCode::Tab)); // provider (codex)
+    handle_key(&mut a, key(KeyCode::Tab)); // role
+    handle_key(&mut a, key(KeyCode::Tab)); // model
+    handle_key(&mut a, key(KeyCode::Right)); // gpt-6.1-sol
+    handle_key(&mut a, key(KeyCode::Right)); // gpt-6-luna: only supports low
+    match &a.overlay {
+        Overlay::Dialog(d) => assert_eq!(d.fields[4].choices, vec!["default", "low"]),
+        _ => unreachable!(),
+    }
+}
+
+#[test]
+fn add_agent_dialog_renders_with_and_without_a_catalog() {
+    let mut a = app();
+    a.overlay = Overlay::Dialog(Dialog::add_agent_with(&a.models));
+    let t = render_text(&a, 100, 30);
+    assert!(t.contains("Model") && t.contains("Effort"), "{t}");
+    a.models = catalog();
+    a.overlay = Overlay::Dialog(Dialog::add_agent_with(&a.models));
+    for (w, h) in [(100, 30), (60, 20), (30, 8)] {
+        let _ = render_text(&a, w, h);
+    }
+}

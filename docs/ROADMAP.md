@@ -13,7 +13,8 @@
 ## Added later in session 1
 - Per-agent **model** and **effort** (migration `0002_agent_effort`), `maw models`, `maw agent model|effort|permission`, TUI picker, provider plumbing (Codex `turn/start.effort`, Claude `--effort`). Verified: unit/contract tests and live `maw models`; Claude ids `claude-haiku-5-5`, `claude-sonnet-5-5`, `claude-opus-5-5` were exercised live (`claude-fable-5-1` is accepted but the account was out of credits for it). **Not yet verified live:** that a non-default effort level actually changes behaviour in a running Codex/Claude agent session.
 - TUI `!` shell, scrolling title/hint bars, working-folder display.
-- Test totals after this work: 215 passed, 0 failed, 6 live tests ignored.
+- Model/effort entry is pick-list based (TUI add-agent dialog, CLI numbered picker) and all typed values are validated against the provider's list (`maw_orchestrator::models`). Verified with the installed binary against the live Codex list.
+- Test totals after this work: 220 passed, 0 failed, 6 live tests ignored.
 
 ## Not done / known issues
 - Native Windows build untested (use WSL2). TUI interactive feel not yet exercised in a real terminal (tests only). Mouse is scroll-only.
