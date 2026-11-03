@@ -35,7 +35,32 @@ pub fn check_model(list: &[ModelChoice], kind: ProviderKind, id: &str) -> CoreRe
     )))
 }
 
-/// Effort levels to offer for a model: what the provider reports for it, else a common set.
+/// A model whose list entry carries exactly this has no effort setting at all.
+pub const NO_EFFORT: &str = "none";
+
+fn levels(entry: &ModelChoice) -> Vec<String> {
+    if entry.reasoning_efforts.len() == 1 && entry.reasoning_efforts[0] == NO_EFFORT {
+        vec![]
+    } else {
+        entry.reasoning_efforts.clone()
+    }
+}
+
+/// [`efforts_for`] for a known provider. A local-model provider whose list could not be read (the
+/// server is down) offers no levels instead of the common cloud set, which would not apply to it.
+pub fn efforts_for_provider(
+    kind: ProviderKind,
+    list: &[ModelChoice],
+    model: Option<&str>,
+) -> Vec<String> {
+    if kind == ProviderKind::Ollama && list.is_empty() {
+        return vec![];
+    }
+    efforts_for(list, model)
+}
+
+/// Effort levels to offer for a model: what the provider reports for it (possibly none at all),
+/// else a common set.
 pub fn efforts_for(list: &[ModelChoice], model: Option<&str>) -> Vec<String> {
     let found = list
         .iter()
@@ -48,13 +73,13 @@ pub fn efforts_for(list: &[ModelChoice], model: Option<&str>) -> Vec<String> {
         && list.iter().all(|m| !m.reasoning_efforts.is_empty())
     {
         return if list.len() == 1 {
-            list[0].reasoning_efforts.clone()
+            levels(&list[0])
         } else {
             vec![]
         };
     }
     match found {
-        Some(m) if !m.reasoning_efforts.is_empty() => m.reasoning_efforts.clone(),
+        Some(m) if !m.reasoning_efforts.is_empty() => levels(m),
         _ => ["low", "medium", "high", "xhigh", "max"]
             .map(String::from)
             .to_vec(),
@@ -105,7 +130,7 @@ mod tests {
     }
 
     #[test]
-    fn without_a_chosen_model_ollama_style_lists_do_not_get_the_generic_levels() {
+    fn ollama_style_lists_offer_levels_only_where_the_model_has_them() {
         let mk = |id: &str, e: &[&str]| ModelChoice {
             id: id.into(),
             display_name: id.into(),
@@ -114,23 +139,34 @@ mod tests {
             source: "provider".into(),
             reasoning_efforts: e.iter().map(|s| s.to_string()).collect(),
         };
-        let two = [mk("a", &["on", "off"]), mk("b", &["off"])];
+        let two = [
+            mk("qwen3:4b", &["none"]),
+            mk("gpt-oss:20b", &["low", "medium", "high"]),
+        ];
         assert!(
             efforts_for(&two, None).is_empty(),
             "ambiguous: only 'default' is offered"
         );
-        assert_eq!(efforts_for(&two, Some("b")), ["off"]);
-        let one = [mk("a", &["on", "off"])];
+        assert!(
+            efforts_for(&two, Some("qwen3:4b")).is_empty(),
+            "'none' means no levels at all"
+        );
         assert_eq!(
-            efforts_for(&one, None),
-            ["on", "off"],
+            efforts_for(&two, Some("gpt-oss:20b")),
+            ["low", "medium", "high"]
+        );
+        let one = [mk("qwen3:4b", &["none"])];
+        assert!(
+            efforts_for(&one, None).is_empty(),
             "a single installed model is unambiguous"
         );
+        let one_oss = [mk("gpt-oss:20b", &["low", "medium", "high"])];
+        assert_eq!(efforts_for(&one_oss, None), ["low", "medium", "high"]);
         // providers without their own levels (Claude catalog) keep the common set
         let claude = [mk("sonnet", &[])];
         assert_eq!(efforts_for(&claude, None).len(), 5);
+        assert_eq!(efforts_for(&[], Some("x")).len(), 5);
     }
-
     #[test]
     fn efforts_follow_the_model() {
         let mut luna = m("luna", "provider");

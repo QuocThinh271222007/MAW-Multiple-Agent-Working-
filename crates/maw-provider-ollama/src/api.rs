@@ -249,26 +249,29 @@ pub fn parse_ps(v: &Value) -> Vec<LoadedModel> {
         .unwrap_or_default()
 }
 
-/// Effort levels MAW offers for a model: `low/medium/high` for gpt-oss (which takes levels),
-/// `on/off` for other thinking models, and `off` only for models that cannot think.
+/// Marker in [`maw_core::provider::ModelChoice::reasoning_efforts`] meaning "this model has no
+/// effort setting" (an empty list would mean "use the common levels").
+pub const NO_EFFORT: &str = "none";
+
+/// Effort levels MAW offers for a model. Only the `gpt-oss` family takes real levels
+/// (`low`/`medium`/`high`). Other models either cannot think or think whenever they are asked to;
+/// turning thinking off is not offered because it is not reliable (with `qwen3:4b` the model keeps
+/// reasoning and the text just ends up inside the answer).
 pub fn efforts_for(model: &str, info: &ModelInfo) -> Vec<String> {
-    let v: &[&str] = if !info.has("thinking") {
-        &["off"]
-    } else if model.starts_with("gpt-oss") {
-        &["low", "medium", "high"]
+    if info.has("thinking") && model.starts_with("gpt-oss") {
+        ["low", "medium", "high"].map(String::from).to_vec()
     } else {
-        &["on", "off"]
-    };
-    v.iter().map(|s| s.to_string()).collect()
+        vec![NO_EFFORT.to_string()]
+    }
 }
 
-/// The `think` request field for the chosen effort; `None` = leave Ollama's default.
+/// The `think` request field. `None` = the model cannot think, so nothing is sent. A stale
+/// `on`/`off` stored by an earlier version is ignored.
 pub fn think_value(model: &str, info: &ModelInfo, effort: Option<&str>) -> Option<Value> {
     if !info.has("thinking") {
         return None;
     }
     match effort {
-        Some("off") => Some(Value::Bool(false)),
         Some(l @ ("low" | "medium" | "high")) if model.starts_with("gpt-oss") => {
             Some(Value::String(l.to_string()))
         }
@@ -352,20 +355,35 @@ mod tests {
         }));
         assert!(info.has("tools") && info.has("thinking"));
         assert_eq!(info.context_length, Some(40960));
-        assert_eq!(efforts_for("qwen3:4b", &info), ["on", "off"]);
+        // no effort setting for ordinary models, real levels only for gpt-oss
+        assert_eq!(efforts_for("qwen3:4b", &info), [NO_EFFORT]);
         assert_eq!(efforts_for("gpt-oss:20b", &info), ["low", "medium", "high"]);
         assert_eq!(think_value("qwen3:4b", &info, None), Some(json!(true)));
+        // values stored by an earlier version (on/off) or typed by hand are ignored for qwen3
         assert_eq!(
             think_value("qwen3:4b", &info, Some("off")),
-            Some(json!(false))
+            Some(json!(true))
+        );
+        assert_eq!(
+            think_value("qwen3:4b", &info, Some("high")),
+            Some(json!(true))
         );
         assert_eq!(
             think_value("gpt-oss:20b", &info, Some("high")),
             Some(json!("high"))
         );
+        assert_eq!(think_value("gpt-oss:20b", &info, None), Some(json!(true)));
         let plain = ModelInfo::default();
-        assert!(think_value("llama3", &plain, None).is_none());
-        assert_eq!(efforts_for("llama3", &plain), ["off"]);
+        assert!(
+            think_value("llama3", &plain, None).is_none(),
+            "no think field for models that cannot think"
+        );
+        assert_eq!(efforts_for("llama3", &plain), [NO_EFFORT]);
+        assert_eq!(
+            efforts_for("gpt-oss:20b", &plain),
+            [NO_EFFORT],
+            "levels need the thinking capability"
+        );
         let ps = parse_ps(&json!({"models":[{"name":"qwen3:4b","size":3000,"size_vram":2000}]}));
         assert_eq!(
             ps,

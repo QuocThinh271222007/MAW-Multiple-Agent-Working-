@@ -1767,3 +1767,51 @@ fn performance_view_adapts_to_any_terminal_size_without_panicking() {
         "{short}"
     );
 }
+
+#[test]
+fn ollama_models_offer_effort_only_when_the_model_really_has_levels() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use maw_tui::app::{run_cmd, Cmd};
+    let key = |c| KeyEvent::new(c, KeyModifiers::NONE);
+    let mk = |id: &str, e: &[&str]| maw_core::provider::ModelChoice {
+        id: id.into(),
+        display_name: id.into(),
+        description: String::new(),
+        is_default: false,
+        source: "provider".into(),
+        reasoning_efforts: e.iter().map(|s| s.to_string()).collect(),
+    };
+    let mut a = app();
+    a.models.insert(
+        ProviderKind::Ollama,
+        vec![
+            mk("qwen3:4b", &["none"]),
+            mk("gpt-oss:20b", &["low", "medium", "high"]),
+        ],
+    );
+    run_cmd(&mut a, Cmd::AddAgent);
+    handle_key(&mut a, key(KeyCode::Tab)); // Provider
+    handle_key(&mut a, key(KeyCode::Right)); // codex -> ollama
+    let efforts = |a: &App| match &a.overlay {
+        Overlay::Dialog(d) => (d.fields[4].choices.clone(), d.fields[4].hint.clone()),
+        _ => panic!("no dialog"),
+    };
+    // no model chosen and two installed: nothing to choose yet
+    let (e, hint) = efforts(&a);
+    assert_eq!(e, ["default"], "no effort list for an undecided model");
+    assert!(hint.contains("no effort setting"), "{hint}");
+    handle_key(&mut a, key(KeyCode::Tab)); // Role
+    handle_key(&mut a, key(KeyCode::Tab)); // Model (3 choices: a horizontal selector)
+    handle_key(&mut a, key(KeyCode::Right)); // qwen3:4b
+    let (e, hint) = efforts(&a);
+    assert_eq!(e, ["default"], "qwen3 has no effort setting");
+    assert!(hint.contains("no effort setting"));
+    assert!(
+        !render_text(&a, 120, 30).contains("none"),
+        "the internal marker is never shown"
+    );
+    handle_key(&mut a, key(KeyCode::Right)); // gpt-oss:20b
+    let (e, hint) = efforts(&a);
+    assert_eq!(e, ["default", "low", "medium", "high"]);
+    assert!(hint.is_empty(), "{hint}");
+}

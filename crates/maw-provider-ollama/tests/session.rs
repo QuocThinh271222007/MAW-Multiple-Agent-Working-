@@ -402,7 +402,11 @@ async fn list_models_reports_size_and_capabilities() {
         "{}",
         models[0].description
     );
-    assert_eq!(models[0].reasoning_efforts, ["on", "off"]);
+    assert_eq!(
+        models[0].reasoning_efforts,
+        ["none"],
+        "ordinary models have no effort setting"
+    );
     let info = provider(&fake.url).detect().await.unwrap();
     assert!(info.installed && info.version.as_deref() == Some("0.0.test"));
 }

@@ -36,9 +36,15 @@ never sees MCP. Third-party MCP servers are not supported for Ollama agents.
   `maw_task_submit_result`. Treat results as unverified; MAW's evidence rules still decide DONE.
 * **Reasoning is shown only when the model streams it.** Thinking-capable models (Qwen3, gpt-oss, ...)
   send it in a separate field; it appears in the Thinking lines.
-* **Effort** maps to Ollama's `think` option: `on`/`off` for thinking models, `low`/`medium`/`high`
-  for `gpt-oss`, `off` only for models that cannot think. On some builds (observed with `qwen3:4b`)
-  `off` does not stop the reasoning, it just stops separating it from the answer.
+* **Effort** exists only where the model really has levels: the `gpt-oss` family takes `low` /
+  `medium` / `high` (sent as Ollama's `think` level). Every other model has **no effort setting**:
+  thinking models think whenever Ollama is asked to, and models that cannot think get no `think`
+  field. A switch to turn thinking off is deliberately not offered: with `qwen3:4b` the request
+  `think: false` did not stop the reasoning, it only moved the text from the separate field into
+  the answer (and used more tokens). The CLI and dialogs refuse an effort for a model without
+  levels; if the server cannot be reached to read the model list, no levels are offered either.
+  A value stored by an earlier version (`on` / `off`) is ignored. The `gpt-oss` levels are
+  implemented but not yet tried on a real `gpt-oss` model.
 * **Context window** is `num_ctx` (default 8192). Bigger windows use more memory. Old tool output is
   trimmed from the history when the window fills up (token counts used for this are estimates and are
   never shown as usage).

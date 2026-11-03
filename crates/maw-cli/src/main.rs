@@ -586,8 +586,21 @@ async fn cmd_agent(ctx: &Ctx, project: Option<&str>, cmd: AgentCmd) -> Result<()
                 anyhow_core(maw_orchestrator::models::check_model(&list, provider, m))?;
             }
             if let Some(e) = &effort {
-                // shape check now; per-model levels are checked below when the model list is known
-                maw_core::normalize_effort(e).map_err(|e| anyhow::anyhow!(e))?;
+                let norm = maw_core::normalize_effort(e).map_err(|e| anyhow::anyhow!(e))?;
+                if let Some(level) = norm {
+                    let list = models_for(ctx, provider).await;
+                    let allowed = maw_orchestrator::models::efforts_for_provider(
+                        provider,
+                        &list,
+                        model.as_deref(),
+                    );
+                    if !allowed.contains(&level) {
+                        bail!(
+                            "{}",
+                            no_such_effort(provider, model.as_deref(), &level, &allowed)
+                        );
+                    }
+                }
             }
             let mut a = anyhow_core(eng.add_agent(&name, provider, role, model, permission, None))?;
             if let Some(e) = effort {
@@ -656,7 +669,11 @@ async fn cmd_agent(ctx: &Ctx, project: Option<&str>, cmd: AgentCmd) -> Result<()
         AgentCmd::Effort { name, level } => {
             let a = anyhow_core(eng.resolve_agent(&name))?;
             let list = models_for(ctx, a.provider).await;
-            let allowed = maw_orchestrator::models::efforts_for(&list, a.model.as_deref());
+            let allowed = maw_orchestrator::models::efforts_for_provider(
+                a.provider,
+                &list,
+                a.model.as_deref(),
+            );
             let chosen = match level {
                 Some(l) => l,
                 None => {
@@ -677,7 +694,10 @@ async fn cmd_agent(ctx: &Ctx, project: Option<&str>, cmd: AgentCmd) -> Result<()
             let norm = maw_core::normalize_effort(&chosen).map_err(|e| anyhow::anyhow!(e))?;
             if let Some(l) = &norm {
                 if !allowed.contains(l) {
-                    bail!("'{l}' is not an effort level for {} (model {}). Choose one of: default, {}", a.provider, a.model.as_deref().unwrap_or("default"), allowed.join(", "));
+                    bail!(
+                        "{}",
+                        no_such_effort(a.provider, a.model.as_deref(), l, &allowed)
+                    );
                 }
             }
             let a = anyhow_core(eng.set_agent_effort(&a.id, &chosen))?;
@@ -1253,6 +1273,23 @@ async fn cmd_models_pull(ctx: &Ctx, name: Option<String>) -> Result<()> {
     }
 }
 
+fn no_such_effort(
+    provider: ProviderKind,
+    model: Option<&str>,
+    level: &str,
+    allowed: &[String],
+) -> String {
+    let model = model.unwrap_or("default");
+    if allowed.is_empty() {
+        format!("model '{model}' ({provider}) has no effort setting; leave effort at `default`")
+    } else {
+        format!(
+            "'{level}' is not an effort level for {provider} (model {model}). Choose one of: default, {}",
+            allowed.join(", ")
+        )
+    }
+}
+
 async fn cmd_models(ctx: &Ctx, provider: Option<String>) -> Result<()> {
     let want: Vec<ProviderKind> = match provider {
         Some(p) => vec![p
@@ -1275,7 +1312,9 @@ async fn cmd_models(ctx: &Ctx, provider: Option<String>) -> Result<()> {
         match tokio::time::timeout(Duration::from_secs(45), p.list_models()).await {
             Ok(Ok(models)) => {
                 for m in models {
-                    let eff = if m.reasoning_efforts.is_empty() {
+                    let eff = if m.reasoning_efforts.is_empty()
+                        || m.reasoning_efforts == [maw_orchestrator::models::NO_EFFORT]
+                    {
                         String::new()
                     } else {
                         format!("  [effort: {}]", m.reasoning_efforts.join("/"))

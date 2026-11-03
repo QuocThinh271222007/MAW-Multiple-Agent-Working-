@@ -684,20 +684,13 @@ impl Dialog {
         let cur = agent.model.clone().unwrap_or_else(|| "default".into());
         let idx = ids.iter().position(|i| *i == cur).unwrap_or(0);
         let choices: Vec<&str> = ids.iter().map(|s| s.as_str()).collect();
-        // effort levels reported for the chosen/default model, else the common set
+        // levels for this agent's model, from the same function the other dialogs use
         let mut efforts: Vec<String> = vec!["default".into()];
-        let reported: Vec<String> = models
-            .iter()
-            .find(|m| {
-                Some(&m.id) == agent.model.as_ref() || (agent.model.is_none() && m.is_default)
-            })
-            .map(|m| m.reasoning_efforts.clone())
-            .unwrap_or_default();
-        if reported.is_empty() {
-            efforts.extend(["low", "medium", "high", "xhigh", "max"].map(String::from));
-        } else {
-            efforts.extend(reported);
-        }
+        efforts.extend(maw_orchestrator::models::efforts_for_provider(
+            agent.provider,
+            models,
+            agent.model.as_deref(),
+        ));
         let eidx = agent
             .effort
             .as_ref()
@@ -730,7 +723,14 @@ impl Dialog {
                     },
                     ..Field::text("Custom model id (advanced)", false, "")
                 },
-                Field::select("Effort", &echoices, eidx),
+                Field {
+                    hint: if echoices.len() == 1 {
+                        "this model has no effort setting".into()
+                    } else {
+                        String::new()
+                    },
+                    ..Field::select("Effort", &echoices, eidx)
+                },
             ],
             focus: 0,
             error: None,
@@ -1683,7 +1683,7 @@ fn after_dialog_edit(app: &App, d: &mut Dialog) {
                 .map(|a| a.provider);
             if let Some(k) = kind {
                 let list = app.models.get(&k).cloned().unwrap_or_default();
-                refresh_model_dialog_efforts(d, &list);
+                refresh_model_dialog_efforts(d, k, &list);
             }
         }
         _ => {}
@@ -1746,7 +1746,8 @@ fn refresh_add_agent(
         .map(|f| f.value())
         .filter(|m| m != "default");
     let mut efforts: Vec<String> = vec!["default".into()];
-    efforts.extend(maw_orchestrator::models::efforts_for(
+    efforts.extend(maw_orchestrator::models::efforts_for_provider(
+        provider.unwrap_or(ProviderKind::Claude),
         &list,
         model.as_deref(),
     ));
@@ -1755,12 +1756,17 @@ fn refresh_add_agent(
         f.choice = keep
             .and_then(|k| efforts.iter().position(|e| *e == k))
             .unwrap_or(0);
+        f.hint = if efforts.len() == 1 {
+            "this model has no effort setting".into()
+        } else {
+            String::new()
+        };
         f.choices = efforts;
     }
 }
 
 /// Efforts of the model dialog follow the selected (or typed) model.
-fn refresh_model_dialog_efforts(d: &mut Dialog, list: &[ModelChoice]) {
+fn refresh_model_dialog_efforts(d: &mut Dialog, kind: ProviderKind, list: &[ModelChoice]) {
     let custom = d.fields.get(1).map(|f| f.value()).unwrap_or_default();
     let chosen = if custom.is_empty() {
         d.fields.first().map(|f| f.value()).unwrap_or_default()
@@ -1769,7 +1775,8 @@ fn refresh_model_dialog_efforts(d: &mut Dialog, list: &[ModelChoice]) {
     };
     let model = Some(chosen).filter(|m| !m.is_empty() && m != "default");
     let mut efforts: Vec<String> = vec!["default".into()];
-    efforts.extend(maw_orchestrator::models::efforts_for(
+    efforts.extend(maw_orchestrator::models::efforts_for_provider(
+        kind,
         list,
         model.as_deref(),
     ));
@@ -1778,6 +1785,11 @@ fn refresh_model_dialog_efforts(d: &mut Dialog, list: &[ModelChoice]) {
         f.choice = keep
             .and_then(|k| efforts.iter().position(|e| *e == k))
             .unwrap_or(0);
+        f.hint = if efforts.len() == 1 {
+            "this model has no effort setting".into()
+        } else {
+            String::new()
+        };
         f.choices = efforts;
     }
 }
