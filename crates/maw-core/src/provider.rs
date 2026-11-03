@@ -252,6 +252,14 @@ pub struct ModelChoice {
     pub reasoning_efforts: Vec<String>,
 }
 
+/// Progress of a model download (bytes are totals over everything the download needs).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PullProgress {
+    pub status: String,
+    pub completed: u64,
+    pub total: u64,
+}
+
 #[async_trait]
 pub trait AgentProvider: Send + Sync {
     fn kind(&self) -> ProviderKind;
@@ -260,6 +268,24 @@ pub trait AgentProvider: Send + Sync {
     /// user's terminal and never sees the credentials.
     fn login_command(&self) -> Option<Vec<String>> {
         None
+    }
+
+    /// Models this provider can download, for providers that run local models. Each entry's
+    /// `source` is `catalog`; entries already installed are not filtered out here.
+    fn pull_suggestions(&self) -> Vec<ModelChoice> {
+        Vec::new()
+    }
+
+    /// Download a model. Progress goes to `progress` (best effort); dropping the future cancels
+    /// the download. Returns a one-line summary for the user.
+    async fn pull_model(
+        &self,
+        _name: &str,
+        _progress: mpsc::Sender<PullProgress>,
+    ) -> ProviderResult<String> {
+        Err(ProviderError::Unsupported(
+            "this provider has no downloadable models".into(),
+        ))
     }
 
     /// Models selectable for this provider. Providers that cannot enumerate models say so.

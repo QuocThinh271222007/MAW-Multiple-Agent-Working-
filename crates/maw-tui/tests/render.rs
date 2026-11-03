@@ -1512,3 +1512,126 @@ fn removing_an_agent_needs_explicit_confirmation_and_can_force() {
         .iter()
         .any(|c| c.name == "agent remove"));
 }
+
+#[test]
+fn the_mock_provider_is_offered_only_in_demo_projects() {
+    use maw_tui::app::Dialog;
+    let none = std::collections::HashMap::new();
+    assert_eq!(
+        Dialog::add_agent_with(&none).fields[1].choices,
+        ["claude", "codex", "ollama"]
+    );
+    let demo = Dialog::add_agent_for(&none, true);
+    assert!(demo.fields[1].choices.contains(&"mock".to_string()));
+}
+
+#[test]
+fn model_download_dialog_offers_suggestions_marks_installed_and_returns_the_choice() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use maw_tui::app::{run_cmd, Action, Cmd};
+    let key = |c| KeyEvent::new(c, KeyModifiers::NONE);
+    let mk = |id: &str| maw_core::provider::ModelChoice {
+        id: id.into(),
+        display_name: id.into(),
+        description: format!("{id} 5.2 GB · tools"),
+        is_default: false,
+        source: "catalog".into(),
+        reasoning_efforts: vec![],
+    };
+    let mut a = app();
+    // without the Ollama provider there is nothing to offer, and the user is told
+    run_cmd(&mut a, Cmd::PullModel);
+    assert!(a
+        .toast
+        .as_ref()
+        .is_some_and(|t| t.text.contains("not available")));
+
+    a.pull_suggestions = vec![
+        mk("qwen3:8b"),
+        mk("llama3.1:8b"),
+        mk("mistral:7b"),
+        mk("phi4-mini"),
+    ];
+    a.models
+        .insert(ProviderKind::Ollama, vec![mk("llama3.1:8b")]);
+    run_cmd(&mut a, Cmd::PullModel);
+    let t = render_text(&a, 120, 30);
+    assert!(
+        t.contains("Download a model") && t.contains("Suggested"),
+        "{t}"
+    );
+
+    // nothing chosen yet: refused with an explanation
+    handle_key(&mut a, key(KeyCode::Enter));
+    let acts = handle_key(&mut a, key(KeyCode::Enter));
+    assert!(acts.is_empty());
+    match &a.overlay {
+        Overlay::Dialog(d) => assert!(
+            d.error
+                .as_deref()
+                .unwrap_or("")
+                .contains("pick a suggested model"),
+            "{:?}",
+            d.error
+        ),
+        _ => panic!("dialog must stay open"),
+    }
+    // choose the first suggestion and confirm
+    let mut b = app();
+    b.pull_suggestions = a.pull_suggestions.clone();
+    b.models = a.models.clone();
+    run_cmd(&mut b, Cmd::PullModel);
+    handle_key(&mut b, key(KeyCode::Down));
+    assert!(render_text(&b, 120, 30).contains("qwen3:8b"));
+    handle_key(&mut b, key(KeyCode::Enter));
+    let acts = handle_key(&mut b, key(KeyCode::Enter));
+    assert!(
+        matches!(acts.as_slice(), [Action::PullModel { name }] if name == "qwen3:8b"),
+        "{acts:?}"
+    );
+    // the second suggestion is already installed and says so
+    let mut c = app();
+    c.pull_suggestions = a.pull_suggestions.clone();
+    c.models = a.models.clone();
+    run_cmd(&mut c, Cmd::PullModel);
+    handle_key(&mut c, key(KeyCode::Down));
+    handle_key(&mut c, key(KeyCode::Down));
+    let t = render_text(&c, 140, 30);
+    assert!(t.contains("✓ installed"), "{t}");
+    assert!(maw_tui::app::COMMANDS
+        .iter()
+        .any(|c| c.name == "model download"));
+}
+
+#[test]
+fn arrows_leave_a_long_list_at_either_end_so_you_can_go_back_up_a_form() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use maw_tui::app::run_cmd;
+    let key = |c| KeyEvent::new(c, KeyModifiers::NONE);
+    let focus = |a: &App| match &a.overlay {
+        Overlay::Dialog(d) => d.focus,
+        _ => panic!("no dialog"),
+    };
+    let mut a = app();
+    run_cmd(&mut a, maw_tui::app::Cmd::AddAgent);
+    for _ in 0..2 {
+        handle_key(&mut a, key(KeyCode::Tab)); // Name -> Provider -> Role (a 4-option list)
+    }
+    assert_eq!(focus(&a), 2);
+    handle_key(&mut a, key(KeyCode::Down)); // inside the list: picks the next role, stays on the field
+    assert_eq!(focus(&a), 2);
+    handle_key(&mut a, key(KeyCode::Up)); // back to the first role
+    assert_eq!(focus(&a), 2);
+    handle_key(&mut a, key(KeyCode::Up)); // at the top: leaves to the previous field
+    assert_eq!(focus(&a), 1, "Up from the first item goes back up the form");
+    handle_key(&mut a, key(KeyCode::Down)); // Provider is a short selector: Down moves on
+    assert_eq!(focus(&a), 2);
+    for _ in 0..3 {
+        handle_key(&mut a, key(KeyCode::Down)); // to the last role
+    }
+    assert_eq!(focus(&a), 2);
+    handle_key(&mut a, key(KeyCode::Down)); // past the last item: on to Model
+    assert_eq!(focus(&a), 3);
+    handle_key(&mut a, key(KeyCode::BackTab)); // Shift+Tab still works everywhere
+    assert_eq!(focus(&a), 2);
+}

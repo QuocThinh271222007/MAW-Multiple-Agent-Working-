@@ -40,6 +40,19 @@ pub fn efforts_for(list: &[ModelChoice], model: Option<&str>) -> Vec<String> {
     let found = list
         .iter()
         .find(|m| Some(m.id.as_str()) == model || (model.is_none() && m.is_default));
+    // No model chosen and the provider has no default of its own (Ollama): every entry carries
+    // its own levels, so offer a model's levels only when the choice is unambiguous.
+    if found.is_none()
+        && model.is_none()
+        && !list.is_empty()
+        && list.iter().all(|m| !m.reasoning_efforts.is_empty())
+    {
+        return if list.len() == 1 {
+            list[0].reasoning_efforts.clone()
+        } else {
+            vec![]
+        };
+    }
     match found {
         Some(m) if !m.reasoning_efforts.is_empty() => m.reasoning_efforts.clone(),
         _ => ["low", "medium", "high", "xhigh", "max"]
@@ -89,6 +102,33 @@ mod tests {
         );
         // no list available: do not block
         assert!(check_model(&[], ProviderKind::Codex, "anything").is_ok());
+    }
+
+    #[test]
+    fn without_a_chosen_model_ollama_style_lists_do_not_get_the_generic_levels() {
+        let mk = |id: &str, e: &[&str]| ModelChoice {
+            id: id.into(),
+            display_name: id.into(),
+            description: String::new(),
+            is_default: false,
+            source: "provider".into(),
+            reasoning_efforts: e.iter().map(|s| s.to_string()).collect(),
+        };
+        let two = [mk("a", &["on", "off"]), mk("b", &["off"])];
+        assert!(
+            efforts_for(&two, None).is_empty(),
+            "ambiguous: only 'default' is offered"
+        );
+        assert_eq!(efforts_for(&two, Some("b")), ["off"]);
+        let one = [mk("a", &["on", "off"])];
+        assert_eq!(
+            efforts_for(&one, None),
+            ["on", "off"],
+            "a single installed model is unambiguous"
+        );
+        // providers without their own levels (Claude catalog) keep the common set
+        let claude = [mk("sonnet", &[])];
+        assert_eq!(efforts_for(&claude, None).len(), 5);
     }
 
     #[test]

@@ -17,6 +17,7 @@ maw-mcp.workspace = true
 maw-tui.workspace = true
 maw-provider-codex.workspace = true
 maw-provider-claude.workspace = true
+maw-provider-ollama.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
 clap.workspace = true

@@ -108,6 +108,42 @@ pub async fn run(ctx: &Ctx) -> bool {
             }
         }
     }
+    // local models (Ollama)
+    {
+        let p = crate::providers::ollama(&ctx.cfg.ollama);
+        match p.detect().await {
+            Ok(i) if i.installed => {
+                lines.push(ok(format!(
+                    "ollama: server {} at {}",
+                    i.version.unwrap_or_default(),
+                    i.executable.unwrap_or_default()
+                )));
+                match p.list_models().await {
+                    Ok(m) if m.is_empty() => {
+                        lines.push(info("ollama: no models installed (ollama pull <model>)"))
+                    }
+                    Ok(m) => {
+                        let usable = m
+                            .iter()
+                            .filter(|x| !x.description.contains("NO tool support"))
+                            .count();
+                        lines.push(ok(format!(
+                            "ollama: {} model(s), {usable} can run as agents (tool calling)",
+                            m.len()
+                        )));
+                    }
+                    Err(e) => lines.push(info(format!("ollama: could not list models: {e}"))),
+                }
+            }
+            Ok(i) => {
+                lines.push(info(format!(
+                    "ollama: no server reachable (optional; only needed for local agents). {}",
+                    i.notes.join(" ")
+                )));
+            }
+            Err(e) => lines.push(info(format!("ollama: check failed: {e}"))),
+        }
+    }
     if ctx.os == Os::Wsl {
         lines.push(info("WSL note: provider authentication inside WSL is separate from Windows; log in from inside WSL (`maw auth codex`, `maw auth claude`)"));
     }

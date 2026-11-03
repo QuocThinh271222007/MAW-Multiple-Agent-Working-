@@ -110,9 +110,11 @@ enum Cmd {
     },
     /// List the models each provider offers (Codex: queried live from your account)
     Models {
-        /// claude | codex (default: both)
+        /// claude | codex | ollama (default: all)
         #[arg(long)]
         provider: Option<String>,
+        #[command(subcommand)]
+        cmd: Option<ModelsCmd>,
     },
     /// Token usage per agent and task, as reported by the providers
     Usage {
@@ -408,7 +410,14 @@ async fn real_main(cli: Cli) -> Result<()> {
         }) => cmd_logs(&ctx, project_arg.as_deref(), lines, events, follow).await,
         Some(Cmd::Config { cmd }) => cmd_config(&ctx, cmd),
         Some(Cmd::Demo { headless, fast }) => cmd_demo(headless, fast).await,
-        Some(Cmd::Models { provider }) => cmd_models(&ctx, provider).await,
+        Some(Cmd::Models {
+            cmd: Some(ModelsCmd::Pull { name }),
+            ..
+        }) => cmd_models_pull(&ctx, name).await,
+        Some(Cmd::Models {
+            provider,
+            cmd: None,
+        }) => cmd_models(&ctx, provider).await,
         Some(Cmd::Usage { json }) => cmd_usage(&ctx, project_arg.as_deref(), json),
         Some(Cmd::Tools { markdown }) => {
             print_tools(markdown);
@@ -468,6 +477,7 @@ async fn cmd_auth(ctx: &Ctx, cmd: AuthCmd) -> Result<()> {
             for (name, p) in [
                 ("codex", providers::codex(ctx.cfg.codex.path.clone())),
                 ("claude", providers::claude(ctx.cfg.claude.path.clone())),
+                ("ollama", providers::ollama(&ctx.cfg.ollama)),
             ] {
                 let info = p.detect().await;
                 match info {
@@ -1155,17 +1165,110 @@ fn follow_done() -> bool {
     false
 }
 
+#[derive(Subcommand)]
+enum ModelsCmd {
+    /// Download a model for local agents (Ollama). Without a name, pick from suggestions.
+    Pull {
+        /// e.g. qwen3:8b (limited to 8B parameters / ~6.5 GB by default; see [ollama] in the config)
+        name: Option<String>,
+    },
+}
+
+async fn cmd_models_pull(ctx: &Ctx, name: Option<String>) -> Result<()> {
+    use std::io::{BufRead, IsTerminal, Write};
+    let p = providers::ollama(&ctx.cfg.ollama);
+    let name = match name {
+        Some(n) => n,
+        None => {
+            if !std::io::stdin().is_terminal() {
+                bail!("give a model name, e.g. `maw models pull qwen3:8b` (see `maw models pull` in a terminal for suggestions)");
+            }
+            let installed: Vec<String> = p
+                .list_models()
+                .await
+                .map(|l| l.into_iter().map(|m| m.id).collect())
+                .unwrap_or_default();
+            let sugg = p.pull_suggestions();
+            println!(
+                "Models that fit {}B / ~{:.1} GB (installed ones are marked):",
+                ctx.cfg.ollama.max_pull_params_b, ctx.cfg.ollama.max_pull_gb
+            );
+            for (i, m) in sugg.iter().enumerate() {
+                let mark = if installed.contains(&m.id) {
+                    "installed"
+                } else {
+                    ""
+                };
+                println!("  {:>2}) {:<18} {} {}", i + 1, m.id, m.description, mark);
+            }
+            print!("Number, or type a model name (Enter = cancel): ");
+            std::io::stdout().flush()?;
+            let mut line = String::new();
+            std::io::stdin().lock().read_line(&mut line)?;
+            let t = line.trim();
+            if t.is_empty() {
+                return Ok(());
+            }
+            match t.parse::<usize>() {
+                Ok(n) => sugg
+                    .get(n.wrapping_sub(1))
+                    .map(|m| m.id.clone())
+                    .ok_or_else(|| anyhow::anyhow!("{n} is not in the list"))?,
+                Err(_) => t.to_string(),
+            }
+        }
+    };
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<maw_core::provider::PullProgress>(64);
+    let printer = tokio::spawn(async move {
+        let mut last = String::new();
+        while let Some(pr) = rx.recv().await {
+            let line = match (pr.completed * 100).checked_div(pr.total) {
+                Some(pct) => format!(
+                    "  {:>3}%  {:.2} / {:.2} GB  {}",
+                    pct,
+                    pr.completed as f64 / 1e9,
+                    pr.total as f64 / 1e9,
+                    pr.status.split(' ').next().unwrap_or("")
+                ),
+                None => format!("  {}", pr.status),
+            };
+            if line != last {
+                print!("\r{line:<70}");
+                let _ = std::io::stdout().flush();
+                last = line;
+            }
+        }
+        println!();
+    });
+    println!("Downloading {name} ...");
+    let res = p.pull_model(&name, tx).await;
+    let _ = printer.await;
+    match res {
+        Ok(msg) => {
+            println!("✓ {msg}");
+            println!("  use it: maw agent add --name local --provider ollama --model {name}");
+            Ok(())
+        }
+        Err(e) => bail!("{e}"),
+    }
+}
+
 async fn cmd_models(ctx: &Ctx, provider: Option<String>) -> Result<()> {
     let want: Vec<ProviderKind> = match provider {
         Some(p) => vec![p
             .parse::<ProviderKind>()
             .map_err(|e: String| anyhow::anyhow!(e))?],
-        None => vec![ProviderKind::Claude, ProviderKind::Codex],
+        None => vec![
+            ProviderKind::Claude,
+            ProviderKind::Codex,
+            ProviderKind::Ollama,
+        ],
     };
     for kind in want {
         let p = match kind {
             ProviderKind::Claude => providers::claude(ctx.cfg.claude.path.clone()),
             ProviderKind::Codex => providers::codex(ctx.cfg.codex.path.clone()),
+            ProviderKind::Ollama => providers::ollama(&ctx.cfg.ollama),
             ProviderKind::Mock => continue,
         };
         println!("{kind}:");
@@ -1199,6 +1302,7 @@ async fn models_for(ctx: &Ctx, kind: ProviderKind) -> Vec<maw_core::provider::Mo
     let p = match kind {
         ProviderKind::Claude => providers::claude(ctx.cfg.claude.path.clone()),
         ProviderKind::Codex => providers::codex(ctx.cfg.codex.path.clone()),
+        ProviderKind::Ollama => providers::ollama(&ctx.cfg.ollama),
         ProviderKind::Mock => return vec![],
     };
     match tokio::time::timeout(Duration::from_secs(45), p.list_models()).await {
@@ -1242,6 +1346,7 @@ async fn offer_login(ctx: &Ctx, kind: ProviderKind) -> Result<()> {
     let p = match kind {
         ProviderKind::Claude => providers::claude(ctx.cfg.claude.path.clone()),
         ProviderKind::Codex => providers::codex(ctx.cfg.codex.path.clone()),
+        ProviderKind::Ollama => return Ok(()), // local server: nothing to log in to
         ProviderKind::Mock => return Ok(()),
     };
     match p.auth_status().await {

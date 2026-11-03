@@ -36,3 +36,12 @@
 - Transcript kinds `Thinking` and `Protocol` (MAW's own `maw_*` tool calls and dispatch notices), filters `T`/`L`/`P`.
 - **Finding:** with Claude Code 2.1.309 (Sonnet 5.5, effort high) the thinking block is empty text + encrypted signature; with Codex 0.166 (gpt-6.1-sol, summary detailed, effort high) the completed `reasoning` item has empty `summary` and `content`. The adapters forward reasoning when a provider sends it; today the Thinking filter therefore shows nothing for these models.
 - Not done: per-agent context-window usage (Codex reports it, MAW does not surface it yet); token history is limited to the last ~3000 stored usage events.
+
+## Added: local models (Ollama), model download, Codex reasoning summaries
+- `maw-provider-ollama`: MAW-run agent loop over `/api/chat` with local file/command tools (workspace-confined, permission-gated), `maw_*` tools through an MCP client, approvals, interrupt, context trimming, usage from the server's counts. `ProviderKind::Ollama`.
+- Autostart of `ollama serve` when an agent needs it (also the Windows build from WSL, bound to the WSL-reachable address). `maw models pull` and the TUI *model download* dialog (`POST /api/pull`), with parameter-count and size limits (defaults 8B / 6.5 GB).
+- Codex: `model_reasoning_summary` is sent with each thread, which makes Codex stream reasoning summaries (short headings, not full reasoning). Claude Code in headless mode still returns empty thinking text (known upstream limitation); MAW does not try to work around it.
+- TUI: `mock` is only offered in demo projects; in long pick-lists the arrow keys continue to the neighbouring field past either end.
+- Verified live: one `qwen3:4b` turn using `write_file`. **Not verified with a real local model:** the other file tools, `run_command`, `maw_*` tools, a full Leader/Worker/verify cycle, and the TUI download dialog in a real terminal.
+- Known limits: no OS sandbox for local commands; small models follow the MAW protocol less reliably; `think: off` does not disable reasoning on `qwen3:4b`; autostarted servers keep running after MAW exits.
+- Next: machine performance charts while local agents run.

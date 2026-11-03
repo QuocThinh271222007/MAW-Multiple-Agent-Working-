@@ -21,6 +21,46 @@ pub struct ProviderConfig {
     pub model: Option<String>,
 }
 
+/// Local models served by Ollama (`[ollama]` in config.toml).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OllamaSection {
+    /// Server URL; empty = $OLLAMA_HOST, then loopback, then (WSL) the Windows host.
+    pub url: Option<String>,
+    /// Context window per chat (more memory for bigger values).
+    pub num_ctx: u32,
+    pub keep_alive: String,
+    /// Model/tool round trips allowed in one turn.
+    pub max_steps: usize,
+    /// Seconds a single `run_command` may take.
+    pub command_timeout_secs: u64,
+    /// Start `ollama serve` automatically when an Ollama agent needs it (default true).
+    pub autostart: bool,
+    /// Path to the `ollama` executable (default: PATH, then the usual install folders).
+    pub path: Option<String>,
+    /// Largest model (billions of parameters) `maw models pull` will download.
+    pub max_pull_params_b: f64,
+    /// Largest download in GB.
+    pub max_pull_gb: f64,
+}
+
+impl Default for OllamaSection {
+    fn default() -> Self {
+        let d = maw_provider_ollama::OllamaConfig::default();
+        OllamaSection {
+            url: None,
+            num_ctx: d.num_ctx,
+            keep_alive: d.keep_alive,
+            max_steps: d.max_steps,
+            command_timeout_secs: d.command_timeout.as_secs(),
+            autostart: d.autostart,
+            path: None,
+            max_pull_params_b: d.max_pull_params_b,
+            max_pull_gb: d.max_pull_bytes as f64 / 1e9,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct MawConfig {
@@ -28,6 +68,7 @@ pub struct MawConfig {
     pub orchestrator: OrchestratorConfig,
     pub codex: ProviderConfig,
     pub claude: ProviderConfig,
+    pub ollama: OllamaSection,
 }
 
 #[derive(Debug, Clone)]

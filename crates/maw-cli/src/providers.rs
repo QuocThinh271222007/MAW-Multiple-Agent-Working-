@@ -11,6 +11,21 @@ pub fn codex(path: Option<String>) -> Arc<dyn AgentProvider> {
     maw_provider_codex::CodexProvider::arc(cfg)
 }
 
+pub fn ollama(c: &crate::config::OllamaSection) -> Arc<dyn AgentProvider> {
+    maw_provider_ollama::OllamaProvider::arc(maw_provider_ollama::OllamaConfig {
+        url: c.url.clone().filter(|u| !u.trim().is_empty()),
+        num_ctx: c.num_ctx,
+        keep_alive: c.keep_alive.clone(),
+        max_steps: c.max_steps,
+        command_timeout: std::time::Duration::from_secs(c.command_timeout_secs.max(5)),
+        autostart: c.autostart,
+        max_pull_params_b: c.max_pull_params_b,
+        max_pull_bytes: (c.max_pull_gb * 1e9) as u64,
+        binary: c.path.clone().filter(|p| !p.trim().is_empty()),
+        ..Default::default()
+    })
+}
+
 pub fn claude(path: Option<String>) -> Arc<dyn AgentProvider> {
     match path {
         Some(p) => Arc::new(maw_provider_claude::ClaudeProvider::with_binary(p)),

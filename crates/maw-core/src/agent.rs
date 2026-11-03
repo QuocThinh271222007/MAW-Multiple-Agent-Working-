@@ -54,6 +54,8 @@ impl FromStr for Role {
 pub enum ProviderKind {
     Claude,
     Codex,
+    /// Local models served by Ollama; MAW runs the agent loop itself.
+    Ollama,
     /// Deterministic in-process provider used by tests and `maw demo`.
     Mock,
 }
@@ -63,6 +65,7 @@ impl ProviderKind {
         match self {
             ProviderKind::Claude => "claude",
             ProviderKind::Codex => "codex",
+            ProviderKind::Ollama => "ollama",
             ProviderKind::Mock => "mock",
         }
     }
@@ -80,6 +83,7 @@ impl FromStr for ProviderKind {
         match s.to_ascii_lowercase().as_str() {
             "claude" | "claude-code" => Ok(ProviderKind::Claude),
             "codex" => Ok(ProviderKind::Codex),
+            "ollama" | "local" => Ok(ProviderKind::Ollama),
             "mock" => Ok(ProviderKind::Mock),
             other => Err(format!("unknown provider '{other}'")),
         }

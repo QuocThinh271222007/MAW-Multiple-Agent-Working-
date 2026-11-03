@@ -396,6 +396,36 @@ async fn execute(
     }
     match action {
         Action::Quit | Action::Copy(_) | Action::RunShell(_) => Ok(String::new()),
+        Action::PullModel { name } => {
+            let (ptx, mut prx) = mpsc::channel::<maw_core::provider::PullProgress>(64);
+            let (t2, n2) = (tx.clone(), name.clone());
+            let fwd = tokio::spawn(async move {
+                let mut last = Instant::now() - Duration::from_secs(2);
+                while let Some(p) = prx.recv().await {
+                    if p.total == 0 || last.elapsed() < Duration::from_millis(900) {
+                        continue;
+                    }
+                    last = Instant::now();
+                    let _ = t2
+                        .send(UiMsg::Toast(
+                            format!(
+                                "downloading {n2}: {}% ({:.1}/{:.1} GB)",
+                                p.completed * 100 / p.total,
+                                p.completed as f64 / 1e9,
+                                p.total as f64 / 1e9
+                            ),
+                            Level::Info,
+                        ))
+                        .await;
+                }
+            });
+            let res = sup.pull_model(ProviderKind::Ollama, &name, ptx).await;
+            let _ = fwd.await;
+            if let Ok(list) = sup.list_models(ProviderKind::Ollama).await {
+                let _ = tx.send(UiMsg::Models(ProviderKind::Ollama, list)).await;
+            }
+            res.map_err(err_text)
+        }
         Action::SetAgentModel {
             agent,
             model,
@@ -666,9 +696,14 @@ async fn event_loop(engine: &Arc<Engine>, sup: &Arc<Supervisor>, opts: &TuiOptio
     let mut clock = tokio::time::interval(Duration::from_secs(1));
     clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let (msg_tx, mut msg_rx) = mpsc::channel::<UiMsg>(64);
+    app.pull_suggestions = sup.pull_suggestions(ProviderKind::Ollama);
     // Model catalogs for every real provider (not only those already in use) so the Add-agent
     // dialog can offer pick-lists on a fresh project. Codex answers live; failures are ignored.
-    for kind in [ProviderKind::Claude, ProviderKind::Codex] {
+    for kind in [
+        ProviderKind::Claude,
+        ProviderKind::Codex,
+        ProviderKind::Ollama,
+    ] {
         let (s, tx) = (sup.clone(), msg_tx.clone());
         tokio::spawn(async move {
             if let Ok(list) = s.list_models(kind).await {

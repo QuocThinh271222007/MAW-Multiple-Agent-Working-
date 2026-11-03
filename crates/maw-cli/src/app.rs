@@ -109,6 +109,7 @@ pub fn real_providers(cfg: &MawConfig) -> Vec<Arc<dyn AgentProvider>> {
     vec![
         crate::providers::codex(cfg.codex.path.clone()),
         crate::providers::claude(cfg.claude.path.clone()),
+        crate::providers::ollama(&cfg.ollama),
     ]
 }
 

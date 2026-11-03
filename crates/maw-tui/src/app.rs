@@ -131,6 +131,10 @@ pub enum Action {
         permission: PermissionProfile,
     },
     ConnectAgent(AgentId),
+    /// Download a model for local agents (Ollama).
+    PullModel {
+        name: String,
+    },
     /// Run the provider's official login for this agent's provider, then connect it.
     LoginAgent(AgentId),
     /// Remove an agent from the project (stops its session). `force` releases unfinished tasks.
@@ -215,6 +219,7 @@ pub enum Cmd {
     InterruptAgent,
     MessageAgent,
     AgentModel,
+    PullModel,
     AgentPermission,
     Shell,
     Pause,
@@ -363,6 +368,11 @@ pub const COMMANDS: &[CommandSpec] = &[
         cmd: Cmd::AgentModel,
         name: "agent model",
         desc: "choose the selected agent's model; idle agents reconnect now (M)",
+    },
+    CommandSpec {
+        cmd: Cmd::PullModel,
+        name: "model download",
+        desc: "download a local model for Ollama agents (suggestions up to 8B)",
     },
     CommandSpec {
         cmd: Cmd::AgentPermission,
@@ -577,6 +587,7 @@ pub enum DialogKind {
     AddAgent,
     MessageAgent { agent: String },
     AgentModel { agent: AgentId },
+    PullModel,
     AgentPermission { agent: AgentId },
     RemoveAgent { agent: AgentId },
     Shell,
@@ -626,12 +637,24 @@ impl Dialog {
     /// Add-agent dialog whose Model and Effort are pick-lists drawn from the providers' catalogs
     /// (nothing to type, so nothing to mistype). They follow the chosen provider and model.
     pub fn add_agent_with(models: &HashMap<ProviderKind, Vec<ModelChoice>>) -> Dialog {
+        Self::add_agent_for(models, false)
+    }
+    /// `include_mock` offers the scripted mock provider; only `maw demo` projects want that.
+    pub fn add_agent_for(
+        models: &HashMap<ProviderKind, Vec<ModelChoice>>,
+        include_mock: bool,
+    ) -> Dialog {
+        let providers: &[&str] = if include_mock {
+            &["claude", "codex", "ollama", "mock"]
+        } else {
+            &["claude", "codex", "ollama"]
+        };
         let mut d = Dialog {
             title: "Add agent".into(),
             kind: DialogKind::AddAgent,
             fields: vec![
                 Field::text("Name", true, "e.g. codex-backend"),
-                Field::select("Provider", &["claude", "codex", "mock"], 1),
+                Field::select("Provider", providers, 1),
                 Field::select("Role", &["worker", "leader", "reviewer", "specialist"], 0),
                 Field::select("Model", &["default"], 0),
                 Field::select("Effort", &["default"], 0),
@@ -698,6 +721,39 @@ impl Dialog {
                     ..Field::text("Custom model id (advanced)", false, "")
                 },
                 Field::select("Effort", &echoices, eidx),
+            ],
+            focus: 0,
+            error: None,
+        }
+    }
+    /// Pick a suggested model or type any name; installed models are marked.
+    pub fn pull_model(suggestions: &[ModelChoice], installed: &[ModelChoice]) -> Dialog {
+        let mut ids: Vec<String> = vec!["(choose, or type a name below)".into()];
+        ids.extend(suggestions.iter().map(|m| m.id.clone()));
+        let choices: Vec<&str> = ids.iter().map(|s| s.as_str()).collect();
+        let details: Vec<String> = std::iter::once(String::new())
+            .chain(suggestions.iter().map(|m| {
+                if installed.iter().any(|i| i.id == m.id) {
+                    format!("✓ installed · {}", m.description)
+                } else {
+                    m.description.clone()
+                }
+            }))
+            .collect();
+        Dialog {
+            title: "Download a model (Ollama)".into(),
+            kind: DialogKind::PullModel,
+            fields: vec![
+                Field {
+                    details,
+                    ..Field::select("Suggested", &choices, 0)
+                },
+                Field {
+                    required: false,
+                    hint: "limited to 8B parameters / ~6.5 GB by default ([ollama] in config.toml)"
+                        .into(),
+                    ..Field::text("Or any model name", false, "e.g. qwen3:8b")
+                },
             ],
             focus: 0,
             error: None,
@@ -850,6 +906,18 @@ impl Dialog {
                     effort: Some(v(2)).filter(|e| !e.is_empty() && e != "default"),
                 }
             }
+            DialogKind::PullModel => {
+                let custom = v(1);
+                let picked = v(0);
+                let name = if !custom.is_empty() {
+                    custom
+                } else if self.fields[0].choice > 0 {
+                    picked
+                } else {
+                    return Err("pick a suggested model or type a model name".into());
+                };
+                Action::PullModel { name }
+            }
             DialogKind::AgentPermission { agent } => Action::SetAgentPermission {
                 agent: agent.clone(),
                 permission: v(0).parse().map_err(|e: String| e)?,
@@ -939,6 +1007,8 @@ pub struct App {
     pub clipboard: String,
     /// Models each provider offers (filled in the background at startup).
     pub models: HashMap<ProviderKind, Vec<ModelChoice>>,
+    /// Models the local provider suggests downloading.
+    pub pull_suggestions: Vec<ModelChoice>,
     /// Horizontal scroll offsets of the title bar and the hint bar (mouse wheel over the bar).
     pub header_scroll: usize,
     pub footer_scroll: usize,
@@ -986,6 +1056,7 @@ impl App {
             config: OrchestratorConfig::default(),
             clipboard: String::new(),
             models: HashMap::new(),
+            pull_suggestions: Vec::new(),
             header_scroll: 0,
             footer_scroll: 0,
             header_max: Cell::new(0),
@@ -1274,7 +1345,13 @@ pub fn run_cmd(app: &mut App, cmd: Cmd) -> Vec<Action> {
             Some(t) => app.overlay = Overlay::Dialog(Dialog::redirect_goal(&t)),
             None => app.overlay = Overlay::Dialog(Dialog::set_goal()),
         },
-        Cmd::AddAgent => app.overlay = Overlay::Dialog(Dialog::add_agent_with(&app.models)),
+        Cmd::AddAgent => {
+            let demo = app
+                .agents()
+                .iter()
+                .any(|a| a.provider == ProviderKind::Mock);
+            app.overlay = Overlay::Dialog(Dialog::add_agent_for(&app.models, demo));
+        }
         Cmd::ConnectAgent => {
             if let Some(a) = need_agent(app) {
                 return vec![Action::ConnectAgent(a.id)];
@@ -1310,6 +1387,22 @@ pub fn run_cmd(app: &mut App, cmd: Cmd) -> Vec<Action> {
             if let Some(a) = need_agent(app) {
                 let models = app.models.get(&a.provider).cloned().unwrap_or_default();
                 app.overlay = Overlay::Dialog(Dialog::agent_model(&a, &models));
+            }
+        }
+        Cmd::PullModel => {
+            let installed = app
+                .models
+                .get(&ProviderKind::Ollama)
+                .cloned()
+                .unwrap_or_default();
+            if app.pull_suggestions.is_empty() {
+                app.set_toast(
+                    "no downloadable models: the Ollama provider is not available",
+                    Level::Error,
+                );
+            } else {
+                app.overlay =
+                    Overlay::Dialog(Dialog::pull_model(&app.pull_suggestions, &installed));
             }
         }
         Cmd::AgentPermission => {
@@ -1493,7 +1586,8 @@ fn dialog_key(app: &mut App, mut d: Dialog, key: KeyEvent) -> Vec<Action> {
     let in_list = d.fields.get(d.focus).map(|f| f.is_list()).unwrap_or(false);
     match key.code {
         KeyCode::Esc => return vec![],
-        // inside a long pick-list the arrows move through the options; Tab/Enter move on
+        // inside a long pick-list the arrows move through the options (and on to the next or
+        // previous field past either end); Tab / Shift+Tab / Enter always move between fields
         KeyCode::Down
         | KeyCode::Up
         | KeyCode::PageDown
@@ -1502,7 +1596,17 @@ fn dialog_key(app: &mut App, mut d: Dialog, key: KeyEvent) -> Vec<Action> {
         | KeyCode::End
             if in_list =>
         {
-            if let Some(f) = d.fields.get_mut(d.focus) {
+            let (at_top, at_bottom) = d
+                .fields
+                .get(d.focus)
+                .map(|f| (f.choice == 0, f.choice + 1 >= f.choices.len()))
+                .unwrap_or((false, false));
+            // past either end of the list the arrows carry on to the neighbouring field
+            if key.code == KeyCode::Up && at_top && d.focus > 0 {
+                d.focus -= 1;
+            } else if key.code == KeyCode::Down && at_bottom && d.focus + 1 < n {
+                d.focus += 1;
+            } else if let Some(f) = d.fields.get_mut(d.focus) {
                 let last = f.choices.len() - 1;
                 f.choice = match key.code {
                     KeyCode::Down => (f.choice + 1).min(last),

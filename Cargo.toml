@@ -7,6 +7,7 @@ members = [
     "crates/maw-mcp",
     "crates/maw-provider-codex",
     "crates/maw-provider-claude",
+    "crates/maw-provider-ollama",
     "crates/maw-tui",
     "crates/maw-cli",
 ]
@@ -44,4 +45,5 @@ maw-orchestrator = { path = "crates/maw-orchestrator" }
 maw-mcp = { path = "crates/maw-mcp" }
 maw-provider-codex = { path = "crates/maw-provider-codex" }
 maw-provider-claude = { path = "crates/maw-provider-claude" }
+maw-provider-ollama = { path = "crates/maw-provider-ollama" }
 maw-tui = { path = "crates/maw-tui" }

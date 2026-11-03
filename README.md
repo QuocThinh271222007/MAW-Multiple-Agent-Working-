@@ -102,6 +102,14 @@ The **Tokens** view (`$`) and the `Tokens:` total in the title bar show what eac
 
 In an agent's transcript, `T` / `L` / `P` hide or show **thinking**, **tool logs** (tool calls, commands, output, system lines) and **MAW protocol** lines (the agent's calls to `maw_*` tools such as message ack/inbox/progress, and MAW's dispatch notices). The agent's own messages, your messages and errors always stay. Palette: *transcript conversation only* / *transcript show all*. Note on thinking: MAW shows only what a provider itself streams. In testing (Claude Code 2.1.309 with Sonnet 5.5, Codex 0.166 with GPT-6.1), neither returned readable reasoning text (Claude sends an empty, signed thinking block; Codex a `reasoning` item with an empty summary), so those lines stay empty until a provider/model exposes them.
 
+### Local models (Ollama)
+
+```bash
+maw models pull                                 # download a model (suggestions up to 8B)
+maw agent add --name local --provider ollama --model qwen3:8b
+```
+MAW starts `ollama serve` by itself when an Ollama agent needs it, runs the agent loop (file tools, commands with approvals, and the `maw_*` coordination tools over MCP) and shows the model's reasoning when it streams one. There is no OS sandbox around commands. Details and limits: [docs/providers/ollama.md](docs/providers/ollama.md).
+
 Try it with no providers at all (scripted *mock* agents; it exercises MAW itself, not Claude/Codex):
 
 ```bash

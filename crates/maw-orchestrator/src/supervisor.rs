@@ -473,6 +473,28 @@ impl Supervisor {
             .map_err(|e| CoreError::Precondition(e.to_string()))
     }
 
+    /// Models a local-model provider suggests downloading (empty for hosted providers).
+    pub fn pull_suggestions(&self, kind: ProviderKind) -> Vec<maw_core::provider::ModelChoice> {
+        self.provider(kind)
+            .map(|p| p.pull_suggestions())
+            .unwrap_or_default()
+    }
+
+    /// Download a model through the provider. Dropping the returned future cancels the download.
+    pub async fn pull_model(
+        &self,
+        kind: ProviderKind,
+        name: &str,
+        progress: tokio::sync::mpsc::Sender<maw_core::provider::PullProgress>,
+    ) -> CoreResult<String> {
+        let p = self
+            .provider(kind)
+            .ok_or_else(|| CoreError::Unsupported(format!("no provider registered for {kind}")))?;
+        p.pull_model(name, progress)
+            .await
+            .map_err(|e| CoreError::Precondition(e.to_string()))
+    }
+
     /// Authentication state of a provider that can run agents (catalog-only providers excluded).
     pub async fn auth_status(&self, kind: ProviderKind) -> CoreResult<AuthStatus> {
         let p = self
