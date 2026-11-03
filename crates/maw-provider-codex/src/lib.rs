@@ -139,6 +139,10 @@ impl AgentProvider for CodexProvider {
         ProviderKind::Codex
     }
 
+    fn login_command(&self) -> Option<Vec<String>> {
+        Some(vec![self.cfg.binary.clone(), "login".into()])
+    }
+
     /// Live query: Codex reports the models available to the logged-in account via `model/list`.
     async fn list_models(&self) -> ProviderResult<Vec<ModelChoice>> {
         let mut child = Command::new(&self.cfg.binary)
@@ -494,5 +498,22 @@ mod tests {
             parse_login_status(true, "???"),
             AuthStatus::Unknown { .. }
         ));
+    }
+}
+
+#[cfg(test)]
+mod login_tests {
+    use super::*;
+
+    #[test]
+    fn login_command_is_the_official_codex_login() {
+        let p = CodexProvider::new(CodexConfig {
+            binary: "/opt/codex".into(),
+            ..CodexConfig::default()
+        });
+        assert_eq!(
+            p.login_command(),
+            Some(vec!["/opt/codex".to_string(), "login".to_string()])
+        );
     }
 }

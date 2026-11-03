@@ -50,6 +50,8 @@ maw auth status       # what codex / claude report
 maw auth codex        # runs `codex login`
 maw auth claude       # runs `claude auth login`
 ```
+Adding an agent checks its provider right away: if it is not logged in, `maw agent add` (and the TUI's **Add agent**) offers the provider's official login on the spot (`--no-login` skips it); in the TUI the screen is handed to the login command and you return with Enter, after which the agent connects. `agent login` in the command palette repeats this later, and connecting an agent that needs a login starts it too.
+
 See [`docs/AUTHENTICATION.md`](docs/AUTHENTICATION.md) (including the WSL-vs-Windows login note).
 
 ## First run (5 minutes)

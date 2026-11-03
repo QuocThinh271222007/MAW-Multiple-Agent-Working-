@@ -18,8 +18,8 @@ use crossterm::terminal::{
 };
 use crossterm::{cursor, execute};
 use futures::StreamExt;
-use maw_core::provider::ModelChoice;
-use maw_core::{CoreError, ProviderKind};
+use maw_core::provider::{AuthStatus, ModelChoice};
+use maw_core::{AgentId, CoreError, ProviderKind};
 use maw_orchestrator::{Actor, Engine, Snapshot, Supervisor, TaskPatch};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
@@ -223,12 +223,77 @@ fn apply_refresh(app: &mut App, sup: &Supervisor, engine: &Engine, d: RefreshDat
     app.detail_dirty = false;
 }
 
+// ------------------------------------------------------------------ provider login
+
+/// True when the provider says the user is not logged in (an unknown state is not treated as
+/// "needs login": the session start will report a real authentication error).
+pub fn needs_login(status: &AuthStatus) -> bool {
+    matches!(status, AuthStatus::NotAuthenticated { .. })
+}
+
+/// Re-enter the alternate screen after handing the terminal to another program.
+fn reenter_terminal(mouse: bool) -> Result<()> {
+    enable_raw_mode().context("enabling raw mode")?;
+    ACTIVE.store(true, Ordering::SeqCst);
+    let mut out = stdout();
+    if mouse {
+        execute!(out, EnterAlternateScreen, EnableMouseCapture, cursor::Hide)
+    } else {
+        execute!(out, EnterAlternateScreen, cursor::Hide)
+    }
+    .context("re-entering the alternate screen")?;
+    Ok(())
+}
+
+/// Leave the TUI, run the provider's official login with the user's terminal, wait for Enter.
+/// MAW never sees the credentials; this is the same command as `maw auth <provider>`.
+async fn run_login(name: &str, kind: ProviderKind, cmd: &[String]) -> Result<(), String> {
+    restore_terminal();
+    println!(
+        "\nLogging in {name} ({kind}) with the provider's own login: {}",
+        cmd.join(" ")
+    );
+    println!("Follow its prompts. MAW does not read or store your credentials.\n");
+    let status = tokio::process::Command::new(&cmd[0])
+        .args(&cmd[1..])
+        .status()
+        .await;
+    let result = match status {
+        Ok(s) if s.success() => Ok(()),
+        Ok(s) => Err(format!("exit {:?}", s.code())),
+        Err(e) => Err(format!("could not run {}: {e}", cmd[0])),
+    };
+    println!(
+        "\n{} Press Enter to return to MAW...",
+        if result.is_ok() {
+            "Login finished."
+        } else {
+            "Login did not complete."
+        }
+    );
+    let _ = tokio::task::spawn_blocking(|| {
+        let mut s = String::new();
+        let _ = std::io::stdin().read_line(&mut s);
+    })
+    .await;
+    result
+}
+
 // ------------------------------------------------------------------ action execution
 
 enum UiMsg {
     Toast(String, Level),
     Models(ProviderKind, Vec<ModelChoice>),
-    Shell { cmd: String, lines: Vec<String> },
+    Shell {
+        cmd: String,
+        lines: Vec<String>,
+    },
+    /// The provider needs an interactive login: the loop hands the terminal over for it.
+    NeedLogin {
+        agent: AgentId,
+        name: String,
+        kind: ProviderKind,
+    },
 }
 
 /// Run a user-typed shell command in the project folder: 60 s limit, output capped and redacted.
@@ -310,6 +375,7 @@ async fn execute(
     engine: Arc<Engine>,
     sup: Arc<Supervisor>,
     action: Action,
+    tx: mpsc::Sender<UiMsg>,
 ) -> Result<String, String> {
     macro_rules! on_engine {
         ($e:ident, $body:expr) => {{
@@ -398,6 +464,19 @@ async fn execute(
                     .map_err(err_text)?
                     .map_err(err_text)?;
             }
+            // Not logged in yet? Offer the provider's official login right away.
+            if let Ok(st) = sup.auth_status(provider).await {
+                if needs_login(&st) {
+                    let _ = tx
+                        .send(UiMsg::NeedLogin {
+                            agent: agent.id.clone(),
+                            name: name.clone(),
+                            kind: provider,
+                        })
+                        .await;
+                    return Ok(format!("{name} added; {provider} needs a login first"));
+                }
+            }
             match sup.connect_agent(&agent.id).await {
                 Ok(()) => Ok(format!("{name} added and connected")),
                 Err(e) => Err(format!(
@@ -407,8 +486,35 @@ async fn execute(
             }
         }
         Action::ConnectAgent(id) => {
-            sup.connect_agent(&id).await.map_err(err_text)?;
-            Ok("agent connected".into())
+            match sup.connect_agent(&id).await {
+                Ok(()) => Ok("agent connected".into()),
+                Err(e) => {
+                    // an authentication failure is fixed by logging in, so offer that
+                    let a = engine.get_agent(&id).map_err(err_text)?;
+                    if a.state == maw_core::AgentState::AuthRequired {
+                        let _ = tx
+                            .send(UiMsg::NeedLogin {
+                                agent: id,
+                                name: a.name.clone(),
+                                kind: a.provider,
+                            })
+                            .await;
+                        return Ok(format!("{} is not logged in; starting the login", a.name));
+                    }
+                    Err(err_text(e))
+                }
+            }
+        }
+        Action::LoginAgent(id) => {
+            let a = engine.get_agent(&id).map_err(err_text)?;
+            let _ = tx
+                .send(UiMsg::NeedLogin {
+                    agent: id,
+                    name: a.name.clone(),
+                    kind: a.provider,
+                })
+                .await;
+            Ok(String::new())
         }
         Action::ConnectAll => {
             sup.connect_all().await;
@@ -532,7 +638,8 @@ async fn event_loop(engine: &Arc<Engine>, sup: &Arc<Supervisor>, opts: &TuiOptio
         app.size = (sz.width, sz.height);
     }
     let frame = Duration::from_millis(1000 / opts.max_fps.clamp(1, 60) as u64);
-    let mut keys = EventStream::new();
+    // `None` while the terminal is handed to a provider's login command.
+    let mut keys = Some(EventStream::new());
     let mut engine_rx = engine.subscribe();
     let mut engine_open = true;
     let mut ui_rx = sup.ui_updates();
@@ -593,7 +700,12 @@ async fn event_loop(engine: &Arc<Engine>, sup: &Arc<Supervisor>, opts: &TuiOptio
 
         let mut actions: Vec<Action> = vec![];
         tokio::select! {
-            ev = keys.next() => match ev {
+            ev = async {
+                match keys.as_mut() {
+                    Some(k) => k.next().await,
+                    None => std::future::pending().await,
+                }
+            } => match ev {
                 Some(Ok(CtEvent::Key(k))) => { actions = handle_key(&mut app, k); need_draw = true; }
                 Some(Ok(CtEvent::Mouse(m))) => { actions = handle_mouse(&mut app, m); need_draw = true; }
                 Some(Ok(CtEvent::Resize(w, h))) => { app.size = (w, h); need_draw = true; }
@@ -621,6 +733,34 @@ async fn event_loop(engine: &Arc<Engine>, sup: &Arc<Supervisor>, opts: &TuiOptio
                     UiMsg::Shell { cmd, lines } => {
                         app.overlay = Overlay::Output(OutputState { title: format!("$ {cmd}"), lines, scroll: 0 });
                     }
+                    UiMsg::NeedLogin { agent, name, kind } => {
+                        match sup.login_command(kind) {
+                            None => app.set_toast(format!("{name}: {kind} has no login command"), Level::Error),
+                            Some(cmd) => {
+                                // stop reading keys, give the terminal to the provider's own login
+                                drop(keys.take());
+                                let outcome = run_login(&name, kind, &cmd).await;
+                                reenter_terminal(opts.mouse)?;
+                                terminal.clear().ok();
+                                keys = Some(EventStream::new());
+                                match outcome {
+                                    Ok(()) => {
+                                        app.set_toast(format!("{name}: logged in, connecting..."), Level::Ok);
+                                        let (s, tx) = (sup.clone(), msg_tx.clone());
+                                        tokio::spawn(async move {
+                                            let m = match s.connect_agent(&agent).await {
+                                                Ok(()) => UiMsg::Toast(format!("{name} connected"), Level::Ok),
+                                                Err(e) => UiMsg::Toast(format!("{name}: {}", err_text(e)), Level::Error),
+                                            };
+                                            let _ = tx.send(m).await;
+                                        });
+                                    }
+                                    Err(e) => app.set_toast(format!("{name}: login did not complete ({e})"), Level::Error),
+                                }
+                                need_refresh = true;
+                            }
+                        }
+                    }
                 }
                 need_draw = true;
             }
@@ -646,7 +786,7 @@ async fn event_loop(engine: &Arc<Engine>, sup: &Arc<Supervisor>, opts: &TuiOptio
                 other => {
                     let (e, s, tx) = (engine.clone(), sup.clone(), msg_tx.clone());
                     tokio::spawn(async move {
-                        let msg = match execute(e, s, other).await {
+                        let msg = match execute(e, s, other, tx.clone()).await {
                             Ok(m) if m.is_empty() => return,
                             Ok(m) => UiMsg::Toast(m, Level::Ok),
                             Err(m) => UiMsg::Toast(m, Level::Error),
@@ -687,5 +827,26 @@ mod tests {
     fn restore_is_idempotent_when_inactive() {
         restore_terminal();
         restore_terminal();
+    }
+}
+
+#[cfg(test)]
+mod login_tests {
+    use super::*;
+
+    #[test]
+    fn only_a_definite_not_logged_in_triggers_the_login_flow() {
+        assert!(needs_login(&AuthStatus::NotAuthenticated {
+            hint: "run codex login".into()
+        }));
+        assert!(!needs_login(&AuthStatus::Authenticated {
+            method: "chatgpt".into(),
+            account: None,
+            plan: None
+        }));
+        // unknown must not open a login: a real auth problem will surface when the session starts
+        assert!(!needs_login(&AuthStatus::Unknown {
+            reason: "timeout".into()
+        }));
     }
 }

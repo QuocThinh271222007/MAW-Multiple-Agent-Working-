@@ -452,6 +452,21 @@ impl Supervisor {
             .map_err(|e| CoreError::Precondition(e.to_string()))
     }
 
+    /// Authentication state of a provider that can run agents (catalog-only providers excluded).
+    pub async fn auth_status(&self, kind: ProviderKind) -> CoreResult<AuthStatus> {
+        let p = self
+            .provider(kind)
+            .ok_or_else(|| CoreError::Unsupported(format!("no provider registered for {kind}")))?;
+        p.auth_status()
+            .await
+            .map_err(|e| CoreError::Precondition(e.to_string()))
+    }
+
+    /// The provider's interactive login command, for providers that can run agents.
+    pub fn login_command(&self, kind: ProviderKind) -> Option<Vec<String>> {
+        self.provider(kind).and_then(|p| p.login_command())
+    }
+
     /// Reject model ids the provider does not offer (see `models::check_model`).
     pub async fn validate_model(&self, kind: ProviderKind, id: &str) -> CoreResult<()> {
         let list = self.list_models(kind).await.unwrap_or_default();

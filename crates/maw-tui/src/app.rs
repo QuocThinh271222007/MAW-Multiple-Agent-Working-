@@ -127,6 +127,8 @@ pub enum Action {
         permission: PermissionProfile,
     },
     ConnectAgent(AgentId),
+    /// Run the provider's official login for this agent's provider, then connect it.
+    LoginAgent(AgentId),
     ConnectAll,
     DisconnectAgent(AgentId),
     InterruptAgent(AgentId),
@@ -191,6 +193,7 @@ pub enum Cmd {
     GoalRedirect,
     AddAgent,
     ConnectAgent,
+    AgentLogin,
     ConnectAll,
     DisconnectAgent,
     InterruptAgent,
@@ -279,6 +282,11 @@ pub const COMMANDS: &[CommandSpec] = &[
         cmd: Cmd::ConnectAgent,
         name: "agent connect",
         desc: "connect the selected agent (C)",
+    },
+    CommandSpec {
+        cmd: Cmd::AgentLogin,
+        name: "agent login",
+        desc: "log the selected agent's provider in (official login, then connect)",
     },
     CommandSpec {
         cmd: Cmd::ConnectAll,
@@ -1116,6 +1124,11 @@ pub fn run_cmd(app: &mut App, cmd: Cmd) -> Vec<Action> {
         Cmd::ConnectAgent => {
             if let Some(a) = need_agent(app) {
                 return vec![Action::ConnectAgent(a.id)];
+            }
+        }
+        Cmd::AgentLogin => {
+            if let Some(a) = need_agent(app) {
+                return vec![Action::LoginAgent(a.id)];
             }
         }
         Cmd::ConnectAll => return vec![Action::ConnectAll],
@@ -2415,6 +2428,21 @@ mod tests {
             },
         );
         assert_eq!(a.logs_scroll, 3);
+    }
+
+    #[test]
+    fn agent_login_command_targets_the_selected_agent() {
+        let mut a = app();
+        let id = a.selected_agent().unwrap().id.clone();
+        let acts = run_cmd(&mut a, Cmd::AgentLogin);
+        assert!(
+            matches!(acts.as_slice(), [Action::LoginAgent(x)] if *x == id),
+            "{acts:?}"
+        );
+        assert!(
+            COMMANDS.iter().any(|c| c.name == "agent login"),
+            "discoverable in the palette"
+        );
     }
 
     #[test]

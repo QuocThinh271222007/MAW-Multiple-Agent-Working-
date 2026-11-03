@@ -161,6 +161,9 @@ enum AgentCmd {
         /// Reasoning effort, e.g. low | medium | high | xhigh | max (provider/model specific; see `maw models`)
         #[arg(long)]
         effort: Option<String>,
+        /// Do not offer to log the provider in after adding the agent
+        #[arg(long)]
+        no_login: bool,
         /// safe | balanced | autonomous
         #[arg(long, default_value = "balanced")]
         permission: String,
@@ -540,6 +543,7 @@ async fn cmd_agent(ctx: &Ctx, project: Option<&str>, cmd: AgentCmd) -> Result<()
             role,
             model,
             effort,
+            no_login,
             permission,
         } => {
             let provider: ProviderKind =
@@ -571,6 +575,9 @@ async fn cmd_agent(ctx: &Ctx, project: Option<&str>, cmd: AgentCmd) -> Result<()
                 a.model.as_deref().unwrap_or("default"),
                 a.effort.as_deref().unwrap_or("default")
             );
+            if !no_login {
+                offer_login(ctx, provider).await?;
+            }
         }
         AgentCmd::Status { name } => {
             let a = anyhow_core(eng.resolve_agent(&name))?;
@@ -1173,4 +1180,59 @@ fn pick(title: &str, options: &[(String, String)], current: &str) -> Result<Stri
         .get(n.wrapping_sub(1))
         .map(|(id, _)| id.clone())
         .ok_or_else(|| anyhow::anyhow!("{n} is not in the list (1..={})", options.len()))
+}
+
+/// After adding an agent: if its provider is not logged in, offer the provider's official login
+/// right away (interactive terminals only). Credentials never pass through MAW.
+async fn offer_login(ctx: &Ctx, kind: ProviderKind) -> Result<()> {
+    use std::io::{BufRead, IsTerminal, Write};
+    let p = match kind {
+        ProviderKind::Claude => providers::claude(ctx.cfg.claude.path.clone()),
+        ProviderKind::Codex => providers::codex(ctx.cfg.codex.path.clone()),
+        ProviderKind::Mock => return Ok(()),
+    };
+    match p.auth_status().await {
+        Ok(a) if a.is_authenticated() => {
+            println!("✓ {kind} is already logged in.");
+            return Ok(());
+        }
+        Ok(maw_core::provider::AuthStatus::Unknown { reason }) => {
+            println!("{kind}: login state unknown ({reason}); check with `maw auth status`.");
+            return Ok(());
+        }
+        _ => {}
+    }
+    let Some(cmd) = p.login_command() else {
+        println!("{kind} is not logged in; run `maw auth {kind}`.");
+        return Ok(());
+    };
+    if !std::io::stdin().is_terminal() {
+        println!("{kind} is not logged in; run `maw auth {kind}`.");
+        return Ok(());
+    }
+    print!("{kind} is not logged in. Log in now? [Y/n] ");
+    std::io::stdout().flush()?;
+    let mut line = String::new();
+    std::io::stdin().lock().read_line(&mut line)?;
+    if matches!(line.trim().to_ascii_lowercase().as_str(), "n" | "no") {
+        println!("Skipped. Run `maw auth {kind}` before connecting this agent.");
+        return Ok(());
+    }
+    println!(
+        "Starting the official login ({}). MAW does not read or store your credentials.\n",
+        cmd.join(" ")
+    );
+    let status = std::process::Command::new(&cmd[0])
+        .args(&cmd[1..])
+        .status()
+        .with_context(|| format!("running {}", cmd[0]))?;
+    match (status.success(), p.auth_status().await) {
+        (true, Ok(a)) if a.is_authenticated() => println!("\n✓ {kind} is now logged in."),
+        (true, _) => println!("\nLogin finished; verify with `maw auth status`."),
+        (false, _) => println!(
+            "\nLogin did not complete (exit {:?}); retry with `maw auth {kind}`.",
+            status.code()
+        ),
+    }
+    Ok(())
 }

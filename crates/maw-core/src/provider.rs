@@ -250,6 +250,12 @@ pub struct ModelChoice {
 pub trait AgentProvider: Send + Sync {
     fn kind(&self) -> ProviderKind;
 
+    /// The provider's own interactive login command (argv), if it has one. MAW runs it with the
+    /// user's terminal and never sees the credentials.
+    fn login_command(&self) -> Option<Vec<String>> {
+        None
+    }
+
     /// Models selectable for this provider. Providers that cannot enumerate models say so.
     async fn list_models(&self) -> ProviderResult<Vec<ModelChoice>> {
         Err(ProviderError::Unsupported(

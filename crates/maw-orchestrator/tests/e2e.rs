@@ -623,4 +623,7 @@ async fn catalog_providers_list_models_but_can_never_run_an_agent() {
     // but connecting an agent of that kind fails instead of using it
     assert!(sup.connect_agent(&a.id).await.is_err());
     assert!(sup.provider(ProviderKind::Codex).is_none());
+    // and it is never used for login / auth either: only providers that can run agents are
+    assert!(sup.login_command(ProviderKind::Codex).is_none());
+    assert!(sup.auth_status(ProviderKind::Codex).await.is_err());
 }

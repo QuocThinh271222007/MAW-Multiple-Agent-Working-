@@ -126,6 +126,14 @@ impl AgentProvider for ClaudeProvider {
         ProviderKind::Claude
     }
 
+    fn login_command(&self) -> Option<Vec<String>> {
+        Some(vec![
+            self.bin.to_string_lossy().into_owned(),
+            "auth".into(),
+            "login".into(),
+        ])
+    }
+
     /// Claude Code has no model-listing command, so this is a static catalog: the documented
     /// aliases (which always resolve to the latest model of that tier) plus explicit model ids.
     /// Claude Code accepts any id the account can use; an unknown id fails at session start and is
@@ -290,5 +298,23 @@ mod tests {
             p.auth_status().await,
             Err(ProviderError::NotInstalled(_))
         ));
+    }
+}
+
+#[cfg(test)]
+mod login_tests {
+    use super::*;
+
+    #[test]
+    fn login_command_is_the_official_claude_auth_login() {
+        let p = ClaudeProvider::with_binary("/opt/claude");
+        assert_eq!(
+            p.login_command(),
+            Some(vec![
+                "/opt/claude".to_string(),
+                "auth".to_string(),
+                "login".to_string()
+            ])
+        );
     }
 }
