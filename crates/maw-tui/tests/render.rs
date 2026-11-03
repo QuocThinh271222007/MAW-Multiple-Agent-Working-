@@ -897,3 +897,272 @@ fn add_agent_dialog_renders_with_and_without_a_catalog() {
         let _ = render_text(&a, w, h);
     }
 }
+
+// ---- long model lists are a scrollable vertical list, nothing is clipped away ----
+
+fn many_models() -> std::collections::HashMap<ProviderKind, Vec<maw_core::provider::ModelChoice>> {
+    use maw_core::provider::ModelChoice;
+    let ids = [
+        "gpt-6.1-sol",
+        "gpt-6-astra",
+        "gpt-6.1-terra",
+        "gpt-6-sol",
+        "gpt-6-luna",
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+    ];
+    let list = ids
+        .iter()
+        .enumerate()
+        .map(|(i, id)| ModelChoice {
+            id: id.to_string(),
+            display_name: id.to_uppercase(),
+            description: format!("description of model number {i}"),
+            is_default: i == 0,
+            source: "provider".into(),
+            reasoning_efforts: vec!["low".into(), "high".into()],
+        })
+        .collect();
+    std::collections::HashMap::from([(ProviderKind::Codex, list)])
+}
+
+#[test]
+fn every_codex_model_is_visible_in_a_tall_terminal() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let key = |c| KeyEvent::new(c, KeyModifiers::NONE);
+    let mut a = app();
+    a.models = many_models();
+    a.overlay = Overlay::Dialog(Dialog::add_agent_with(&a.models));
+    for _ in 0..3 {
+        handle_key(&mut a, key(KeyCode::Tab)); // name -> provider -> role -> model
+    }
+    let t = render_text(&a, 110, 44);
+    for id in [
+        "gpt-6.1-sol",
+        "gpt-6-astra",
+        "gpt-6.1-terra",
+        "gpt-6-sol",
+        "gpt-6-luna",
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+    ] {
+        assert!(t.contains(id), "{id} should be listed:\n{t}");
+    }
+    assert!(
+        t.contains("description of model number 3"),
+        "descriptions are shown beside the ids"
+    );
+    assert!(t.contains("(1/9)"), "position counter: {t}");
+}
+
+#[test]
+fn a_short_terminal_scrolls_the_list_and_arrows_pick_the_option() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use maw_tui::app::Action;
+    let key = |c| KeyEvent::new(c, KeyModifiers::NONE);
+    let mut a = app();
+    a.models = many_models();
+    a.overlay = Overlay::Dialog(Dialog::add_agent_with(&a.models));
+    for c in "w".chars() {
+        handle_key(&mut a, key(KeyCode::Char(c)));
+    }
+    for _ in 0..3 {
+        handle_key(&mut a, key(KeyCode::Tab));
+    }
+    let first = render_text(&a, 90, 22);
+    assert!(
+        !first.contains("gpt-5.6-luna"),
+        "the last model does not fit yet at 22 rows"
+    );
+    // End jumps to the last option; the window follows it and shows a ▲ marker
+    handle_key(&mut a, key(KeyCode::End));
+    let last = render_text(&a, 90, 22);
+    assert!(
+        last.contains("gpt-5.6-luna") && last.contains("(9/9)"),
+        "{last}"
+    );
+    assert!(last.contains('▲'), "more above: {last}");
+    // Up/Down move through options (not between fields)
+    handle_key(&mut a, key(KeyCode::Up));
+    match &a.overlay {
+        Overlay::Dialog(d) => {
+            assert_eq!(d.focus, 3, "still on the Model field");
+            assert_eq!(d.fields[3].value(), "gpt-5.6-terra");
+        }
+        _ => unreachable!(),
+    }
+    // Tab leaves the list; Enter through to submit gives a typed action with that model
+    handle_key(&mut a, key(KeyCode::Tab)); // effort
+    handle_key(&mut a, key(KeyCode::Tab)); // permissions
+    let acts = handle_key(&mut a, key(KeyCode::Enter));
+    assert!(
+        matches!(acts.as_slice(), [Action::AddAgent { model: Some(m), .. }] if m == "gpt-5.6-terra"),
+        "{acts:?}"
+    );
+}
+
+#[test]
+fn a_dialog_opened_before_the_catalog_arrives_gets_filled_in() {
+    let mut a = app();
+    a.overlay = Overlay::Dialog(Dialog::add_agent_with(&a.models));
+    match &a.overlay {
+        Overlay::Dialog(d) => assert_eq!(d.fields[3].choices, vec!["default"], "nothing yet"),
+        _ => unreachable!(),
+    }
+    a.models = many_models();
+    maw_tui::app::refresh_open_dialog(&mut a);
+    match &a.overlay {
+        Overlay::Dialog(d) => assert_eq!(d.fields[3].choices.len(), 9, "default + 8 Codex models"),
+        _ => unreachable!(),
+    }
+}
+
+// ---- long pick-lists are vertical and scrollable, not one clipped line ----
+
+fn codex_models() -> Vec<maw_core::provider::ModelChoice> {
+    use maw_core::provider::ModelChoice;
+    [
+        "gpt-6.1-sol",
+        "gpt-6-astra",
+        "gpt-6.1-terra",
+        "gpt-6-sol",
+        "gpt-6-luna",
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+    ]
+    .iter()
+    .enumerate()
+    .map(|(i, id)| ModelChoice {
+        id: id.to_string(),
+        display_name: id.to_uppercase(),
+        description: format!("description of model number {i}"),
+        is_default: i == 0,
+        source: "provider".into(),
+        reasoning_efforts: vec!["low".into(), "high".into()],
+    })
+    .collect()
+}
+
+fn app_with_codex_catalog() -> App {
+    let mut a = app();
+    a.models.insert(ProviderKind::Codex, codex_models());
+    a.overlay = Overlay::Dialog(Dialog::add_agent_with(&a.models));
+    a
+}
+
+fn focus_model_field(a: &mut App) {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    for _ in 0..3 {
+        // name -> provider -> role -> model
+        handle_key(a, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    }
+}
+
+#[test]
+fn every_model_is_visible_in_the_vertical_list_with_its_description() {
+    let mut a = app_with_codex_catalog();
+    focus_model_field(&mut a);
+    let t = render_text(&a, 110, 40);
+    for id in [
+        "default",
+        "gpt-6.1-sol",
+        "gpt-6-astra",
+        "gpt-6.1-terra",
+        "gpt-6-sol",
+        "gpt-6-luna",
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+    ] {
+        assert!(
+            t.contains(id),
+            "{id} must be visible (not clipped off the right edge)\n{t}"
+        );
+    }
+    assert!(
+        t.contains("description of model number 3"),
+        "descriptions are shown beside the ids\n{t}"
+    );
+    assert!(t.contains("1/9"), "position counter\n{t}");
+    assert!(t.contains("▶"), "the selected row is marked");
+}
+
+#[test]
+fn arrows_move_through_the_list_and_tab_moves_on() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let key = |c| KeyEvent::new(c, KeyModifiers::NONE);
+    let mut a = app_with_codex_catalog();
+    focus_model_field(&mut a);
+    let model = |a: &App| match &a.overlay {
+        Overlay::Dialog(d) => (d.focus, d.fields[3].value()),
+        _ => unreachable!(),
+    };
+    assert_eq!(model(&a), (3, "default".to_string()));
+    handle_key(&mut a, key(KeyCode::Down));
+    handle_key(&mut a, key(KeyCode::Down));
+    assert_eq!(
+        model(&a),
+        (3, "gpt-6-astra".to_string()),
+        "↓ changes the choice, focus stays"
+    );
+    handle_key(&mut a, key(KeyCode::Up));
+    assert_eq!(model(&a).1, "gpt-6.1-sol");
+    handle_key(&mut a, key(KeyCode::End));
+    assert_eq!(model(&a).1, "gpt-5.6-luna");
+    handle_key(&mut a, key(KeyCode::Home));
+    assert_eq!(model(&a).1, "default");
+    handle_key(&mut a, key(KeyCode::PageDown));
+    assert_eq!(
+        model(&a).1,
+        "gpt-6-luna",
+        "PgDn jumps 5 options (index 0 -> 5)"
+    );
+    // the effort list followed the model while scrolling
+    match &a.overlay {
+        Overlay::Dialog(d) => assert_eq!(d.fields[4].choices, vec!["default", "low", "high"]),
+        _ => unreachable!(),
+    }
+    handle_key(&mut a, key(KeyCode::Tab));
+    assert_eq!(model(&a).0, 4, "Tab leaves the list for the next field");
+}
+
+#[test]
+fn a_short_terminal_scrolls_the_window_and_keeps_the_selection_visible() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let mut a = app_with_codex_catalog();
+    focus_model_field(&mut a);
+    handle_key(&mut a, KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+    for (w, h) in [(100, 24), (80, 20), (60, 16)] {
+        let t = render_text(&a, w, h);
+        assert!(
+            t.contains("gpt-5.6-luna"),
+            "{w}x{h}: the selected (last) model is visible\n{t}"
+        );
+        assert!(t.contains("9/9"), "{w}x{h}: counter\n{t}");
+    }
+    // and nothing panics on absurd sizes
+    for (w, h) in [(20, 5), (30, 8), (200, 60)] {
+        let _ = render_text(&a, w, h);
+    }
+}
+
+#[test]
+fn a_dialog_opened_before_the_catalog_arrives_fills_in_when_it_does() {
+    let mut a = app();
+    a.overlay = Overlay::Dialog(Dialog::add_agent_with(&a.models));
+    match &a.overlay {
+        Overlay::Dialog(d) => {
+            assert_eq!(d.fields[3].choices, vec!["default"], "nothing loaded yet")
+        }
+        _ => unreachable!(),
+    }
+    a.models.insert(ProviderKind::Codex, codex_models());
+    maw_tui::app::refresh_open_dialog(&mut a);
+    match &a.overlay {
+        Overlay::Dialog(d) => assert_eq!(d.fields[3].choices.len(), 9),
+        _ => unreachable!(),
+    }
+}

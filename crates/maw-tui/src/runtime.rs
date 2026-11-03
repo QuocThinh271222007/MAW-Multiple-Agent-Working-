@@ -613,7 +613,11 @@ async fn event_loop(engine: &Arc<Engine>, sup: &Arc<Supervisor>, opts: &TuiOptio
             Some(msg) = msg_rx.recv() => {
                 match msg {
                     UiMsg::Toast(t, l) => app.set_toast(t, l),
-                    UiMsg::Models(kind, list) => { app.models.insert(kind, list); }
+                    UiMsg::Models(kind, list) => {
+                        app.models.insert(kind, list);
+                        // a dialog opened before the catalog arrived gets its lists filled in
+                        crate::app::refresh_open_dialog(&mut app);
+                    }
                     UiMsg::Shell { cmd, lines } => {
                         app.overlay = Overlay::Output(OutputState { title: format!("$ {cmd}"), lines, scroll: 0 });
                     }

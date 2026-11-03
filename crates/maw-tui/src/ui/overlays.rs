@@ -147,7 +147,23 @@ pub fn render_palette(f: &mut Frame, area: Rect, app: &App, p: &PaletteState) {
 
 pub fn render_dialog(f: &mut Frame, area: Rect, app: &App, d: &Dialog) {
     let t = &app.theme;
-    let h = (d.fields.len() as u16 * 2 + 4).min(area.height);
+    // A focused long pick-list is drawn as a vertical, scrolling list under its label.
+    let in_list = d.fields.get(d.focus).map(|f| f.is_list()).unwrap_or(false);
+    // With plenty of height the fields keep a blank spacer row and the list may show 10 rows. On a
+    // short terminal the spacers go away and the list becomes a 6-row window that scrolls, so the
+    // selected option is always visible.
+    let roomy = (area.height as usize) >= d.fields.len() * 2 + 4 + 10;
+    let compact = in_list && !roomy;
+    let per_field = if compact { 1 } else { 2 };
+    let spare = (area.height as usize).saturating_sub(d.fields.len() * per_field + 4);
+    let cap = if compact { 6 } else { 10 };
+    let list_rows = if in_list {
+        d.fields[d.focus].choices.len().min(cap).min(spare)
+    } else {
+        0
+    };
+    let list_rows = if list_rows >= 3 { list_rows } else { 0 };
+    let h = (d.fields.len() as u16 * per_field as u16 + 4 + list_rows as u16).min(area.height);
     let r = centered(area, 78, h);
     f.render_widget(Clear, r);
     let block = panel(
@@ -175,7 +191,59 @@ pub fn render_dialog(f: &mut Frame, area: Rect, app: &App, d: &Dialog) {
             w = label_w
         );
         let field_w = (inner.width as usize).saturating_sub(label_w + 1);
-        let value = if fld.is_select() {
+        let mut extra: Vec<Line> = vec![];
+        let value = if fld.is_list() {
+            let cur = fld.choices.get(fld.choice).cloned().unwrap_or_default();
+            if focused && list_rows > 0 {
+                let len = fld.choices.len();
+                let start = fld
+                    .choice
+                    .saturating_sub(list_rows / 2)
+                    .min(len.saturating_sub(list_rows));
+                let id_w = fld
+                    .choices
+                    .iter()
+                    .map(|c| c.chars().count())
+                    .max()
+                    .unwrap_or(8)
+                    .min(24);
+                for ci in start..(start + list_rows).min(len) {
+                    let sel = ci == fld.choice;
+                    let base = if sel { t.selected() } else { t.base() };
+                    let marker = if sel { "▶ " } else { "  " };
+                    let detail = fld.details.get(ci).cloned().unwrap_or_default();
+                    let used = label_w + 2 + id_w + 2;
+                    extra.push(Line::from(vec![
+                        Span::styled(" ".repeat(label_w), t.base()),
+                        Span::styled(format!("{marker}{:<w$}  ", fld.choices[ci], w = id_w), base),
+                        Span::styled(
+                            truncate(&detail, (inner.width as usize).saturating_sub(used)),
+                            if sel { base } else { t.dim() },
+                        ),
+                    ]));
+                }
+                Line::from(vec![
+                    Span::styled(label, t.accent()),
+                    Span::styled(cur, t.bold()),
+                    Span::styled(
+                        format!(
+                            "   ({}/{}){}",
+                            fld.choice + 1,
+                            len,
+                            if start > 0 { " ▲" } else { "" }
+                        ),
+                        t.dim(),
+                    ),
+                    Span::styled(if start + list_rows < len { " ▼" } else { "" }, t.dim()),
+                ])
+            } else {
+                Line::from(vec![
+                    Span::styled(label, if focused { t.accent() } else { t.dim() }),
+                    Span::styled(cur, if focused { t.selected() } else { t.bold() }),
+                    Span::styled(format!("   ({} options)", fld.choices.len()), t.dim()),
+                ])
+            }
+        } else if fld.is_select() {
             let opts: Vec<Span> = fld
                 .choices
                 .iter()
@@ -224,13 +292,20 @@ pub fn render_dialog(f: &mut Frame, area: Rect, app: &App, d: &Dialog) {
             ])
         };
         lines.push(value);
-        lines.push(Line::raw(""));
+        lines.extend(extra);
+        if !compact {
+            lines.push(Line::raw(""));
+        }
     }
     if let Some(e) = &d.error {
         lines.push(Line::from(Span::styled(format!("! {e}"), t.err())));
     } else {
         lines.push(Line::from(Span::styled(
-            "Tab/↓ next field · Enter on last field submits · Esc cancels",
+            if in_list {
+                "↑↓ choose (PgUp/PgDn/Home/End) · Tab or Enter next field · Esc cancels"
+            } else {
+                "Tab/↓ next field · Enter on last field submits · Esc cancels"
+            },
             t.dim(),
         )));
     }

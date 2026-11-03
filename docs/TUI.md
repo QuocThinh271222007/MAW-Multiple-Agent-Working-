@@ -144,3 +144,5 @@ Interactive demo (mock provider, not a real Claude/Codex run):
 
 - **Add agent** (`a`): Model and Effort are pick-lists (←/→). Changing Provider swaps in that provider's models; changing Model swaps in the effort levels it supports. If a provider's list is unavailable the only choice is `default`. The lists are loaded in the background at startup (Claude instantly, Codex via `model/list`).
 - In the model dialog the *Custom model id (advanced)* field is validated against the provider's list before anything is saved.
+- **Long pick-lists** (4+ options, e.g. models) are drawn as a vertical list under the field label with each option's description, a `(n/total)` counter and `▲`/`▼` markers. `↑↓` choose, `PgUp/PgDn` jump 5, `Home/End` first/last, `Tab`/`Enter` move to the next field. On a short terminal the spacer rows disappear and the list becomes a 6-row scrolling window that always keeps the selection visible.
+- `maw demo` also loads the real Codex/Claude model lists (for listing only; those providers can never start an agent there).

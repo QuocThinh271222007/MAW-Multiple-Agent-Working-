@@ -123,6 +123,8 @@ struct Live {
 pub struct Supervisor {
     pub engine: Arc<Engine>,
     providers: RwLock<HashMap<ProviderKind, Arc<dyn AgentProvider>>>,
+    /// Providers used ONLY to list models (never to start sessions), e.g. in `maw demo`.
+    catalog_providers: RwLock<HashMap<ProviderKind, Arc<dyn AgentProvider>>>,
     sessions: AsyncMutex<HashMap<AgentId, Arc<Live>>>,
     mcp_url: RwLock<Option<String>>,
     transcripts: Transcripts,
@@ -143,6 +145,7 @@ impl Supervisor {
         Arc::new(Supervisor {
             engine,
             providers: RwLock::new(HashMap::new()),
+            catalog_providers: RwLock::new(HashMap::new()),
             sessions: AsyncMutex::new(HashMap::new()),
             mcp_url: RwLock::new(None),
             transcripts: Transcripts::default(),
@@ -159,6 +162,12 @@ impl Supervisor {
 
     pub fn register_provider(&self, p: Arc<dyn AgentProvider>) {
         if let Ok(mut m) = self.providers.write() {
+            m.insert(p.kind(), p);
+        }
+    }
+    /// Register a provider for model listing only; it can never run an agent.
+    pub fn register_catalog_provider(&self, p: Arc<dyn AgentProvider>) {
+        if let Ok(mut m) = self.catalog_providers.write() {
             m.insert(p.kind(), p);
         }
     }
@@ -431,6 +440,12 @@ impl Supervisor {
     ) -> CoreResult<Vec<maw_core::provider::ModelChoice>> {
         let p = self
             .provider(kind)
+            .or_else(|| {
+                self.catalog_providers
+                    .read()
+                    .ok()
+                    .and_then(|m| m.get(&kind).cloned())
+            })
             .ok_or_else(|| CoreError::Unsupported(format!("no provider registered for {kind}")))?;
         p.list_models()
             .await

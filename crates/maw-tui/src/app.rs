@@ -463,6 +463,8 @@ pub struct Field {
     pub choice: usize,
     pub required: bool,
     pub hint: String,
+    /// Optional description per choice (same order), shown beside it in a long list.
+    pub details: Vec<String>,
 }
 
 impl Field {
@@ -474,6 +476,7 @@ impl Field {
             choice: 0,
             required,
             hint: hint.into(),
+            details: vec![],
         }
     }
     pub fn text_with(label: &str, value: &str, required: bool, hint: &str) -> Field {
@@ -489,10 +492,15 @@ impl Field {
             choice: default,
             required: true,
             hint: "←/→ to change".into(),
+            details: vec![],
         }
     }
     pub fn is_select(&self) -> bool {
         !self.choices.is_empty()
+    }
+    /// A selector with many options is shown as a scrollable vertical list (↑↓ to choose).
+    pub fn is_list(&self) -> bool {
+        self.choices.len() >= 4
     }
     pub fn value(&self) -> String {
         if self.is_select() {
@@ -614,7 +622,12 @@ impl Dialog {
                 agent: agent.id.clone(),
             },
             fields: vec![
-                Field::select("Model", &choices, idx),
+                Field {
+                    details: std::iter::once("the provider's own default".to_string())
+                        .chain(models.iter().map(model_detail))
+                        .collect(),
+                    ..Field::select("Model", &choices, idx)
+                },
                 Field {
                     required: false,
                     hint: if detail.is_empty() {
@@ -1305,8 +1318,32 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Vec<Action> {
 
 fn dialog_key(app: &mut App, mut d: Dialog, key: KeyEvent) -> Vec<Action> {
     let n = d.fields.len();
+    let in_list = d.fields.get(d.focus).map(|f| f.is_list()).unwrap_or(false);
     match key.code {
         KeyCode::Esc => return vec![],
+        // inside a long pick-list the arrows move through the options; Tab/Enter move on
+        KeyCode::Down
+        | KeyCode::Up
+        | KeyCode::PageDown
+        | KeyCode::PageUp
+        | KeyCode::Home
+        | KeyCode::End
+            if in_list =>
+        {
+            if let Some(f) = d.fields.get_mut(d.focus) {
+                let last = f.choices.len() - 1;
+                f.choice = match key.code {
+                    KeyCode::Down => (f.choice + 1).min(last),
+                    KeyCode::Up => f.choice.saturating_sub(1),
+                    KeyCode::PageDown => (f.choice + 5).min(last),
+                    KeyCode::PageUp => f.choice.saturating_sub(5),
+                    KeyCode::Home => 0,
+                    _ => last,
+                };
+            }
+            d.error = None;
+            after_dialog_edit(app, &mut d);
+        }
         KeyCode::Tab | KeyCode::Down => d.focus = (d.focus + 1) % n.max(1),
         KeyCode::BackTab | KeyCode::Up => d.focus = (d.focus + n.max(1) - 1) % n.max(1),
         KeyCode::Enter => {
@@ -1333,31 +1370,54 @@ fn dialog_key(app: &mut App, mut d: Dialog, key: KeyEvent) -> Vec<Action> {
                 }
                 d.error = None;
             }
-            // keep the Model / Effort pick-lists consistent with what was just chosen
-            match d.kind.clone() {
-                DialogKind::AddAgent if d.focus == 1 => {
-                    refresh_add_agent(&mut d, &app.models, true)
-                }
-                DialogKind::AddAgent if d.focus == 3 => {
-                    refresh_add_agent(&mut d, &app.models, false)
-                }
-                DialogKind::AgentModel { agent } if d.focus <= 1 => {
-                    let kind = app
-                        .agents()
-                        .iter()
-                        .find(|a| a.id == agent)
-                        .map(|a| a.provider);
-                    if let Some(k) = kind {
-                        let list = app.models.get(&k).cloned().unwrap_or_default();
-                        refresh_model_dialog_efforts(&mut d, &list);
-                    }
-                }
-                _ => {}
-            }
+            after_dialog_edit(app, &mut d);
         }
     }
     app.overlay = Overlay::Dialog(d);
     vec![]
+}
+
+/// Keep the Model / Effort pick-lists consistent with what was just chosen.
+fn after_dialog_edit(app: &App, d: &mut Dialog) {
+    match d.kind.clone() {
+        DialogKind::AddAgent if d.focus == 1 => refresh_add_agent(d, &app.models, true),
+        DialogKind::AddAgent if d.focus == 3 => refresh_add_agent(d, &app.models, false),
+        DialogKind::AgentModel { agent } if d.focus <= 1 => {
+            let kind = app
+                .agents()
+                .iter()
+                .find(|a| a.id == agent)
+                .map(|a| a.provider);
+            if let Some(k) = kind {
+                let list = app.models.get(&k).cloned().unwrap_or_default();
+                refresh_model_dialog_efforts(d, &list);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn model_detail(m: &ModelChoice) -> String {
+    match (m.display_name != m.id, m.description.is_empty()) {
+        (true, false) => format!("{} — {}", m.display_name, m.description),
+        (true, true) => m.display_name.clone(),
+        (false, false) => m.description.clone(),
+        (false, true) => String::new(),
+    }
+}
+
+/// Re-run the add-agent list refresh when the model catalog arrives while the dialog is open.
+pub fn refresh_open_dialog(app: &mut App) {
+    if let Overlay::Dialog(d) = &mut app.overlay {
+        if d.kind == DialogKind::AddAgent
+            && d.fields
+                .get(3)
+                .map(|f| f.choices.len() <= 1)
+                .unwrap_or(false)
+        {
+            refresh_add_agent(d, &app.models, true);
+        }
+    }
 }
 
 /// Rebuild the Model list (when the provider changed) and the Effort list of an add-agent dialog.
@@ -1376,6 +1436,9 @@ fn refresh_add_agent(
         if let Some(f) = d.fields.get_mut(3) {
             f.choices = ids;
             f.choice = 0;
+            f.details = std::iter::once("the provider's own default".to_string())
+                .chain(list.iter().map(model_detail))
+                .collect();
             f.hint = if list.is_empty() {
                 "no model list for this provider (not installed / still loading): the default is used"
                     .into()

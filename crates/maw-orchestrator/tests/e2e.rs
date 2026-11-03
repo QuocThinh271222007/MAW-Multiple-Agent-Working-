@@ -548,3 +548,79 @@ async fn reconfiguring_an_idle_agent_reconnects_it_and_a_stopped_one_just_saves(
     );
     sup.shutdown().await;
 }
+
+/// A provider that can only list models (what `maw demo` registers for Claude/Codex).
+struct ListOnly;
+
+#[async_trait::async_trait]
+impl maw_core::provider::AgentProvider for ListOnly {
+    fn kind(&self) -> ProviderKind {
+        ProviderKind::Codex
+    }
+    async fn list_models(
+        &self,
+    ) -> maw_core::provider::ProviderResult<Vec<maw_core::provider::ModelChoice>> {
+        Ok(vec![maw_core::provider::ModelChoice {
+            id: "gpt-6-luna".into(),
+            display_name: "Luna".into(),
+            description: String::new(),
+            is_default: true,
+            source: "provider".into(),
+            reasoning_efforts: vec![],
+        }])
+    }
+    async fn detect(&self) -> maw_core::provider::ProviderResult<maw_core::provider::ProviderInfo> {
+        Err(maw_core::provider::ProviderError::Unsupported(
+            "list only".into(),
+        ))
+    }
+    async fn auth_status(
+        &self,
+    ) -> maw_core::provider::ProviderResult<maw_core::provider::AuthStatus> {
+        Err(maw_core::provider::ProviderError::Unsupported(
+            "list only".into(),
+        ))
+    }
+    async fn start_session(
+        &self,
+        _cfg: maw_core::provider::SessionConfig,
+    ) -> maw_core::provider::ProviderResult<(
+        maw_core::provider::SessionHandle,
+        maw_core::provider::EventReceiver,
+    )> {
+        panic!("a catalog-only provider must never start a session");
+    }
+}
+
+#[tokio::test]
+async fn catalog_providers_list_models_but_can_never_run_an_agent() {
+    let data = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open(data.path().join("maw.db")).unwrap());
+    let engine = Engine::open(store, "demo", "/tmp/demo", fast_cfg()).unwrap();
+    let a = engine
+        .add_agent(
+            "c",
+            ProviderKind::Codex,
+            Role::Worker,
+            None,
+            PermissionProfile::Safe,
+            None,
+        )
+        .unwrap();
+    let sup = Supervisor::new(engine.clone());
+    sup.register_catalog_provider(Arc::new(ListOnly));
+    // models and validation work through the catalog provider
+    let list = sup.list_models(ProviderKind::Codex).await.unwrap();
+    assert_eq!(list[0].id, "gpt-6-luna");
+    assert!(sup
+        .validate_model(ProviderKind::Codex, "gpt-6-luna")
+        .await
+        .is_ok());
+    assert!(sup
+        .validate_model(ProviderKind::Codex, "gpt-9")
+        .await
+        .is_err());
+    // but connecting an agent of that kind fails instead of using it
+    assert!(sup.connect_agent(&a.id).await.is_err());
+    assert!(sup.provider(ProviderKind::Codex).is_none());
+}

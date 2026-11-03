@@ -136,7 +136,13 @@ pub async fn boot(
                 sup.register_provider(pr);
             }
         }
-        Providers::Mock(script) => sup.register_provider(MockProvider::new(engine.clone(), script)),
+        Providers::Mock(script) => {
+            sup.register_provider(MockProvider::new(engine.clone(), script));
+            // real providers are consulted for their model lists only (the demo never runs them)
+            for pr in real_providers(&ctx.cfg) {
+                sup.register_catalog_provider(pr);
+            }
+        }
     }
     // Always allow mock agents alongside real ones only when explicitly requested above.
     let mcp = maw_mcp::serve_http(engine.clone(), "127.0.0.1:0".parse()?).await?;
