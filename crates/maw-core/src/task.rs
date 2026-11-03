@@ -227,7 +227,9 @@ impl FromStr for EvidenceKind {
             "review" => Ok(Self::Review),
             "verification" => Ok(Self::Verification),
             "note" => Ok(Self::Note),
-            o => Err(format!("unknown evidence kind '{o}'")),
+            o => Err(format!(
+                "unknown evidence kind '{o}'; use one of: file_changes, test_result, build_result, review, verification, note"
+            )),
         }
     }
 }

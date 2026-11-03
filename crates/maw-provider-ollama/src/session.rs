@@ -25,6 +25,14 @@ use tokio_util::sync::CancellationToken;
 /// Speed of the most recent request: (when, generation tok/s, prompt tok/s).
 pub type SpeedCell = Arc<Mutex<Option<(std::time::Instant, f32, f32)>>>;
 
+/// MAW tools that hand the work item back. After one of them succeeds the turn is over: small
+/// models otherwise keep calling tools or re-submit, which costs time and confuses the state.
+const TERMINAL_TOOLS: &[&str] = &[
+    "maw_task_submit_result",
+    "maw_task_block",
+    "maw_review_submit",
+];
+
 const MAX_LINE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_TOOL_RESULT_BYTES: usize = 16 * 1024;
 
@@ -435,10 +443,14 @@ async fn step(sh: &Arc<Shared>, cancel: &CancellationToken) -> Result<Step, Stri
         }
         return Ok(Step::Done);
     }
+    let mut handed_back = false;
     for call in calls {
         match exec_tool(sh, &call, cancel).await {
             None => return Ok(Step::Interrupted),
             Some(text) => {
+                if TERMINAL_TOOLS.contains(&call.name.as_str()) && !text.starts_with("error:") {
+                    handed_back = true;
+                }
                 let text = clip(&text, MAX_TOOL_RESULT_BYTES);
                 sh.lock()
                     .history
@@ -446,7 +458,11 @@ async fn step(sh: &Arc<Shared>, cancel: &CancellationToken) -> Result<Step, Stri
             }
         }
     }
-    Ok(Step::Continue)
+    Ok(if handed_back {
+        Step::Done
+    } else {
+        Step::Continue
+    })
 }
 
 fn clip(s: &str, max: usize) -> String {

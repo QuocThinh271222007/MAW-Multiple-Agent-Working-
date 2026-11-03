@@ -376,17 +376,17 @@ pub const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         cmd: Cmd::AgentModel,
-        name: "agent model",
+        name: "model",
         desc: "choose the selected agent's model; idle agents reconnect now (M)",
     },
     CommandSpec {
         cmd: Cmd::PullModel,
-        name: "model download",
+        name: "download model",
         desc: "download a local model for Ollama agents (suggestions up to 8B)",
     },
     CommandSpec {
         cmd: Cmd::AgentPermission,
-        name: "agent permission",
+        name: "permissions",
         desc: "set safe / balanced / autonomous for the selected agent",
     },
     CommandSpec {
@@ -516,6 +516,8 @@ pub enum Overlay {
     Help,
     Palette(PaletteState),
     Dialog(Dialog),
+    /// One-decision list (model, effort, permissions, download).
+    Picker(crate::picker::PickerState),
     /// Scrollable text result (e.g. of a `!` shell command).
     Output(OutputState),
 }
@@ -596,9 +598,6 @@ pub enum DialogKind {
     RedirectGoal,
     AddAgent,
     MessageAgent { agent: String },
-    AgentModel { agent: AgentId },
-    PullModel,
-    AgentPermission { agent: AgentId },
     RemoveAgent { agent: AgentId },
     Shell,
     VerifyTask { key: String },
@@ -675,119 +674,6 @@ impl Dialog {
         };
         refresh_add_agent(&mut d, models, true);
         d
-    }
-    /// Model + effort picker. `models` is the provider's catalog (may be empty while it loads);
-    /// a custom id can always be typed and wins over the selector.
-    pub fn agent_model(agent: &Agent, models: &[ModelChoice]) -> Dialog {
-        let mut ids: Vec<String> = vec!["default".into()];
-        ids.extend(models.iter().map(|m| m.id.clone()));
-        let cur = agent.model.clone().unwrap_or_else(|| "default".into());
-        let idx = ids.iter().position(|i| *i == cur).unwrap_or(0);
-        let choices: Vec<&str> = ids.iter().map(|s| s.as_str()).collect();
-        // levels for this agent's model, from the same function the other dialogs use
-        let mut efforts: Vec<String> = vec!["default".into()];
-        efforts.extend(maw_orchestrator::models::efforts_for_provider(
-            agent.provider,
-            models,
-            agent.model.as_deref(),
-        ));
-        let eidx = agent
-            .effort
-            .as_ref()
-            .and_then(|e| efforts.iter().position(|x| x == e))
-            .unwrap_or(0);
-        let echoices: Vec<&str> = efforts.iter().map(|s| s.as_str()).collect();
-        let detail = models
-            .iter()
-            .map(|m| m.id.as_str())
-            .collect::<Vec<_>>()
-            .join(", ");
-        Dialog {
-            title: format!("Model & effort for {} ({})", agent.name, agent.provider),
-            kind: DialogKind::AgentModel {
-                agent: agent.id.clone(),
-            },
-            fields: vec![
-                Field {
-                    details: std::iter::once("the provider's own default".to_string())
-                        .chain(models.iter().map(model_detail))
-                        .collect(),
-                    ..Field::select("Model", &choices, idx)
-                },
-                Field {
-                    required: false,
-                    hint: if detail.is_empty() {
-                        "type any model id the provider accepts".into()
-                    } else {
-                        format!("optional override; known: {detail}")
-                    },
-                    ..Field::text("Custom model id (advanced)", false, "")
-                },
-                Field {
-                    hint: if echoices.len() == 1 {
-                        "this model has no effort setting".into()
-                    } else {
-                        String::new()
-                    },
-                    ..Field::select("Effort", &echoices, eidx)
-                },
-            ],
-            focus: 0,
-            error: None,
-        }
-    }
-    /// Pick a suggested model or type any name; installed models are marked.
-    pub fn pull_model(suggestions: &[ModelChoice], installed: &[ModelChoice]) -> Dialog {
-        let mut ids: Vec<String> = vec!["(choose, or type a name below)".into()];
-        ids.extend(suggestions.iter().map(|m| m.id.clone()));
-        let choices: Vec<&str> = ids.iter().map(|s| s.as_str()).collect();
-        let details: Vec<String> = std::iter::once(String::new())
-            .chain(suggestions.iter().map(|m| {
-                if installed.iter().any(|i| i.id == m.id) {
-                    format!("✓ installed · {}", m.description)
-                } else {
-                    m.description.clone()
-                }
-            }))
-            .collect();
-        Dialog {
-            title: "Download a model (Ollama)".into(),
-            kind: DialogKind::PullModel,
-            fields: vec![
-                Field {
-                    details,
-                    ..Field::select("Suggested", &choices, 0)
-                },
-                Field {
-                    required: false,
-                    hint: "limited to 8B parameters / ~6.5 GB by default ([ollama] in config.toml)"
-                        .into(),
-                    ..Field::text("Or any model name", false, "e.g. qwen3:8b")
-                },
-            ],
-            focus: 0,
-            error: None,
-        }
-    }
-    pub fn agent_permission(agent: &Agent) -> Dialog {
-        let idx = match agent.permission {
-            PermissionProfile::Safe => 0,
-            PermissionProfile::Balanced => 1,
-            PermissionProfile::Autonomous => 2,
-        };
-        Dialog {
-            title: format!("Permissions for {}", agent.name),
-            kind: DialogKind::AgentPermission {
-                agent: agent.id.clone(),
-            },
-            fields: vec![Field::select(
-                "Profile (applies on reconnect)",
-                &["safe", "balanced", "autonomous"],
-                idx,
-            )],
-            focus: 0,
-            error: None,
-        }
     }
     pub fn remove_agent(agent: &Agent) -> Dialog {
         Dialog {
@@ -906,32 +792,6 @@ impl Dialog {
                     permission: v(5).parse().map_err(|e: String| e)?,
                 }
             }
-            DialogKind::AgentModel { agent } => {
-                // a typed id wins over the selector
-                let custom = v(1);
-                let chosen = if custom.is_empty() { v(0) } else { custom };
-                Action::SetAgentModel {
-                    agent: agent.clone(),
-                    model: Some(chosen).filter(|m| !m.is_empty() && m != "default"),
-                    effort: Some(v(2)).filter(|e| !e.is_empty() && e != "default"),
-                }
-            }
-            DialogKind::PullModel => {
-                let custom = v(1);
-                let picked = v(0);
-                let name = if !custom.is_empty() {
-                    custom
-                } else if self.fields[0].choice > 0 {
-                    picked
-                } else {
-                    return Err("pick a suggested model or type a model name".into());
-                };
-                Action::PullModel { name }
-            }
-            DialogKind::AgentPermission { agent } => Action::SetAgentPermission {
-                agent: agent.clone(),
-                permission: v(0).parse().map_err(|e: String| e)?,
-            },
             DialogKind::RemoveAgent { agent } => {
                 if !v(0).starts_with("yes") {
                     return Err("choose 'yes, remove it' to confirm (Esc cancels)".into());
@@ -1023,6 +883,12 @@ pub struct App {
     pub perf: maw_core::perf::PerfHistory,
     /// Index into `ui::perf_view::WINDOWS`.
     pub perf_window: usize,
+    /// The message box at the bottom of the agent view (always ready for typing, like Claude Code).
+    pub composer: TextInput,
+    /// `true`: keys go to the message box; `false` (Tab): browse keys (copy, search, filters).
+    pub composer_focus: bool,
+    /// Highlighted entry of the `/` command menu above the message box.
+    pub composer_sel: usize,
     /// Horizontal scroll offsets of the title bar and the hint bar (mouse wheel over the bar).
     pub header_scroll: usize,
     pub footer_scroll: usize,
@@ -1073,6 +939,9 @@ impl App {
             pull_suggestions: Vec::new(),
             perf: maw_core::perf::PerfHistory::new(1),
             perf_window: 1,
+            composer: TextInput::new(),
+            composer_focus: true,
+            composer_sel: 0,
             header_scroll: 0,
             footer_scroll: 0,
             header_max: Cell::new(0),
@@ -1168,6 +1037,9 @@ impl App {
                 self.prev_view = self.view;
             }
             self.view = v;
+            if v == View::AgentDetail {
+                self.composer_focus = true;
+            }
         }
         self.detail_scroll = 0;
         self.detail_dirty = true;
@@ -1403,7 +1275,7 @@ pub fn run_cmd(app: &mut App, cmd: Cmd) -> Vec<Action> {
         Cmd::AgentModel => {
             if let Some(a) = need_agent(app) {
                 let models = app.models.get(&a.provider).cloned().unwrap_or_default();
-                app.overlay = Overlay::Dialog(Dialog::agent_model(&a, &models));
+                app.overlay = Overlay::Picker(crate::picker::model_picker(&a, &models));
             }
         }
         Cmd::PullModel => {
@@ -1418,13 +1290,15 @@ pub fn run_cmd(app: &mut App, cmd: Cmd) -> Vec<Action> {
                     Level::Error,
                 );
             } else {
-                app.overlay =
-                    Overlay::Dialog(Dialog::pull_model(&app.pull_suggestions, &installed));
+                app.overlay = Overlay::Picker(crate::picker::pull_picker(
+                    &app.pull_suggestions,
+                    &installed,
+                ));
             }
         }
         Cmd::AgentPermission => {
             if let Some(a) = need_agent(app) {
-                app.overlay = Overlay::Dialog(Dialog::agent_permission(&a));
+                app.overlay = Overlay::Picker(crate::picker::permission_picker(&a));
             }
         }
         Cmd::Shell => app.overlay = Overlay::Dialog(Dialog::shell()),
@@ -1580,6 +1454,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Vec<Action> {
     match std::mem::take(&mut app.overlay) {
         Overlay::Dialog(d) => return dialog_key(app, d, key),
         Overlay::Palette(p) => return palette_key(app, p, key),
+        Overlay::Picker(p) => return crate::picker::picker_key(app, p, key),
         Overlay::Output(o) => return output_key(app, o, key),
         Overlay::Help => {
             if !matches!(
@@ -1675,27 +1550,7 @@ fn after_dialog_edit(app: &App, d: &mut Dialog) {
     match d.kind.clone() {
         DialogKind::AddAgent if d.focus == 1 => refresh_add_agent(d, &app.models, true),
         DialogKind::AddAgent if d.focus == 3 => refresh_add_agent(d, &app.models, false),
-        DialogKind::AgentModel { agent } if d.focus <= 1 => {
-            let kind = app
-                .agents()
-                .iter()
-                .find(|a| a.id == agent)
-                .map(|a| a.provider);
-            if let Some(k) = kind {
-                let list = app.models.get(&k).cloned().unwrap_or_default();
-                refresh_model_dialog_efforts(d, k, &list);
-            }
-        }
         _ => {}
-    }
-}
-
-fn model_detail(m: &ModelChoice) -> String {
-    match (m.display_name != m.id, m.description.is_empty()) {
-        (true, false) => format!("{} — {}", m.display_name, m.description),
-        (true, true) => m.display_name.clone(),
-        (false, false) => m.description.clone(),
-        (false, true) => String::new(),
     }
 }
 
@@ -1730,7 +1585,7 @@ fn refresh_add_agent(
             f.choices = ids;
             f.choice = 0;
             f.details = std::iter::once("the provider's own default".to_string())
-                .chain(list.iter().map(model_detail))
+                .chain(list.iter().map(crate::picker::model_detail))
                 .collect();
             f.hint = if list.is_empty() {
                 "no model list for this provider (not installed / still loading): the default is used"
@@ -1765,35 +1620,6 @@ fn refresh_add_agent(
     }
 }
 
-/// Efforts of the model dialog follow the selected (or typed) model.
-fn refresh_model_dialog_efforts(d: &mut Dialog, kind: ProviderKind, list: &[ModelChoice]) {
-    let custom = d.fields.get(1).map(|f| f.value()).unwrap_or_default();
-    let chosen = if custom.is_empty() {
-        d.fields.first().map(|f| f.value()).unwrap_or_default()
-    } else {
-        custom
-    };
-    let model = Some(chosen).filter(|m| !m.is_empty() && m != "default");
-    let mut efforts: Vec<String> = vec!["default".into()];
-    efforts.extend(maw_orchestrator::models::efforts_for_provider(
-        kind,
-        list,
-        model.as_deref(),
-    ));
-    if let Some(f) = d.fields.get_mut(2) {
-        let keep = f.choices.get(f.choice).cloned();
-        f.choice = keep
-            .and_then(|k| efforts.iter().position(|e| *e == k))
-            .unwrap_or(0);
-        f.hint = if efforts.len() == 1 {
-            "this model has no effort setting".into()
-        } else {
-            String::new()
-        };
-        f.choices = efforts;
-    }
-}
-
 fn palette_key(app: &mut App, mut p: PaletteState, key: KeyEvent) -> Vec<Action> {
     let matches = palette_matches(p.input.value());
     match key.code {
@@ -1814,6 +1640,86 @@ fn palette_key(app: &mut App, mut p: PaletteState, key: KeyEvent) -> Vec<Action>
     }
     app.overlay = Overlay::Palette(p);
     vec![]
+}
+
+/// Entries of the `/` menu for the text in the message box (empty unless it starts with `/`).
+pub fn composer_menu(app: &App) -> Vec<&'static CommandSpec> {
+    match app.composer.value().strip_prefix('/') {
+        Some(q) => palette_matches(q.trim()),
+        None => vec![],
+    }
+}
+
+/// Keys in the message box. `None` = not handled here (scrolling, Ctrl shortcuts, Esc to leave).
+fn composer_key(app: &mut App, key: &KeyEvent) -> Option<Vec<Action>> {
+    let menu = composer_menu(app);
+    match key.code {
+        KeyCode::Tab => {
+            app.composer_focus = false;
+            Some(vec![])
+        }
+        KeyCode::Esc if !app.composer.value().is_empty() => {
+            app.composer.set("");
+            app.composer_sel = 0;
+            Some(vec![])
+        }
+        KeyCode::Up if !menu.is_empty() => {
+            app.composer_sel = app.composer_sel.saturating_sub(1);
+            Some(vec![])
+        }
+        KeyCode::Down if !menu.is_empty() => {
+            app.composer_sel = (app.composer_sel + 1).min(menu.len() - 1);
+            Some(vec![])
+        }
+        KeyCode::Enter => Some(composer_submit(app)),
+        // with nothing typed, Home / End jump through the transcript instead of moving a cursor
+        KeyCode::Home | KeyCode::End if app.composer.value().is_empty() => None,
+        _ => {
+            if app.composer.handle_key(*key) {
+                app.composer_sel = 0;
+                Some(vec![])
+            } else {
+                None
+            }
+        }
+    }
+}
+
+fn composer_submit(app: &mut App) -> Vec<Action> {
+    let text = app.composer.value().trim().to_string();
+    if text.is_empty() {
+        return vec![];
+    }
+    if text.starts_with('/') {
+        let menu = composer_menu(app);
+        let Some(cmd) = menu.get(app.composer_sel.min(menu.len().saturating_sub(1))) else {
+            app.set_toast(format!("no command matches '{text}'"), Level::Error);
+            return vec![];
+        };
+        let cmd = cmd.cmd;
+        app.composer.set("");
+        app.composer_sel = 0;
+        return run_cmd(app, cmd);
+    }
+    if let Some(shell) = text.strip_prefix('!') {
+        app.composer.set("");
+        let shell = shell.trim();
+        return if shell.is_empty() {
+            run_cmd(app, Cmd::Shell)
+        } else {
+            vec![Action::RunShell(shell.to_string())]
+        };
+    }
+    let Some(name) = app.selected_agent().map(|a| a.name.clone()) else {
+        return vec![];
+    };
+    app.composer.set("");
+    app.set_toast(format!("message sent to {name}"), Level::Ok);
+    vec![Action::MessageAgent {
+        agent: name,
+        text,
+        interrupt: false,
+    }]
 }
 
 fn search_key(app: &mut App, key: KeyEvent) -> Vec<Action> {
@@ -1866,6 +1772,18 @@ fn normal_key(app: &mut App, key: KeyEvent) -> Vec<Action> {
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
     let page = (app.size.1 as isize - 8).max(3);
     let in_agent_view = matches!(app.view, View::Dashboard | View::Agents | View::AgentDetail);
+
+    // the agent view has a message box that takes the keys until Tab moves to browse mode
+    if app.view == View::AgentDetail && app.search.is_none() {
+        if app.composer_focus {
+            if let Some(actions) = composer_key(app, &key) {
+                return actions;
+            }
+        } else if matches!(key.code, KeyCode::Tab | KeyCode::Enter) {
+            app.composer_focus = true;
+            return vec![];
+        }
+    }
 
     // keys that always work
     match key.code {
@@ -2306,6 +2224,14 @@ mod tests {
         assert!(a.toast.is_some());
         handle_key(&mut a, press(KeyCode::Enter));
         assert_eq!(a.view, View::AgentDetail);
+        // the message box has the keys; digits select agents in browse mode (Tab)
+        handle_key(&mut a, ch('1'));
+        assert_eq!(
+            (a.view, a.selected_agent, a.composer.value()),
+            (View::AgentDetail, 2, "1")
+        );
+        handle_key(&mut a, press(KeyCode::Esc)); // clears the text first
+        handle_key(&mut a, press(KeyCode::Tab));
         handle_key(&mut a, ch('1'));
         assert_eq!((a.view, a.selected_agent), (View::AgentDetail, 0));
         handle_key(&mut a, press(KeyCode::Esc));
@@ -2644,6 +2570,7 @@ mod tests {
         handle_key(&mut a, ch('1'));
         handle_key(&mut a, press(KeyCode::Enter));
         assert_eq!(a.view, View::AgentDetail);
+        handle_key(&mut a, press(KeyCode::Tab)); // browse mode: search and copy keys
         handle_key(&mut a, press(KeyCode::PageUp));
         assert!(a.detail_scroll > 0);
         handle_key(&mut a, press(KeyCode::End));

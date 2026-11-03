@@ -579,8 +579,8 @@ fn narrow_title_bar_can_be_scrolled_to_reveal_every_view_key() {
     );
     assert!(!row0.contains('‹'), "nothing hidden on the left yet");
     assert!(
-        !row0.contains("c:Config"),
-        "the last key does not fit at 60 columns"
+        row0.contains("[d:Dashboard]") && row0.contains('%'),
+        "at 60 columns the keys are compact but all there: {row0:?}"
     );
 
     // wheel over the bar (row 0) scrolls it; keep going until it stops
@@ -592,10 +592,6 @@ fn narrow_title_bar_can_be_scrolled_to_reveal_every_view_key() {
     assert!(
         row0.contains('‹') && !row0.contains('›'),
         "scrolled to the end: {row0:?}"
-    );
-    assert!(
-        row0.contains("Config"),
-        "the last key is now readable: {row0:?}"
     );
     assert!(
         row0.contains("dir:"),
@@ -667,95 +663,6 @@ fn bang_opens_the_shell_dialog_and_submits_a_run_action() {
     handle_key(&mut a, key(KeyCode::Char('!')));
     let actions = handle_key(&mut a, key(KeyCode::Enter));
     assert!(actions.is_empty());
-}
-
-#[test]
-fn model_dialog_offers_the_catalog_and_efforts_and_a_typed_id_wins() {
-    use maw_core::provider::ModelChoice;
-    use maw_tui::app::Action;
-    let a = app();
-    let agent = a
-        .agents()
-        .iter()
-        .find(|x| x.provider == ProviderKind::Codex)
-        .unwrap()
-        .clone();
-    let models = vec![
-        ModelChoice {
-            id: "gpt-6.1-sol".into(),
-            display_name: "Sol".into(),
-            description: String::new(),
-            is_default: true,
-            source: "provider".into(),
-            reasoning_efforts: vec!["low".into(), "high".into(), "ultra".into()],
-        },
-        ModelChoice {
-            id: "gpt-6-luna".into(),
-            display_name: "Luna".into(),
-            description: String::new(),
-            is_default: false,
-            source: "provider".into(),
-            reasoning_efforts: vec!["low".into()],
-        },
-    ];
-    let mut d = Dialog::agent_model(&agent, &models);
-    assert_eq!(
-        d.fields[0].choices,
-        vec!["default", "gpt-6.1-sol", "gpt-6-luna"]
-    );
-    assert_eq!(
-        d.fields[2].choices,
-        vec!["default", "low", "high", "ultra"],
-        "efforts come from the default model"
-    );
-    // pick a model and an effort
-    d.fields[0].choice = 2;
-    d.fields[2].choice = 2;
-    match d.submit().unwrap() {
-        Action::SetAgentModel { model, effort, .. } => assert_eq!(
-            (model.as_deref(), effort.as_deref()),
-            (Some("gpt-6-luna"), Some("high"))
-        ),
-        o => panic!("{o:?}"),
-    }
-    // a typed id overrides the selector; `default` clears both
-    d.fields[1].input.set("my-custom-model");
-    match d.submit().unwrap() {
-        Action::SetAgentModel { model, .. } => {
-            assert_eq!(model.as_deref(), Some("my-custom-model"))
-        }
-        o => panic!("{o:?}"),
-    }
-    d.fields[1].input.set("");
-    d.fields[0].choice = 0;
-    d.fields[2].choice = 0;
-    match d.submit().unwrap() {
-        Action::SetAgentModel { model, effort, .. } => assert_eq!((model, effort), (None, None)),
-        o => panic!("{o:?}"),
-    }
-    // it renders without panicking at small sizes
-    let mut app2 = App::new(Theme::new(false));
-    app2.apply_snapshot(sample_snapshot());
-    app2.overlay = Overlay::Dialog(d);
-    for (w, h) in [(80, 24), (40, 12), (20, 5)] {
-        let _ = render_text(&app2, w, h);
-    }
-}
-
-#[test]
-fn permission_dialog_maps_to_an_action() {
-    use maw_tui::app::Action;
-    let a = app();
-    let agent = a.agents()[1].clone();
-    let mut d = Dialog::agent_permission(&agent);
-    d.fields[0].choice = 2;
-    assert!(matches!(
-        d.submit().unwrap(),
-        Action::SetAgentPermission {
-            permission: PermissionProfile::Autonomous,
-            ..
-        }
-    ));
 }
 
 #[test]
@@ -1309,6 +1216,7 @@ fn app_with_mixed_transcript() -> App {
     );
     a.selected_agent = 1;
     a.view = View::AgentDetail;
+    a.composer_focus = false; // browse mode: the T / L / P filter keys
     a
 }
 
@@ -1526,84 +1434,6 @@ fn the_mock_provider_is_offered_only_in_demo_projects() {
 }
 
 #[test]
-fn model_download_dialog_offers_suggestions_marks_installed_and_returns_the_choice() {
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-    use maw_tui::app::{run_cmd, Action, Cmd};
-    let key = |c| KeyEvent::new(c, KeyModifiers::NONE);
-    let mk = |id: &str| maw_core::provider::ModelChoice {
-        id: id.into(),
-        display_name: id.into(),
-        description: format!("{id} 5.2 GB · tools"),
-        is_default: false,
-        source: "catalog".into(),
-        reasoning_efforts: vec![],
-    };
-    let mut a = app();
-    // without the Ollama provider there is nothing to offer, and the user is told
-    run_cmd(&mut a, Cmd::PullModel);
-    assert!(a
-        .toast
-        .as_ref()
-        .is_some_and(|t| t.text.contains("not available")));
-
-    a.pull_suggestions = vec![
-        mk("qwen3:8b"),
-        mk("llama3.1:8b"),
-        mk("mistral:7b"),
-        mk("phi4-mini"),
-    ];
-    a.models
-        .insert(ProviderKind::Ollama, vec![mk("llama3.1:8b")]);
-    run_cmd(&mut a, Cmd::PullModel);
-    let t = render_text(&a, 120, 30);
-    assert!(
-        t.contains("Download a model") && t.contains("Suggested"),
-        "{t}"
-    );
-
-    // nothing chosen yet: refused with an explanation
-    handle_key(&mut a, key(KeyCode::Enter));
-    let acts = handle_key(&mut a, key(KeyCode::Enter));
-    assert!(acts.is_empty());
-    match &a.overlay {
-        Overlay::Dialog(d) => assert!(
-            d.error
-                .as_deref()
-                .unwrap_or("")
-                .contains("pick a suggested model"),
-            "{:?}",
-            d.error
-        ),
-        _ => panic!("dialog must stay open"),
-    }
-    // choose the first suggestion and confirm
-    let mut b = app();
-    b.pull_suggestions = a.pull_suggestions.clone();
-    b.models = a.models.clone();
-    run_cmd(&mut b, Cmd::PullModel);
-    handle_key(&mut b, key(KeyCode::Down));
-    assert!(render_text(&b, 120, 30).contains("qwen3:8b"));
-    handle_key(&mut b, key(KeyCode::Enter));
-    let acts = handle_key(&mut b, key(KeyCode::Enter));
-    assert!(
-        matches!(acts.as_slice(), [Action::PullModel { name }] if name == "qwen3:8b"),
-        "{acts:?}"
-    );
-    // the second suggestion is already installed and says so
-    let mut c = app();
-    c.pull_suggestions = a.pull_suggestions.clone();
-    c.models = a.models.clone();
-    run_cmd(&mut c, Cmd::PullModel);
-    handle_key(&mut c, key(KeyCode::Down));
-    handle_key(&mut c, key(KeyCode::Down));
-    let t = render_text(&c, 140, 30);
-    assert!(t.contains("✓ installed"), "{t}");
-    assert!(maw_tui::app::COMMANDS
-        .iter()
-        .any(|c| c.name == "model download"));
-}
-
-#[test]
 fn arrows_leave_a_long_list_at_either_end_so_you_can_go_back_up_a_form() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use maw_tui::app::run_cmd;
@@ -1814,4 +1644,313 @@ fn ollama_models_offer_effort_only_when_the_model_really_has_levels() {
     let (e, hint) = efforts(&a);
     assert_eq!(e, ["default", "low", "medium", "high"]);
     assert!(hint.is_empty(), "{hint}");
+}
+
+// ---- pickers (model / effort / permissions / download) -----------------------------------------
+
+fn mk_model(
+    id: &str,
+    desc: &str,
+    efforts: &[&str],
+    default: bool,
+) -> maw_core::provider::ModelChoice {
+    maw_core::provider::ModelChoice {
+        id: id.into(),
+        display_name: id.into(),
+        description: desc.into(),
+        is_default: default,
+        source: "provider".into(),
+        reasoning_efforts: efforts.iter().map(|s| s.to_string()).collect(),
+    }
+}
+
+fn press(a: &mut App, code: crossterm::event::KeyCode) -> Vec<maw_tui::app::Action> {
+    handle_key(
+        a,
+        crossterm::event::KeyEvent::new(code, crossterm::event::KeyModifiers::NONE),
+    )
+}
+
+fn type_text(a: &mut App, text: &str) {
+    for c in text.chars() {
+        press(a, crossterm::event::KeyCode::Char(c));
+    }
+}
+
+#[test]
+fn model_picker_chooses_a_model_then_asks_for_the_effort_only_when_it_has_levels() {
+    use crossterm::event::KeyCode;
+    use maw_tui::app::{run_cmd, Action, Cmd};
+    let mut a = app();
+    let agent = a
+        .agents()
+        .iter()
+        .find(|x| x.provider == ProviderKind::Codex)
+        .unwrap()
+        .clone();
+    a.selected_agent = a.agents().iter().position(|x| x.id == agent.id).unwrap();
+    a.models.insert(
+        ProviderKind::Codex,
+        vec![
+            mk_model("gpt-6.1-sol", "flagship", &["low", "high"], true),
+            mk_model("gpt-6-luna", "fast", &["none"], false),
+        ],
+    );
+    run_cmd(&mut a, Cmd::AgentModel);
+    let t = render_text(&a, 110, 30);
+    assert!(
+        t.contains("Model for")
+            && t.contains("gpt-6.1-sol")
+            && t.contains("flagship")
+            && t.contains("❯"),
+        "{t}"
+    );
+    // filter by typing, then choose: the model has levels, so the effort picker follows
+    type_text(&mut a, "sol");
+    assert!(
+        !render_text(&a, 110, 30).contains("gpt-6-luna"),
+        "the filter hides other models"
+    );
+    assert!(press(&mut a, KeyCode::Enter).is_empty());
+    let t = render_text(&a, 110, 30);
+    assert!(t.contains("Effort for") && t.contains("high"), "{t}");
+    press(&mut a, KeyCode::Down); // low
+    press(&mut a, KeyCode::Down); // high
+    match press(&mut a, KeyCode::Enter).as_slice() {
+        [Action::SetAgentModel { model, effort, .. }] => {
+            assert_eq!(
+                (model.as_deref(), effort.as_deref()),
+                (Some("gpt-6.1-sol"), Some("high"))
+            )
+        }
+        o => panic!("{o:?}"),
+    }
+    // a model without levels applies at once, clearing the effort
+    run_cmd(&mut a, Cmd::AgentModel);
+    type_text(&mut a, "luna");
+    match press(&mut a, KeyCode::Enter).as_slice() {
+        [Action::SetAgentModel { model, effort, .. }] => assert_eq!(
+            (model.as_deref(), effort.as_deref()),
+            (Some("gpt-6-luna"), None)
+        ),
+        o => panic!("{o:?}"),
+    }
+    // a typed id that is not in the list is taken as typed (a model the provider does not
+    // describe gets the common effort levels, which the next picker offers)
+    run_cmd(&mut a, Cmd::AgentModel);
+    type_text(&mut a, "my-custom-model");
+    assert!(press(&mut a, KeyCode::Enter).is_empty());
+    assert!(render_text(&a, 110, 30).contains("Effort for"));
+    match press(&mut a, KeyCode::Enter).as_slice() {
+        [Action::SetAgentModel { model, effort, .. }] => {
+            assert_eq!(
+                (model.as_deref(), effort.as_deref()),
+                (Some("my-custom-model"), None)
+            )
+        }
+        o => panic!("{o:?}"),
+    }
+    run_cmd(&mut a, Cmd::AgentModel);
+    press(&mut a, KeyCode::Home);
+    // `default` is the provider's default model, which has levels here: the effort follows
+    assert!(press(&mut a, KeyCode::Enter).is_empty());
+    assert!(render_text(&a, 110, 30).contains("Effort for"));
+    match press(&mut a, KeyCode::Enter).as_slice() {
+        [Action::SetAgentModel { model, effort, .. }] => {
+            assert_eq!((model.clone(), effort.clone()), (None, None))
+        }
+        o => panic!("the first entry is default: {o:?}"),
+    }
+    // Esc cancels
+    run_cmd(&mut a, Cmd::AgentModel);
+    press(&mut a, KeyCode::Esc);
+    assert!(matches!(a.overlay, Overlay::None));
+    // small terminals do not panic
+    run_cmd(&mut a, Cmd::AgentModel);
+    for (w, h) in [(80, 24), (40, 12), (20, 5)] {
+        let _ = render_text(&a, w, h);
+    }
+}
+
+#[test]
+fn permission_picker_maps_to_an_action_and_marks_the_current_profile() {
+    use crossterm::event::KeyCode;
+    use maw_tui::app::{run_cmd, Action, Cmd};
+    let mut a = app();
+    a.selected_agent = 1;
+    run_cmd(&mut a, Cmd::AgentPermission);
+    let t = render_text(&a, 110, 30);
+    assert!(
+        t.contains("safe") && t.contains("balanced") && t.contains("autonomous") && t.contains("●"),
+        "{t}"
+    );
+    type_text(&mut a, "auto");
+    assert!(matches!(
+        press(&mut a, KeyCode::Enter).as_slice(),
+        [Action::SetAgentPermission {
+            permission: PermissionProfile::Autonomous,
+            ..
+        }]
+    ));
+}
+
+#[test]
+fn download_picker_lists_suggestions_marks_installed_and_accepts_a_typed_name() {
+    use crossterm::event::KeyCode;
+    use maw_tui::app::{run_cmd, Action, Cmd};
+    let mut a = app();
+    // without the Ollama provider there is nothing to offer, and the user is told
+    run_cmd(&mut a, Cmd::PullModel);
+    assert!(a
+        .toast
+        .as_ref()
+        .is_some_and(|t| t.text.contains("not available")));
+    let mk = |id: &str| mk_model(id, &format!("{id} 5.2 GB · tools"), &[], false);
+    a.pull_suggestions = vec![mk("qwen3:8b"), mk("llama3.1:8b"), mk("mistral:7b")];
+    a.models
+        .insert(ProviderKind::Ollama, vec![mk("llama3.1:8b")]);
+    run_cmd(&mut a, Cmd::PullModel);
+    let t = render_text(&a, 120, 30);
+    assert!(
+        t.contains("Download a model") && t.contains("qwen3:8b") && t.contains("✓ installed"),
+        "{t}"
+    );
+    assert!(
+        matches!(press(&mut a, KeyCode::Enter).as_slice(), [Action::PullModel { name }] if name == "qwen3:8b")
+    );
+    run_cmd(&mut a, Cmd::PullModel);
+    type_text(&mut a, "phi4-mini");
+    assert!(
+        matches!(press(&mut a, KeyCode::Enter).as_slice(), [Action::PullModel { name }] if name == "phi4-mini")
+    );
+    assert!(maw_tui::app::COMMANDS
+        .iter()
+        .any(|c| c.name == "download model"));
+}
+
+// ---- the message box in the agent view ---------------------------------------------------------
+
+#[test]
+fn the_agent_view_has_a_message_box_that_sends_commands_and_runs_shell() {
+    use crossterm::event::KeyCode;
+    use maw_tui::app::Action;
+    let mut a = app();
+    a.selected_agent = 1;
+    let name = a.agents()[1].name.clone();
+    a.goto(View::AgentDetail);
+    assert!(a.composer_focus, "typing works straight away");
+    let t = render_text(&a, 120, 34);
+    assert!(
+        t.contains("message the agent") && t.contains(&format!("message {name}")),
+        "{t}"
+    );
+
+    // letters are text, not hotkeys (d / s / m / M would otherwise change view or open dialogs)
+    type_text(&mut a, "dsmM please add login");
+    assert_eq!(a.view, View::AgentDetail);
+    assert!(matches!(a.overlay, Overlay::None));
+    assert!(render_text(&a, 120, 34).contains("dsmM please add login"));
+    match press(&mut a, KeyCode::Enter).as_slice() {
+        [Action::MessageAgent {
+            agent,
+            text,
+            interrupt: false,
+        }] => {
+            assert_eq!(
+                (agent.as_str(), text.as_str()),
+                (name.as_str(), "dsmM please add login")
+            )
+        }
+        o => panic!("{o:?}"),
+    }
+    assert!(
+        a.composer.value().is_empty(),
+        "the box is emptied after sending"
+    );
+
+    // !cmd runs a shell command in the project folder
+    type_text(&mut a, "!git status");
+    assert!(
+        matches!(press(&mut a, KeyCode::Enter).as_slice(), [Action::RunShell(c)] if c == "git status")
+    );
+
+    // /command opens the menu; typing narrows it; Enter runs the highlighted command
+    type_text(&mut a, "/mod");
+    let t = render_text(&a, 120, 34);
+    assert!(t.contains("commands") && t.contains("/model"), "{t}");
+    type_text(&mut a, "el");
+    assert!(press(&mut a, KeyCode::Enter).is_empty());
+    assert!(
+        matches!(a.overlay, Overlay::Picker(_)),
+        "/model opens the model picker"
+    );
+    press(&mut a, KeyCode::Esc);
+    assert!(a.composer.value().is_empty());
+
+    // Esc clears typed text first, and only then leaves the view
+    type_text(&mut a, "draft");
+    press(&mut a, KeyCode::Esc);
+    assert_eq!((a.view, a.composer.value()), (View::AgentDetail, ""));
+    press(&mut a, KeyCode::Esc);
+    assert_ne!(a.view, View::AgentDetail);
+}
+
+#[test]
+fn tab_switches_between_the_message_box_and_browse_keys() {
+    use crossterm::event::KeyCode;
+    let mut a = app();
+    a.selected_agent = 1;
+    a.goto(View::AgentDetail);
+    press(&mut a, KeyCode::Tab);
+    assert!(!a.composer_focus);
+    assert!(render_text(&a, 120, 34).contains("browse:"));
+    // in browse mode the old hotkeys work again: T toggles thinking, d goes to the dashboard
+    let before = a.show_thinking;
+    press(&mut a, KeyCode::Char('T'));
+    assert_ne!(a.show_thinking, before);
+    press(&mut a, KeyCode::Enter);
+    assert!(a.composer_focus, "Enter returns to the message box");
+    press(&mut a, KeyCode::Tab);
+    press(&mut a, KeyCode::Char('d'));
+    assert_eq!(a.view, View::Dashboard);
+    // coming back lands in the message box again
+    a.selected_agent = 1;
+    a.goto(View::AgentDetail);
+    assert!(a.composer_focus);
+}
+
+#[test]
+fn arrows_scroll_the_transcript_even_while_typing() {
+    use crossterm::event::KeyCode;
+    let mut a = app();
+    a.selected_agent = 1;
+    a.goto(View::AgentDetail);
+    let before = a.detail_scroll;
+    press(&mut a, KeyCode::Up);
+    press(&mut a, KeyCode::PageUp);
+    assert!(a.detail_scroll > before);
+}
+
+// ---- the top bar ----------------------------------------------------------------------------
+
+#[test]
+fn the_top_bar_shows_every_view_key_first_including_the_performance_key() {
+    let mut a = app();
+    for w in [200usize, 120, 100, 80, 60] {
+        a.size = (w as u16, 30);
+        let t = render_text(&a, w as u16, 30);
+        let bar = t.lines().next().unwrap().to_string();
+        assert!(bar.trim_start().starts_with("MAW"), "{w}: {bar}");
+        // the keys of all views are visible without scrolling
+        for k in ["d", "s", "t", "g", "f", "o", "l", "$", "%", "c"] {
+            assert!(bar.contains(k), "{w}: key {k} missing in {bar}");
+        }
+    }
+    a.size = (200, 30);
+    let wide = render_text(&a, 200, 30);
+    let bar = wide.lines().next().unwrap();
+    assert!(
+        bar.contains("%:Perf") && bar.contains("$:Tokens"),
+        "full names when they fit: {bar}"
+    );
 }

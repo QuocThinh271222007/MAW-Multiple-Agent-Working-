@@ -615,6 +615,9 @@ async fn cmd_agent(ctx: &Ctx, project: Option<&str>, cmd: AgentCmd) -> Result<()
                 a.model.as_deref().unwrap_or("default"),
                 a.effort.as_deref().unwrap_or("default")
             );
+            if provider == ProviderKind::Ollama && role == Role::Leader {
+                println!("Note: the Leader needs many MAW tools and long plans; small local models usually cannot do that reliably. A local model works best as a Worker (a hosted model as Leader).");
+            }
             if !no_login {
                 offer_login(ctx, provider).await?;
             }

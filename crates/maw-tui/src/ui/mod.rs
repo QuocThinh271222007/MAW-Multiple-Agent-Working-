@@ -52,6 +52,7 @@ pub fn render(f: &mut Frame, app: &App) {
         Overlay::Help => overlays::render_help(f, rows[1], app),
         Overlay::Palette(p) => overlays::render_palette(f, rows[1], app, p),
         Overlay::Dialog(d) => overlays::render_dialog(f, rows[1], app, d),
+        Overlay::Picker(p) => overlays::render_picker(f, rows[1], app, p),
         Overlay::Output(o) => overlays::render_output(f, rows[1], app, o),
     }
 }
@@ -86,34 +87,47 @@ fn render_header(f: &mut Frame, area: Rect, app: &App) {
         "Serial"
     };
     let sched = if paused { "⏸ PAUSED" } else { "▶ running" };
-    let mut text = format!(
-        " MAW ─ Multiple Agent Working │ {project} │ {} │ Agents: {} │ Tokens: {} │ {mode} │ {sched} ",
-        app.view.title(),
-        app.agents().len(),
-        crate::usage::fmt_tokens(
-            app.agents()
-                .iter()
-                .map(|a| {
-                    a.usage.total_tokens.unwrap_or(
-                        a.usage.input_tokens.unwrap_or(0) + a.usage.output_tokens.unwrap_or(0),
-                    )
-                })
-                .sum()
-        )
+    let tokens = crate::usage::fmt_tokens(
+        app.agents()
+            .iter()
+            .map(|a| {
+                a.usage.total_tokens.unwrap_or(
+                    a.usage.input_tokens.unwrap_or(0) + a.usage.output_tokens.unwrap_or(0),
+                )
+            })
+            .sum(),
     );
-    // The view keys are always present in full; on a narrow terminal the bar scrolls sideways
-    // (mouse wheel over it) instead of cutting them off. The working folder comes last so it
-    // never pushes the keys out of sight.
-    text.push('│');
-    for v in View::TABS {
-        if v == app.view || (v == View::Agents && app.view == View::AgentDetail) {
-            text.push_str(&format!(" [{}:{}]", v.key(), v.title()));
-        } else {
-            text.push_str(&format!("  {}:{}", v.key(), v.title()));
+    // The view keys come FIRST so they are always visible: full names when they fit, otherwise
+    // just the keys with the open view named. Status and the working folder follow and may be
+    // scrolled (mouse wheel over the bar).
+    let status = format!(
+        "{project} │ Agents: {} │ Tokens: {tokens} │ {mode}",
+        app.agents().len()
+    );
+    let tabs = |compact: bool| -> String {
+        let mut out = String::new();
+        for v in View::TABS {
+            let active = v == app.view || (v == View::Agents && app.view == View::AgentDetail);
+            if active {
+                out.push_str(&format!("[{}:{}] ", v.key(), v.title()));
+            } else if compact {
+                out.push_str(&format!("{} ", v.key()));
+            } else {
+                out.push_str(&format!("{}:{} ", v.key(), v.title()));
+            }
         }
-    }
+        out.trim_end().to_string()
+    };
+    let full = tabs(false);
+    // full view names whenever they fit on their own; the status after them may scroll
+    // running / paused is always right after the name: it must never scroll out of sight
+    let mut text = if format!(" MAW {sched} │ {full} │ ").chars().count() <= w {
+        format!(" MAW {sched} │ {full} │ {status} ")
+    } else {
+        format!(" MAW {sched} │ {} │ {status} ", tabs(true))
+    };
     if !path.is_empty() {
-        text.push_str(&format!("  │ dir: {path} "));
+        text.push_str(&format!("│ dir: {path} "));
     }
     let line = scrolled(&text, app.header_scroll, w, &app.header_max);
     f.render_widget(
@@ -161,9 +175,9 @@ fn scrolled(text: &str, offset: usize, width: usize, max_cell: &std::cell::Cell<
 
 fn footer_hint(app: &App) -> &'static str {
     match app.view {
-        View::Dashboard => "Tab panel · 1-9 agent · Enter open · G goal · a add · p/r pause/resume · M model/effort · ! shell · / cmds · ? help · q quit",
+        View::Dashboard => "Tab panel · 1-9 agent · Enter open · G goal · a add · $ tokens · % performance · M model · ! shell · / cmds · ? help · q quit",
         View::Agents => "←→ select · Enter detail · C connect · D disconnect · i interrupt · m message · M model/effort · ! shell · ? help",
-        View::AgentDetail => "↑↓ PgUp/PgDn scroll · / search n/N · y copy · Y copy all · i interrupt · m message · Esc back",
+        View::AgentDetail => "type to message · /command · !shell · Tab browse (y copy · / search · n/N · T L P) · PgUp/PgDn scroll · Esc back",
         View::Tasks => "↑↓←→ select · Enter detail · R requeue · e release · x cancel · v verify · ? help",
         View::Goal => "↑↓ scroll · Enter/G redirect objective · ? help",
         View::Flow => "Tab graph/list · ↑↓ scroll · ? help",

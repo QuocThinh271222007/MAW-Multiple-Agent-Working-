@@ -137,8 +137,8 @@ Interactive demo (mock provider, not a real Claude/Codex run):
 
 ## Added: model/effort, permissions, `!` shell, scrolling bars
 
-- `M` or palette → **agent model**: model selector (provider catalog, loaded in the background; Codex is queried live), an optional *Custom model id* that overrides the selector, and an *Effort* selector (levels the model reports, else low…max). Idle agents reconnect immediately; busy agents apply it on their next connect.
-- palette → **agent permission**: `safe` / `balanced` / `autonomous`.
+- `M` or palette → **model**: model selector (provider catalog, loaded in the background; Codex is queried live), an optional *Custom model id* that overrides the selector, and an *Effort* selector (levels the model reports, else low…max). Idle agents reconnect immediately; busy agents apply it on their next connect.
+- palette → **permissions**: `safe` / `balanced` / `autonomous`.
 - `!` or palette → **shell**: runs a command in the project folder (`bash -lc`, 60 s limit, output capped at 64 KiB per stream and secret-redacted) and opens the result in a scrollable panel (`↑↓ PgUp PgDn Home End`, `y` copy, `Esc` close). This is a deliberate user action.
 - The title bar always lists every view key and ends with `dir: <project folder>`. When it does not fit, roll the mouse wheel (or Shift+wheel / horizontal wheel) over the bar to scroll it; the key-hint bar at the bottom works the same way.
 
@@ -175,3 +175,22 @@ Where the figures come from (the view names them):
   of the most recent request).
 
 A panel with no source shows "no data", never a zero. Charts turn yellow at 85% and red at 95%.
+
+## Added: message box, command menu, pickers, top bar
+
+* **Agent view = message box.** Opening an agent (`Enter` on the grid) puts the cursor in a box at the
+  bottom, like Claude Code / Codex: just type; `Enter` sends the message to that agent. `/` opens a
+  command menu above the box (type to filter, `↑↓`, `Enter` runs: `/model`, `/permissions`,
+  `/download model`, `/transcript ...`, `/interrupt`, ...); `!cmd` runs a shell command in the project
+  folder. While typing, letters are text, so the one-key shortcuts are off; `Tab` switches to **browse
+  mode** where they work (`y` copy, `/` search, `n/N`, `T L P` filters, `1-9` other agent, `d s t ...`
+  views) and `Tab` or `Enter` returns to the box. `Esc` clears the text, then leaves the view. `↑↓`
+  and `PgUp/PgDn` scroll the transcript even while typing; `Home/End` too when the box is empty.
+* **Pickers instead of forms** for `/model`, `/permissions` and `/download model`: one decision per
+  screen, a filter line (type to narrow, or type any model name), `↑↓`, `Enter`, `Esc`. Choosing a
+  model that has effort levels opens a second picker for the effort; models without levels apply at
+  once. The current value is marked `●`. The Add-agent form is unchanged.
+* **Top bar.** The view keys come first (`d s t g f o l $ %  c`, with names when they fit), then
+  running/paused, then project, agents, tokens and the folder. The performance view is `%`, tokens
+  `$`. The mouse wheel still scrolls the bar sideways where the terminal passes it on (verified in a
+  pseudo-terminal; some terminals keep wheel events for themselves).

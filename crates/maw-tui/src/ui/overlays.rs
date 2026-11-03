@@ -13,8 +13,16 @@ pub const HELP: &[(&str, &str)] = &[
         "Dashboard / agent grid / task board / goal & plan / data flow",
     ),
     (
-        "o / l / c / $",
-        "Approval center / logs & diagnostics / configuration / token usage",
+        "o / l / c / $ / %",
+        "Approval center / logs & diagnostics / configuration / token usage / PERFORMANCE charts (w: 1m 5m 30m)",
+    ),
+    (
+        "Agent view: type",
+        "The message box is always ready: Enter sends; /command opens the command menu; !cmd runs a shell command",
+    ),
+    (
+        "Agent view: Tab",
+        "Switch between the message box and browse mode (scroll, y copy, / search, T L P filters)",
     ),
     (
         "Tab, Shift+Tab",
@@ -40,11 +48,11 @@ pub const HELP: &[(&str, &str)] = &[
         "Agent views: show/hide thinking / tool logs / MAW protocol lines (palette: transcript conversation only)",
     ),
     (
-        "M  or  / agent model",
-        "Choose the selected agent's model and reasoning effort (idle agents reconnect now)",
+        "/model  or  M",
+        "Pick the selected agent's model (then its effort, when the model has levels)",
     ),
     (
-        "/ agent permission",
+        "/permissions",
         "Set safe / balanced / autonomous for the selected agent",
     ),
     (
@@ -148,6 +156,73 @@ pub fn render_palette(f: &mut Frame, area: Rect, app: &App, p: &PaletteState) {
     }
     if matches.is_empty() {
         lines.push(Line::from(Span::styled("no matching command", t.dim())));
+    }
+    f.render_widget(Paragraph::new(lines), inner);
+    f.set_cursor_position((inner.x + 2 + col as u16, inner.y));
+}
+
+pub fn render_picker(f: &mut Frame, area: Rect, app: &App, p: &crate::picker::PickerState) {
+    let t = &app.theme;
+    let vis = p.visible();
+    let h = (vis.len() as u16 + 5).clamp(7, 20).min(area.height);
+    let r = centered(area, 92, h);
+    f.render_widget(Clear, r);
+    let block = panel(
+        Line::from(Span::styled(
+            format!(" {} · ↑↓ choose · Enter select · Esc cancel ", p.title),
+            t.bold(),
+        )),
+        true,
+        t,
+    );
+    let inner = block.inner(r);
+    f.render_widget(block, r);
+    if inner.height < 3 || inner.width < 8 {
+        return;
+    }
+    let w = inner.width as usize;
+    let (vis_text, col) = p.filter.view(w.saturating_sub(3));
+    let mut lines = vec![
+        Line::from(vec![Span::styled("› ", t.accent()), Span::raw(vis_text)]),
+        Line::styled(truncate(&p.hint, w), t.dim()),
+    ];
+    let room = (inner.height as usize).saturating_sub(2);
+    let sel = p.selected.min(vis.len().saturating_sub(1));
+    let start = if sel >= room { sel + 1 - room } else { 0 };
+    let name_w = vis
+        .iter()
+        .map(|i| i.label.chars().count())
+        .max()
+        .unwrap_or(8)
+        .clamp(8, 28);
+    for (i, it) in vis.iter().enumerate().skip(start).take(room) {
+        let on = i == sel;
+        let base = if on { t.selected() } else { t.base() };
+        let mark = if on { "❯ " } else { "  " };
+        let cur = if it.current { " ●" } else { "  " };
+        lines.push(Line::from(vec![
+            Span::styled(mark, if on { base } else { t.accent() }),
+            Span::styled(
+                format!("{:<name_w$}", truncate(&it.label, name_w)),
+                if on { base } else { t.bold() },
+            ),
+            Span::styled(cur, if on { base } else { t.ok() }),
+            Span::styled(
+                truncate(&it.detail, w.saturating_sub(name_w + 5)),
+                if on { base } else { t.dim() },
+            ),
+        ]));
+    }
+    if vis.is_empty() {
+        let typed = p.filter.value().trim().to_string();
+        lines.push(Line::styled(
+            if p.allow_custom && !typed.is_empty() {
+                format!("Enter uses '{typed}'")
+            } else {
+                "nothing matches".to_string()
+            },
+            t.dim(),
+        ));
     }
     f.render_widget(Paragraph::new(lines), inner);
     f.set_cursor_position((inner.x + 2 + col as u16, inner.y));

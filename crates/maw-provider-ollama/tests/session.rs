@@ -410,3 +410,102 @@ async fn list_models_reports_size_and_capabilities() {
     let info = provider(&fake.url).detect().await.unwrap();
     assert!(info.installed && info.version.as_deref() == Some("0.0.test"));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_successful_submit_ends_the_turn_but_a_rejected_one_lets_the_model_retry() {
+    use maw_orchestrator::tasks::NewTask;
+    use maw_orchestrator::Actor;
+    let store = Arc::new(Store::open_in_memory().unwrap());
+    let dir = tempfile::tempdir().unwrap();
+    let engine = Engine::open(
+        store,
+        "p",
+        &dir.path().to_string_lossy(),
+        OrchestratorConfig::default(),
+    )
+    .unwrap();
+    let agent = engine
+        .add_agent(
+            "local1",
+            ProviderKind::Ollama,
+            Role::Worker,
+            None,
+            PermissionProfile::Balanced,
+            None,
+        )
+        .unwrap();
+    engine.create_goal("ship", vec![]).unwrap();
+    engine
+        .create_task(
+            &Actor::User,
+            NewTask {
+                title: "t".into(),
+                assignee: Some("local1".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    engine.start_task("T-1").unwrap();
+    let token = engine.mint_token(&agent.id);
+    let server = maw_mcp::serve_http(engine.clone(), "127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
+    let endpoint = McpEndpoint {
+        url: server.url.clone(),
+        token,
+    };
+
+    // request 1: a made-up evidence kind (rejected; the error names the valid ones)
+    // request 2: a valid submit (accepted: the turn ends here)
+    // request 3 exists only to prove it is never asked for
+    let bad = tool_call(
+        "maw_task_submit_result",
+        json!({"task":"T-1","summary":"done","evidence":[{"kind":"file","summary":"x"}]}),
+    );
+    let good = tool_call(
+        "maw_task_submit_result",
+        json!({"task":"T-1","summary":"done","evidence":[{"kind":"verification","summary":"checked"}]}),
+    );
+    let fake = fake_ollama(
+        vec![bad, good, answer("this must not be requested")],
+        vec!["tools"],
+    )
+    .await;
+    let p = provider(&fake.url);
+    let (session, mut rx) = p
+        .start_session(cfg(dir.path(), PermissionProfile::Balanced, Some(endpoint)))
+        .await
+        .unwrap();
+    session.send_input(AgentInput::text("do it")).await.unwrap();
+    let evs = collect_turn(&mut rx).await;
+    assert!(matches!(
+        evs.last(),
+        Some(ProviderEvent::TurnCompleted {
+            outcome: TurnOutcome::Completed,
+            ..
+        })
+    ));
+    let chats = fake.chats.lock().unwrap().clone();
+    assert_eq!(chats.len(), 2, "the turn stopped after the accepted submit");
+    let tool_msgs: Vec<String> = chats[1]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|m| m["role"] == "tool")
+        .map(|m| m["content"].as_str().unwrap_or("").to_string())
+        .collect();
+    assert!(
+        tool_msgs
+            .iter()
+            .any(|m| m.contains("file_changes") && m.contains("verification")),
+        "the rejection names the valid kinds: {tool_msgs:?}"
+    );
+    let task = engine.get_task("T-1").unwrap();
+    assert_ne!(
+        task.status,
+        maw_core::TaskStatus::Running,
+        "the good submit reached MAW"
+    );
+    session.shutdown().await.unwrap();
+    server.stop().await;
+}

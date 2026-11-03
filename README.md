@@ -84,7 +84,7 @@ maw agent permission coder1 autonomous       # safe | balanced | autonomous
 ```
 Nothing has to be typed from memory: in the TUI the **Add agent** dialog offers Model and Effort as pick-lists that follow the chosen provider (and the effort levels follow the chosen model); on the command line, `maw agent model <name>` / `maw agent effort <name>` without a value show a numbered list. Typed values are checked against the provider's list (Codex: live from your account) and rejected with the valid choices; Claude's list is a catalog, so newer `claude-…` ids are still accepted and a wrong one is reported by Claude when the session starts.
 
-In the TUI: `M` (or `/` → *agent model*) opens a model + effort picker for the selected agent; `/` → *agent permission* sets the profile. A change applies immediately to an **idle** agent (it reconnects with the new settings); a busy agent keeps its turn and picks the change up on its next connect. `!` runs a shell command in the project folder and shows the output in a scrollable panel (60 s limit; it is *your* command, agents cannot trigger it).
+In the TUI: in an agent view type `/model` (or press `M` in browse mode) for a model picker, then an effort picker when the model has levels; `/permissions` sets the profile. A change applies immediately to an **idle** agent (it reconnects with the new settings); a busy agent keeps its turn and picks the change up on its next connect. `!` runs a shell command in the project folder and shows the output in a scrollable panel (60 s limit; it is *your* command, agents cannot trigger it).
 
 On a narrow terminal the title bar and the key-hint bar scroll sideways: roll the mouse wheel (or Shift+wheel) over them; `‹` / `›` show that more is hidden.
 

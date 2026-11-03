@@ -13,6 +13,7 @@ pub mod app;
 pub mod events;
 pub mod flow;
 pub mod input;
+pub mod picker;
 pub mod runtime;
 pub mod theme;
 pub mod ui;

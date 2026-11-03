@@ -361,12 +361,17 @@ pub fn render_agent_detail(f: &mut Frame, area: Rect, app: &App) {
     };
     let info_h = if area.height >= 20 { 7 } else { 4 };
     let search_h = if app.search.is_some() { 1 } else { 0 };
+    let composer_h: u16 = if area.height >= 12 { 3 } else { 0 };
     let parts = Layout::vertical([
         Constraint::Length(info_h.min(area.height)),
         Constraint::Min(1),
         Constraint::Length(search_h),
+        Constraint::Length(composer_h),
     ])
     .split(area);
+    if composer_h > 0 {
+        render_composer(f, parts[3], app, a);
+    }
 
     // ---- info panel
     let age = state_age(app, a)
@@ -492,7 +497,7 @@ pub fn render_agent_detail(f: &mut Frame, area: Rect, app: &App) {
     };
     let mark = |on: bool| if on { "✓" } else { "✗" };
     let hint = format!(
-        " Transcript [T thinking {} · L tool logs {} · P MAW protocol {}] · {total} lines · {status} · y copy · / search · i interrupt · m message ",
+        " Transcript [T thinking {} · L tool logs {} · P MAW protocol {}] · {total} lines · {status} · Tab browse · /cmd ",
         mark(app.show_thinking),
         mark(app.show_logs),
         mark(app.show_protocol)
@@ -556,6 +561,7 @@ pub fn render_agent_detail(f: &mut Frame, area: Rect, app: &App) {
             f.set_cursor_position((r.x + 1 + col as u16, r.y));
         }
     }
+    render_composer_menu(f, parts[1], app);
 }
 
 pub fn task_status_counts(app: &App) -> Vec<(TaskStatus, usize)> {
@@ -563,4 +569,93 @@ pub fn task_status_counts(app: &App) -> Vec<(TaskStatus, usize)> {
         .iter()
         .map(|s| (*s, app.tasks().iter().filter(|t| t.status == *s).count()))
         .collect()
+}
+
+/// The message box: always ready for typing, `/` opens the command menu above it.
+fn render_composer(f: &mut Frame, area: Rect, app: &App, agent: &maw_core::Agent) {
+    let t = &app.theme;
+    let focus = app.composer_focus && !app.is_text_mode();
+    let title = if focus {
+        format!(
+            " message {} · Enter send · /command · !shell · Tab browse · Esc back ",
+            agent.name
+        )
+    } else {
+        " browse: ↑↓ scroll · y copy · / search · T L P filters · Tab or Enter: message "
+            .to_string()
+    };
+    let block = panel(Line::from(Span::styled(title, t.bold())), focus, t);
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    if inner.width < 4 || inner.height == 0 {
+        return;
+    }
+    let text = app.composer.value();
+    let (vis, col) = app.composer.view((inner.width as usize).saturating_sub(3));
+    let line = if text.is_empty() && focus {
+        Line::from(vec![
+            Span::styled("› ", t.accent()),
+            Span::styled("message the agent, or type / for commands", t.dim()),
+        ])
+    } else {
+        Line::from(vec![Span::styled("› ", t.accent()), Span::raw(vis)])
+    };
+    f.render_widget(Paragraph::new(line), inner);
+    if focus {
+        f.set_cursor_position((inner.x + 2 + col as u16, inner.y));
+    }
+}
+
+/// The `/` command menu, drawn over the bottom of the transcript just above the message box.
+pub fn render_composer_menu(f: &mut Frame, transcript: Rect, app: &App) {
+    let t = &app.theme;
+    if !app.composer_focus || app.is_text_mode() {
+        return;
+    }
+    let menu = crate::app::composer_menu(app);
+    if menu.is_empty() && !app.composer.value().starts_with('/') {
+        return;
+    }
+    let rows = (menu.len().min(8) as u16).max(1);
+    let h = (rows + 2).min(transcript.height);
+    if h < 3 {
+        return;
+    }
+    let r = Rect {
+        x: transcript.x,
+        y: transcript.y + transcript.height - h,
+        width: transcript.width,
+        height: h,
+    };
+    f.render_widget(ratatui::widgets::Clear, r);
+    let block = panel(
+        Line::from(Span::styled(" commands · ↑↓ · Enter run ", t.bold())),
+        false,
+        t,
+    );
+    let inner = block.inner(r);
+    f.render_widget(block, r);
+    let room = inner.height as usize;
+    let sel = app.composer_sel.min(menu.len().saturating_sub(1));
+    let start = if sel >= room { sel + 1 - room } else { 0 };
+    let w = inner.width as usize;
+    let mut lines: Vec<Line> = vec![];
+    for (i, c) in menu.iter().enumerate().skip(start).take(room) {
+        let on = i == sel;
+        let base = if on { t.selected() } else { t.base() };
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{:<27}", truncate(&format!("/{}", c.name), 26)),
+                if on { base } else { t.bold() },
+            ),
+            Span::styled(
+                truncate(c.desc, w.saturating_sub(27)),
+                if on { base } else { t.dim() },
+            ),
+        ]));
+    }
+    if menu.is_empty() {
+        lines.push(Line::styled("no matching command", t.dim()));
+    }
+    f.render_widget(Paragraph::new(lines), inner);
 }

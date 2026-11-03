@@ -25,6 +25,33 @@ Tools the model gets:
 The `maw_*` tools reach MAW through a small MCP **client** built into the provider; Ollama itself
 never sees MCP. Third-party MCP servers are not supported for Ollama agents.
 
+## Small models and the MAW tools (measured)
+
+MCP is MAW's way of handing a model its coordination tools; a local model has no MCP support of its
+own, so the provider is the MCP client and shows the model the tools as ordinary function
+definitions. What that means in practice, measured with `qwen3:4b` as a **Worker** on a one-file
+task (live test `tests/live_worker.rs`, context 8192, one run per row, so treat as an anecdote):
+
+| | before the fixes below | after |
+|---|---|---|
+| Did the work and verified it by reading the file back | yes | yes |
+| Reported through `maw_task_submit_result` | after 4 rejected tries (guessed `kind` values) | first try |
+| Time / tokens | 425 s / 51k | 180 s / 20k |
+| Prompt size of the first request (role instructions + tool schemas + task) | ~2.9k tokens | ~3.0k tokens |
+
+What went wrong and what was fixed (these help hosted models too):
+
+* The provider used to drop the `definitions` section of tool schemas but keep the `$ref`s, so a
+  model never saw the allowed `kind` values of an evidence item. References are now inlined.
+* The engine's error for a bad evidence kind now lists the valid ones.
+* After a **successful** `maw_task_submit_result`, `maw_task_block` or `maw_review_submit` the turn
+  ends. Small models otherwise kept re-submitting or talking about the state.
+
+Still true: a 4B model is clumsy. It can need several tries, can misread MAW's states, and was only
+tried as a Worker on a trivial task. The Leader (planning, many tools, long context) and Reviewer
+roles were not tried with a local model and `maw agent add` warns about the Leader. Use a local model
+as a Worker and a hosted one as Leader; keep tasks small with explicit acceptance criteria.
+
 ## Honest limits
 
 * **No OS sandbox.** Unlike Codex, nothing confines `run_command`. File tools are confined to the

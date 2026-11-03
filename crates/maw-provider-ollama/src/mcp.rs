@@ -26,6 +26,47 @@ pub struct McpConnection {
     pub definitions: Vec<Value>,
 }
 
+/// Replace `{"$ref": "#/definitions/X"}` by the definition itself (and drop the definitions).
+/// MCP tool schemas keep nested argument types in `definitions`; a model that is only shown the
+/// dangling reference cannot see what a nested object (e.g. one evidence item) must contain.
+pub fn inline_refs(root: &Value) -> Value {
+    fn go(v: &Value, defs: &Value, depth: u8) -> Value {
+        match v {
+            Value::Object(m) => {
+                if depth < 5 {
+                    if let Some(Value::String(r)) = m.get("$ref") {
+                        if let Some(d) = r.rsplit('/').next().and_then(|n| defs.get(n)) {
+                            let mut out = go(d, defs, depth + 1);
+                            if let Value::Object(o) = &mut out {
+                                for (k, val) in m {
+                                    if k != "$ref" {
+                                        o.insert(k.clone(), go(val, defs, depth + 1));
+                                    }
+                                }
+                            }
+                            return out;
+                        }
+                    }
+                }
+                Value::Object(
+                    m.iter()
+                        .filter(|(k, _)| !matches!(k.as_str(), "definitions" | "$defs"))
+                        .map(|(k, v)| (k.clone(), go(v, defs, depth)))
+                        .collect(),
+                )
+            }
+            Value::Array(a) => Value::Array(a.iter().map(|x| go(x, defs, depth)).collect()),
+            other => other.clone(),
+        }
+    }
+    let defs = root
+        .get("definitions")
+        .or_else(|| root.get("$defs"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    go(root, &defs, 0)
+}
+
 /// Shrink a JSON schema for small context windows: drop decoration, cap descriptions.
 pub fn compact_schema(v: &Value) -> Value {
     match v {
@@ -102,7 +143,7 @@ impl McpConnection {
                 .collect();
             let params = v
                 .get("inputSchema")
-                .map(compact_schema)
+                .map(|s| compact_schema(&inline_refs(s)))
                 .unwrap_or_else(|| json!({"type":"object","properties":{}}));
             definitions.push(json!({"type":"function","function":{
                 "name": name, "description": desc, "parameters": params
@@ -155,6 +196,40 @@ mod tests {
         );
         assert!(c["properties"]["a"].get("format").is_none());
         assert_eq!(c["required"], json!(["a"]));
+    }
+
+    #[test]
+    fn nested_argument_shapes_survive_so_a_model_can_see_the_allowed_values() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "summary": {"type": "string"},
+                "evidence": {"type": "array", "items": {"$ref": "#/definitions/EvidenceArg"}}
+            },
+            "required": ["summary"],
+            "definitions": {"EvidenceArg": {
+                "type": "object",
+                "properties": {"kind": {"type": "string", "description": "file_changes | test_result | verification | note"}},
+                "required": ["kind"]
+            }}
+        });
+        let c = compact_schema(&inline_refs(&schema));
+        let text = c.to_string();
+        assert!(
+            !text.contains("$ref") && !text.contains("definitions"),
+            "{text}"
+        );
+        assert!(
+            text.contains("file_changes | test_result"),
+            "the valid kinds reach the model: {text}"
+        );
+        assert_eq!(
+            c["properties"]["evidence"]["items"]["required"],
+            json!(["kind"])
+        );
+        // a cycle cannot loop forever
+        let cyc = json!({"properties": {"a": {"$ref": "#/definitions/N"}}, "definitions": {"N": {"properties": {"n": {"$ref": "#/definitions/N"}}}}});
+        let _ = inline_refs(&cyc);
     }
 
     #[test]
