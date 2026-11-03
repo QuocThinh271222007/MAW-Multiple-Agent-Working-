@@ -15,7 +15,7 @@
 - TUI `!` shell, scrolling title/hint bars, working-folder display.
 - Model/effort entry is pick-list based (TUI add-agent dialog, CLI numbered picker) and all typed values are validated against the provider's list (`maw_orchestrator::models`). Verified with the installed binary against the live Codex list.
 - Add-agent login: `maw agent add` / TUI offer the provider's official login when it is not logged in (verified with a fake provider on a pty and by tests; **the TUI hand-over of the terminal has not been exercised in a real terminal**).
-- Test totals after this work: 232 passed, 0 failed, 6 live tests ignored.
+- Test totals after this work: 252 passed, 0 failed, 6 live tests ignored.
 
 ## Not done / known issues
 - Native Windows build untested (use WSL2). TUI interactive feel not yet exercised in a real terminal (tests only). Mouse is scroll-only.
@@ -29,3 +29,10 @@
 1. Run the verification list above; commit.
 2. Real run with a Reviewer agent and a forced blocker; real crash/restart (`kill -9` mid-run, then `maw resume`).
 3. Auto-resume after rate-limit reset; metrics export; packaging.
+
+## Added: agent removal, token usage, conversation filters
+- `Engine::remove_agent` / `Supervisor::remove_agent` / `maw agent remove` / TUI `X`: blocked by RUNNING / IN_REVIEW / VERIFYING tasks and by being the Leader of an active goal unless forced; force releases tasks; history, worktree and branch are kept; undelivered mail is closed.
+- Token usage: `Engine::record_usage` stores per-report increments attributed to the current task; `maw usage [--json]`; TUI `$` view; `Tokens:` in the title bar. Verified against real recorded Claude/Codex runs (`maw usage` on `~/maw-real-runs/*`).
+- Transcript kinds `Thinking` and `Protocol` (MAW's own `maw_*` tool calls and dispatch notices), filters `T`/`L`/`P`.
+- **Finding:** with Claude Code 2.1.309 (Sonnet 5.5, effort high) the thinking block is empty text + encrypted signature; with Codex 0.166 (gpt-6.1-sol, summary detailed, effort high) the completed `reasoning` item has empty `summary` and `content`. The adapters forward reasoning when a provider sends it; today the Thinking filter therefore shows nothing for these models.
+- Not done: per-agent context-window usage (Codex reports it, MAW does not surface it yet); token history is limited to the last ~3000 stored usage events.

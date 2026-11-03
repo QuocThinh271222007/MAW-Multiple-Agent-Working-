@@ -23,6 +23,8 @@ fn prefix(kind: LineKind) -> &'static str {
         LineKind::System => "· ",
         LineKind::Error => "! ",
         LineKind::User => "› ",
+        LineKind::Thinking => "~ ",
+        LineKind::Protocol => "⇄ ",
         LineKind::Tool | LineKind::Command | LineKind::Assistant => "",
     }
 }
@@ -59,6 +61,8 @@ pub fn line_style(app: &App, kind: LineKind) -> Style {
         LineKind::System => t.dim().add_modifier(Modifier::ITALIC),
         LineKind::Error => t.err(),
         LineKind::User => t.accent(),
+        LineKind::Thinking => t.info().add_modifier(Modifier::ITALIC),
+        LineKind::Protocol => t.dim(),
     }
 }
 
@@ -181,6 +185,7 @@ fn card(f: &mut Frame, area: Rect, app: &App, idx: usize, a: &Agent, focused: bo
             .iter()
             .rev()
             .filter(|l| l.kind != LineKind::Output || room > 3)
+            .filter(|l| app.line_visible(l.kind))
             .take(room)
             .collect();
         for l in tail.into_iter().rev() {
@@ -485,7 +490,13 @@ pub fn render_agent_detail(f: &mut Frame, area: Rect, app: &App) {
     } else {
         format!("↑{scroll} lines up — End to follow")
     };
-    let hint = format!(" Transcript · {total} lines · {status} · y copy · Y copy all · / search · i interrupt · m message ");
+    let mark = |on: bool| if on { "✓" } else { "✗" };
+    let hint = format!(
+        " Transcript [T thinking {} · L tool logs {} · P MAW protocol {}] · {total} lines · {status} · y copy · / search · i interrupt · m message ",
+        mark(app.show_thinking),
+        mark(app.show_logs),
+        mark(app.show_protocol)
+    );
     let block = panel(
         Line::from(Span::styled(
             truncate(&hint, parts[1].width.saturating_sub(4) as usize),

@@ -31,6 +31,17 @@ pub enum LineKind {
     System,
     Error,
     User,
+    /// The provider's own streamed reasoning (summaries / thinking blocks).
+    Thinking,
+    /// MAW coordination traffic: calls to the `maw_*` tools (message ack, inbox, progress...) and
+    /// MAW's own dispatch notices.
+    Protocol,
+}
+
+/// True for calls to MAW's own coordination tools (`mcp__maw__maw_*` in Claude Code, `maw/maw_*`
+/// in Codex).
+pub fn is_maw_tool(name: &str) -> bool {
+    name.starts_with("mcp__maw__") || name.starts_with("maw/") || name.starts_with("maw_")
 }
 
 #[derive(Clone, Debug)]
@@ -68,15 +79,25 @@ impl Transcripts {
         }
     }
     fn delta(&self, agent: &AgentId, text: &str) {
+        self.delta_kind(agent, LineKind::Assistant, text);
+    }
+    /// Append streamed text to the open line of `kind`, or start a new one (closing any other
+    /// open streaming line first).
+    fn delta_kind(&self, agent: &AgentId, kind: LineKind, text: &str) {
         let text = maw_core::redact::redact(text);
         if let Ok(mut m) = self.lines.lock() {
             let q = m.entry(agent.clone()).or_default();
+            if let Some(l) = q.back_mut() {
+                if l.open && l.kind != kind {
+                    l.open = false;
+                }
+            }
             match q.back_mut() {
-                Some(l) if l.kind == LineKind::Assistant && l.open => l.text.push_str(&text),
+                Some(l) if l.kind == kind && l.open => l.text.push_str(&text),
                 _ => {
                     q.push_back(TranscriptLine {
                         at: Utc::now(),
-                        kind: LineKind::Assistant,
+                        kind,
                         text,
                         open: true,
                     });
@@ -467,6 +488,35 @@ impl Supervisor {
         self.provider(kind).and_then(|p| p.login_command())
     }
 
+    /// Remove an agent: refuse while it has unfinished work (unless `force`), stop its session,
+    /// then delete it from the project. Its git worktree is left on disk.
+    pub async fn remove_agent(
+        self: &Arc<Self>,
+        id: &AgentId,
+        force: bool,
+    ) -> CoreResult<crate::engine::RemovedAgent> {
+        let agent = self.engine.get_agent(id)?;
+        let blockers = self.engine.removal_blockers(id)?;
+        if !force && !blockers.is_empty() {
+            return Err(CoreError::Conflict(format!(
+                "{} has unfinished work: {}. Remove it with force to release its tasks",
+                agent.name,
+                blockers.join("; ")
+            )));
+        }
+        // stop the session first so nothing is running on behalf of a deleted agent
+        self.disconnect_agent(id, true).await;
+        let removed = self.engine.remove_agent(id, force)?;
+        if let Ok(mut s) = self.user_stopped.lock() {
+            s.remove(id);
+        }
+        if let Ok(mut t) = self.transcripts.lines.lock() {
+            t.remove(id);
+        }
+        self.bump();
+        Ok(removed)
+    }
+
     /// Reject model ids the provider does not offer (see `models::check_model`).
     pub async fn validate_model(&self, kind: ProviderKind, id: &str) -> CoreResult<()> {
         let list = self.list_models(kind).await.unwrap_or_default();
@@ -637,6 +687,9 @@ impl Supervisor {
                 );
             }
             ProviderEvent::MessageDelta { text } => self.transcripts.delta(id, &text),
+            ProviderEvent::Reasoning { text } => {
+                self.transcripts.delta_kind(id, LineKind::Thinking, &text)
+            }
             ProviderEvent::Message { text } => {
                 self.transcripts.finish_message(id, &text);
                 let snippet: String = text.chars().take(400).collect();
@@ -655,7 +708,11 @@ impl Supervisor {
                 self.set_state(id, AgentState::Working, None);
                 self.transcripts.push(
                     id,
-                    LineKind::Tool,
+                    if is_maw_tool(&tool) {
+                        LineKind::Protocol
+                    } else {
+                        LineKind::Tool
+                    },
                     format!("▶ {tool} {}", detail.clone().unwrap_or_default()),
                 );
                 self.engine.emit_custom(EventKind::AgentToolStarted, Some(id), None, json!({ "agent": name, "call_id": call_id, "tool": tool, "detail": detail.map(|d| maw_core::redact::redact(&d)) }));
@@ -668,7 +725,13 @@ impl Supervisor {
             } => {
                 self.transcripts.push(
                     id,
-                    if ok { LineKind::Tool } else { LineKind::Error },
+                    if !ok {
+                        LineKind::Error
+                    } else if is_maw_tool(&tool) {
+                        LineKind::Protocol
+                    } else {
+                        LineKind::Tool
+                    },
                     format!(
                         "{} {tool} {}",
                         if ok { "✓" } else { "✗" },
@@ -1418,7 +1481,7 @@ impl Supervisor {
         }
         self.transcripts.push(
             &owner.id,
-            LineKind::User,
+            LineKind::Protocol,
             format!("[MAW] assigned {} — {}", started.key, started.title),
         );
         if !self.send_turn(&owner.id, prompt).await {
@@ -1495,7 +1558,7 @@ impl Supervisor {
             let prompt = prompts::review_prompt(t, ws_path.as_deref());
             self.transcripts.push(
                 &reviewer.id,
-                LineKind::User,
+                LineKind::Protocol,
                 format!("[MAW] review requested for {}", t.key),
             );
             if self.send_turn(&reviewer.id, prompt).await {

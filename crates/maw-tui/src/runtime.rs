@@ -150,6 +150,7 @@ struct RefreshData {
     goal_history: Vec<maw_core::GoalRevision>,
     plan_history: Vec<maw_core::PlanRevision>,
     detail: Option<TaskDetail>,
+    usage: Vec<maw_core::Event>,
 }
 
 async fn blk<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> Result<T> {
@@ -168,6 +169,11 @@ async fn load(
         let snap = e.snapshot()?;
         let extra = if matches!(view, View::Flow | View::Logs) {
             e.read(|db| db.recent_events(e.project_id(), 4000))?
+        } else {
+            vec![]
+        };
+        let usage = if view == View::Tokens {
+            e.read(|db| db.events_of_kind(e.project_id(), maw_core::EventKind::AgentUsage, 3000))?
         } else {
             vec![]
         };
@@ -195,6 +201,7 @@ async fn load(
             goal_history,
             plan_history,
             detail,
+            usage,
         })
     })
     .await
@@ -208,6 +215,7 @@ fn apply_refresh(app: &mut App, sup: &Supervisor, engine: &Engine, d: RefreshDat
     app.goal_history = d.goal_history;
     app.plan_history = d.plan_history;
     app.task_detail = d.detail;
+    app.usage_events = d.usage;
     app.config = engine.config();
     // transcripts: full for the open agent, a short tail for grid cards
     let sel = app.selected_agent;
@@ -504,6 +512,17 @@ async fn execute(
                     Err(err_text(e))
                 }
             }
+        }
+        Action::RemoveAgent { agent, force } => {
+            let removed = sup.remove_agent(&agent, force).await.map_err(err_text)?;
+            let mut msg = format!("{} removed", removed.name);
+            if !removed.released_tasks.is_empty() {
+                msg.push_str(&format!("; released {}", removed.released_tasks.join(", ")));
+            }
+            if let Some(w) = removed.worktree {
+                msg.push_str(&format!("; its worktree was left at {w}"));
+            }
+            Ok(msg)
         }
         Action::LoginAgent(id) => {
             let a = engine.get_agent(&id).map_err(err_text)?;

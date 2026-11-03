@@ -627,3 +627,108 @@ async fn catalog_providers_list_models_but_can_never_run_an_agent() {
     assert!(sup.login_command(ProviderKind::Codex).is_none());
     assert!(sup.auth_status(ProviderKind::Codex).await.is_err());
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_conversation_separates_thinking_and_maw_protocol_from_the_agents_own_messages() {
+    let repo = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    init_repo(repo.path());
+    let store = Arc::new(Store::open(data.path().join("maw.db")).unwrap());
+    let engine = Engine::open(store, "demo", &repo.path().to_string_lossy(), fast_cfg()).unwrap();
+    add_team(&engine);
+    let sup = Supervisor::new(engine.clone());
+    sup.register_provider(MockProvider::new(engine.clone(), MockScript::default()));
+    sup.connect_all().await;
+    let runner = tokio::spawn(sup.clone().run());
+    engine.create_goal("auth", vec![]).unwrap();
+    assert!(
+        wait_for(Duration::from_secs(60), || engine
+            .current_goal()
+            .unwrap()
+            .map(|g| g.status == GoalStatus::Completed)
+            .unwrap_or(false))
+        .await
+    );
+
+    let worker = engine.resolve_agent("codex-backend").unwrap();
+    let lines = sup.transcript(&worker.id);
+    use maw_orchestrator::LineKind::*;
+    let count = |k| lines.iter().filter(|l| l.kind == k).count();
+    assert!(
+        count(Thinking) > 0,
+        "reasoning the provider streamed is kept as its own kind"
+    );
+    assert!(
+        count(Assistant) > 0,
+        "the agent's own messages are untouched"
+    );
+    // calls to MAW's coordination tools are protocol, not generic tool lines
+    assert!(lines
+        .iter()
+        .any(|l| l.kind == Protocol && l.text.contains("maw_task_submit_result")));
+    assert!(
+        lines
+            .iter()
+            .filter(|l| l.kind == Tool)
+            .all(|l| !l.text.contains("maw_")),
+        "no maw_* call is classified as a plain tool"
+    );
+    assert!(maw_orchestrator::supervisor::is_maw_tool(
+        "mcp__maw__maw_message_ack"
+    ));
+    assert!(maw_orchestrator::supervisor::is_maw_tool(
+        "maw/maw_message_inbox"
+    ));
+    assert!(!maw_orchestrator::supervisor::is_maw_tool("Bash"));
+    assert!(!maw_orchestrator::supervisor::is_maw_tool(
+        "github/create_issue"
+    ));
+    sup.shutdown().await;
+    runner.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn removing_a_live_agent_stops_its_session_and_protects_a_running_task() {
+    let repo = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    init_repo(repo.path());
+    let store = Arc::new(Store::open(data.path().join("maw.db")).unwrap());
+    let engine = Engine::open(store, "demo", &repo.path().to_string_lossy(), fast_cfg()).unwrap();
+    add_team(&engine);
+    let sup = Supervisor::new(engine.clone());
+    sup.register_provider(MockProvider::new(engine.clone(), MockScript::default()));
+    sup.connect_all().await;
+    let idle = engine.resolve_agent("codex-tests").unwrap();
+    assert!(sup.is_live(&idle.id).await);
+    let r = sup.remove_agent(&idle.id, false).await.unwrap();
+    assert_eq!(r.name, "codex-tests");
+    assert!(!sup.is_live(&idle.id).await, "its session is gone");
+    assert!(engine.get_agent(&idle.id).is_err());
+    assert!(engine
+        .list_agents()
+        .unwrap()
+        .iter()
+        .all(|a| a.name != "codex-tests"));
+
+    // a worker mid-task cannot be removed without force, and the refusal leaves its session alone
+    engine.create_goal("auth", vec![]).unwrap();
+    engine
+        .create_task(
+            &Actor::User,
+            NewTask {
+                title: "busy".into(),
+                assignee: Some("codex-backend".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    engine.start_task("T-1").unwrap();
+    let busy = engine.resolve_agent("codex-backend").unwrap();
+    let e = sup.remove_agent(&busy.id, false).await.unwrap_err();
+    assert_eq!(e.code(), "conflict");
+    assert!(
+        sup.is_live(&busy.id).await,
+        "still connected after a refused removal"
+    );
+    sup.shutdown().await;
+}

@@ -414,6 +414,16 @@ impl<'a> Db<'a> {
         let rows = st.query_map([&project.0], agent_from_row).map_err(se)?;
         rows.collect::<Result<_, _>>().map_err(se)
     }
+    /// Mark every undelivered message addressed to the agent as delivered (it will never read
+    /// them; the rows stay for history).
+    pub fn close_undelivered_for(&self, agent: &AgentId) -> CoreResult<usize> {
+        self.0
+            .execute(
+                "UPDATE messages SET delivered_at=?2 WHERE recipient_agent_id=?1 AND delivered_at IS NULL",
+                params![agent.0, ts(Utc::now())],
+            )
+            .map_err(se)
+    }
     pub fn delete_agent(&self, id: &AgentId) -> CoreResult<()> {
         self.0
             .execute("DELETE FROM agents WHERE id=?1", [&id.0])
@@ -878,6 +888,30 @@ impl<'a> Db<'a> {
             .map_err(se)?;
         let mut v: Vec<Event> = st
             .query_map(params![project.0, limit as i64], event_from_row)
+            .map_err(se)?
+            .collect::<Result<_, _>>()
+            .map_err(se)?;
+        v.reverse();
+        Ok(v)
+    }
+    /// The latest `limit` events of one kind, oldest first.
+    pub fn events_of_kind(
+        &self,
+        project: &ProjectId,
+        kind: EventKind,
+        limit: usize,
+    ) -> CoreResult<Vec<Event>> {
+        let mut st = self
+            .0
+            .prepare(&format!(
+                "SELECT {EVENT_COLS} FROM events WHERE project_id=?1 AND event_type=?2 ORDER BY sequence DESC LIMIT ?3"
+            ))
+            .map_err(se)?;
+        let mut v: Vec<Event> = st
+            .query_map(
+                params![project.0, kind.as_str(), limit as i64],
+                event_from_row,
+            )
             .map_err(se)?
             .collect::<Result<_, _>>()
             .map_err(se)?;

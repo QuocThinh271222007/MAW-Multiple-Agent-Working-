@@ -13,8 +13,8 @@ pub const HELP: &[(&str, &str)] = &[
         "Dashboard / agent grid / task board / goal & plan / data flow",
     ),
     (
-        "o / l / c",
-        "Approval center / logs & diagnostics / configuration",
+        "o / l / c / $",
+        "Approval center / logs & diagnostics / configuration / token usage",
     ),
     (
         "Tab, Shift+Tab",
@@ -31,6 +31,14 @@ pub const HELP: &[(&str, &str)] = &[
     ),
     ("G", "Set the objective (or redirect it when one is active)"),
     ("a", "Add an agent (guided dialog)"),
+    (
+        "X",
+        "Remove the selected agent (asks for confirmation; unfinished work blocks it unless released)",
+    ),
+    (
+        "T / L / P",
+        "Agent views: show/hide thinking / tool logs / MAW protocol lines (palette: transcript conversation only)",
+    ),
     (
         "M  or  / agent model",
         "Choose the selected agent's model and reasoning effort (idle agents reconnect now)",

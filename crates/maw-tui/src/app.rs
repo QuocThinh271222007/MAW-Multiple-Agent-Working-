@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind};
 use maw_core::provider::{ApprovalDecision, ModelChoice};
 use maw_core::*;
-use maw_orchestrator::{Snapshot, TranscriptLine};
+use maw_orchestrator::{LineKind, Snapshot, TranscriptLine};
 use std::cell::Cell;
 use std::collections::HashMap;
 
@@ -22,10 +22,11 @@ pub enum View {
     Approvals,
     Logs,
     Config,
+    Tokens,
 }
 
 impl View {
-    pub const TABS: [View; 8] = [
+    pub const TABS: [View; 9] = [
         View::Dashboard,
         View::Agents,
         View::Tasks,
@@ -33,6 +34,7 @@ impl View {
         View::Flow,
         View::Approvals,
         View::Logs,
+        View::Tokens,
         View::Config,
     ];
 
@@ -47,6 +49,7 @@ impl View {
             View::Approvals => "Approvals",
             View::Logs => "Logs",
             View::Config => "Config",
+            View::Tokens => "Tokens",
         }
     }
     pub fn key(&self) -> char {
@@ -59,6 +62,7 @@ impl View {
             View::Approvals => 'o',
             View::Logs => 'l',
             View::Config => 'c',
+            View::Tokens => '$',
         }
     }
 }
@@ -129,6 +133,11 @@ pub enum Action {
     ConnectAgent(AgentId),
     /// Run the provider's official login for this agent's provider, then connect it.
     LoginAgent(AgentId),
+    /// Remove an agent from the project (stops its session). `force` releases unfinished tasks.
+    RemoveAgent {
+        agent: AgentId,
+        force: bool,
+    },
     ConnectAll,
     DisconnectAgent(AgentId),
     InterruptAgent(AgentId),
@@ -189,11 +198,18 @@ pub enum Cmd {
     ViewApprovals,
     ViewLogs,
     ViewConfig,
+    ViewTokens,
+    ToggleThinking,
+    ToggleLogs,
+    ToggleProtocol,
+    ConversationOnly,
+    ShowAllLines,
     GoalSet,
     GoalRedirect,
     AddAgent,
     ConnectAgent,
     AgentLogin,
+    AgentRemove,
     ConnectAll,
     DisconnectAgent,
     InterruptAgent,
@@ -264,6 +280,11 @@ pub const COMMANDS: &[CommandSpec] = &[
         desc: "configuration (c)",
     },
     CommandSpec {
+        cmd: Cmd::ViewTokens,
+        name: "view tokens",
+        desc: "token usage per agent and task, as reported by the providers ($)",
+    },
+    CommandSpec {
         cmd: Cmd::GoalSet,
         name: "goal set",
         desc: "set the project objective (G)",
@@ -282,6 +303,11 @@ pub const COMMANDS: &[CommandSpec] = &[
         cmd: Cmd::ConnectAgent,
         name: "agent connect",
         desc: "connect the selected agent (C)",
+    },
+    CommandSpec {
+        cmd: Cmd::AgentRemove,
+        name: "agent remove",
+        desc: "remove the selected agent (X); unfinished work blocks it unless you release it",
     },
     CommandSpec {
         cmd: Cmd::AgentLogin,
@@ -307,6 +333,31 @@ pub const COMMANDS: &[CommandSpec] = &[
         cmd: Cmd::MessageAgent,
         name: "agent message",
         desc: "send a message to the selected agent (m)",
+    },
+    CommandSpec {
+        cmd: Cmd::ToggleThinking,
+        name: "transcript thinking",
+        desc: "show/hide the agent's streamed reasoning (T)",
+    },
+    CommandSpec {
+        cmd: Cmd::ToggleLogs,
+        name: "transcript tool logs",
+        desc: "show/hide tool calls, commands, output and system lines (L)",
+    },
+    CommandSpec {
+        cmd: Cmd::ToggleProtocol,
+        name: "transcript protocol",
+        desc: "show/hide MAW coordination traffic: message ack, inbox, progress... (P)",
+    },
+    CommandSpec {
+        cmd: Cmd::ConversationOnly,
+        name: "transcript conversation only",
+        desc: "hide tool logs and protocol; keep messages, errors and thinking",
+    },
+    CommandSpec {
+        cmd: Cmd::ShowAllLines,
+        name: "transcript show all",
+        desc: "show every kind of line again",
     },
     CommandSpec {
         cmd: Cmd::AgentModel,
@@ -527,6 +578,7 @@ pub enum DialogKind {
     MessageAgent { agent: String },
     AgentModel { agent: AgentId },
     AgentPermission { agent: AgentId },
+    RemoveAgent { agent: AgentId },
     Shell,
     VerifyTask { key: String },
     ReleaseTask { key: String },
@@ -671,6 +723,27 @@ impl Dialog {
             error: None,
         }
     }
+    pub fn remove_agent(agent: &Agent) -> Dialog {
+        Dialog {
+            title: format!(
+                "Remove {} ({} / {})",
+                agent.name, agent.provider, agent.role
+            ),
+            kind: DialogKind::RemoveAgent {
+                agent: agent.id.clone(),
+            },
+            fields: vec![
+                Field::select("Really remove it?", &["no, keep it", "yes, remove it"], 0),
+                Field::select(
+                    "If it has unfinished work",
+                    &["refuse to remove", "release its tasks and remove"],
+                    0,
+                ),
+            ],
+            focus: 0,
+            error: None,
+        }
+    }
     pub fn shell() -> Dialog {
         Dialog {
             title: "Run in the project folder (output shown after it finishes, 60 s limit)".into(),
@@ -781,6 +854,15 @@ impl Dialog {
                 agent: agent.clone(),
                 permission: v(0).parse().map_err(|e: String| e)?,
             },
+            DialogKind::RemoveAgent { agent } => {
+                if !v(0).starts_with("yes") {
+                    return Err("choose 'yes, remove it' to confirm (Esc cancels)".into());
+                }
+                Action::RemoveAgent {
+                    agent: agent.clone(),
+                    force: v(1).starts_with("release"),
+                }
+            }
             DialogKind::Shell => Action::RunShell(v(0)),
             DialogKind::MessageAgent { agent } => Action::MessageAgent {
                 agent: agent.clone(),
@@ -844,6 +926,13 @@ pub struct App {
     pub transcripts: HashMap<AgentId, Vec<TranscriptLine>>,
     pub task_detail: Option<TaskDetail>,
     pub extra_events: Vec<Event>,
+    /// Stored `agent.usage` events (loaded while the Tokens view is open).
+    pub usage_events: Vec<Event>,
+    /// Conversation filters (agent views): the provider's streamed reasoning, tool/command/output/
+    /// system lines, and MAW's own coordination traffic (maw_* tool calls, dispatch notices).
+    pub show_thinking: bool,
+    pub show_logs: bool,
+    pub show_protocol: bool,
     pub goal_history: Vec<GoalRevision>,
     pub plan_history: Vec<PlanRevision>,
     pub config: OrchestratorConfig,
@@ -888,6 +977,10 @@ impl App {
             transcripts: HashMap::new(),
             task_detail: None,
             extra_events: vec![],
+            usage_events: vec![],
+            show_thinking: true,
+            show_logs: true,
+            show_protocol: true,
             goal_history: vec![],
             plan_history: vec![],
             config: OrchestratorConfig::default(),
@@ -998,6 +1091,19 @@ impl App {
             || self.search.as_ref().map(|s| s.editing).unwrap_or(false)
     }
 
+    /// Whether a transcript line of this kind is shown under the current filters. The agent's
+    /// messages, the user's messages and errors are always shown.
+    pub fn line_visible(&self, kind: LineKind) -> bool {
+        match kind {
+            LineKind::Thinking => self.show_thinking,
+            LineKind::Protocol => self.show_protocol,
+            LineKind::Tool | LineKind::Command | LineKind::Output | LineKind::System => {
+                self.show_logs
+            }
+            LineKind::Assistant | LineKind::User | LineKind::Error => true,
+        }
+    }
+
     /// Display lines of the selected agent's transcript (shared by rendering and search).
     pub fn transcript_lines(&self) -> Vec<crate::ui::agents::DisplayLine> {
         let width = (self.size.0 as usize).saturating_sub(4).max(10);
@@ -1005,7 +1111,14 @@ impl App {
             .selected_agent()
             .and_then(|a| self.transcripts.get(&a.id))
         {
-            Some(t) => crate::ui::agents::display_lines(t, width),
+            Some(t) => {
+                let visible: Vec<TranscriptLine> = t
+                    .iter()
+                    .filter(|l| self.line_visible(l.kind))
+                    .cloned()
+                    .collect();
+                crate::ui::agents::display_lines(&visible, width)
+            }
             None => vec![],
         }
     }
@@ -1053,6 +1166,8 @@ impl App {
             .get(&a.id)
             .map(|v| v.as_slice())
             .unwrap_or(&[])
+            .iter()
+            .filter(|l| self.line_visible(l.kind))
         {
             out.push_str(&l.text);
             out.push('\n');
@@ -1110,6 +1225,45 @@ pub fn run_cmd(app: &mut App, cmd: Cmd) -> Vec<Action> {
         Cmd::ViewApprovals => app.goto(View::Approvals),
         Cmd::ViewLogs => app.goto(View::Logs),
         Cmd::ViewConfig => app.goto(View::Config),
+        Cmd::ViewTokens => app.goto(View::Tokens),
+        Cmd::ToggleThinking => {
+            app.show_thinking = !app.show_thinking;
+            let msg = format!(
+                "thinking {}",
+                if app.show_thinking { "shown" } else { "hidden" }
+            );
+            app.set_toast(msg, Level::Info);
+        }
+        Cmd::ToggleLogs => {
+            app.show_logs = !app.show_logs;
+            let msg = format!(
+                "tool logs {}",
+                if app.show_logs { "shown" } else { "hidden" }
+            );
+            app.set_toast(msg, Level::Info);
+        }
+        Cmd::ToggleProtocol => {
+            app.show_protocol = !app.show_protocol;
+            let msg = format!(
+                "MAW protocol lines {}",
+                if app.show_protocol { "shown" } else { "hidden" }
+            );
+            app.set_toast(msg, Level::Info);
+        }
+        Cmd::ConversationOnly => {
+            app.show_logs = false;
+            app.show_protocol = false;
+            app.set_toast(
+                "conversation only: tool logs and protocol hidden (thinking unchanged)",
+                Level::Info,
+            );
+        }
+        Cmd::ShowAllLines => {
+            app.show_thinking = true;
+            app.show_logs = true;
+            app.show_protocol = true;
+            app.set_toast("all lines shown", Level::Info);
+        }
         Cmd::GoalSet => app.overlay = Overlay::Dialog(Dialog::set_goal()),
         Cmd::GoalRedirect => match app
             .snap
@@ -1124,6 +1278,11 @@ pub fn run_cmd(app: &mut App, cmd: Cmd) -> Vec<Action> {
         Cmd::ConnectAgent => {
             if let Some(a) = need_agent(app) {
                 return vec![Action::ConnectAgent(a.id)];
+            }
+        }
+        Cmd::AgentRemove => {
+            if let Some(a) = need_agent(app) {
+                app.overlay = Overlay::Dialog(Dialog::remove_agent(&a));
             }
         }
         Cmd::AgentLogin => {
@@ -1602,6 +1761,10 @@ fn normal_key(app: &mut App, key: KeyEvent) -> Vec<Action> {
         }
         KeyCode::Char('!') => return run_cmd(app, Cmd::Shell),
         KeyCode::Char('M') if in_agent_view => return run_cmd(app, Cmd::AgentModel),
+        KeyCode::Char('X') if in_agent_view => return run_cmd(app, Cmd::AgentRemove),
+        KeyCode::Char('T') if in_agent_view => return run_cmd(app, Cmd::ToggleThinking),
+        KeyCode::Char('L') if in_agent_view => return run_cmd(app, Cmd::ToggleLogs),
+        KeyCode::Char('P') if in_agent_view => return run_cmd(app, Cmd::ToggleProtocol),
         KeyCode::Char('q') => return run_cmd(app, Cmd::Quit),
         KeyCode::Esc => {
             if app.search.is_some() {
@@ -1655,6 +1818,7 @@ fn normal_key(app: &mut App, key: KeyEvent) -> Vec<Action> {
         KeyCode::Char('f') => return run_cmd(app, Cmd::ViewFlow),
         KeyCode::Char('l') => return run_cmd(app, Cmd::ViewLogs),
         KeyCode::Char('c') => return run_cmd(app, Cmd::ViewConfig),
+        KeyCode::Char('$') => return run_cmd(app, Cmd::ViewTokens),
         KeyCode::Char('o') => return run_cmd(app, Cmd::ViewApprovals),
         KeyCode::Char('a') => return run_cmd(app, Cmd::AddAgent),
         KeyCode::Char('p') => return run_cmd(app, Cmd::Pause),

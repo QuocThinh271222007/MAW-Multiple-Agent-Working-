@@ -12,7 +12,7 @@ pub mod tasks;
 pub mod tools;
 pub mod workspace;
 
-pub use engine::{Actor, Engine, GoalPatch, Snapshot};
+pub use engine::{Actor, Engine, GoalPatch, RemovedAgent, Snapshot};
 pub use recovery::RecoveryReport;
 pub use supervisor::{LineKind, Supervisor, TranscriptLine};
 pub use tasks::{EvidenceInput, NewTask, TaskPatch};

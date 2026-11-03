@@ -516,6 +516,15 @@ impl Inner {
         }
         let key = task.key.clone();
         let n = self.worker_turns.fetch_add(1, Ordering::SeqCst);
+        let _ = self
+            .tx
+            .send(ProviderEvent::Reasoning {
+                text: format!(
+                    "Task {key} is '{}'. I'll make the change in my worktree, run the checks, then report the evidence.",
+                    task.title
+                ),
+            })
+            .await;
         self.say(&format!("starting {key}: {}", task.title)).await;
 
         if self.script.approval_demo && n == 0 {

@@ -88,6 +88,20 @@ In the TUI: `M` (or `/` → *agent model*) opens a model + effort picker for the
 
 On a narrow terminal the title bar and the key-hint bar scroll sideways: roll the mouse wheel (or Shift+wheel) over them; `‹` / `›` show that more is hidden.
 
+### Removing agents, token usage, reading the conversation
+
+```bash
+maw agent remove coder1            # asks to confirm; refuses while it has unfinished work
+maw agent remove coder1 --force    # releases its tasks back to the pool first
+maw usage                          # tokens per agent and per task, exactly as the providers report them
+maw usage --json
+```
+Removal stops the session, closes undelivered mail, keeps finished tasks' history and **leaves the agent's git worktree on disk**. In the TUI: `X` on the selected agent.
+
+The **Tokens** view (`$`) and the `Tokens:` total in the title bar show what each agent has used: input / output / total, share of the project, tokens per minute over the last 5 minutes, a 30-minute sparkline, Claude's own cost estimate, and the tasks that used the most. MAW never estimates tokens; Codex reports tokens only, and neither provider exposes plan/quota limits.
+
+In an agent's transcript, `T` / `L` / `P` hide or show **thinking**, **tool logs** (tool calls, commands, output, system lines) and **MAW protocol** lines (the agent's calls to `maw_*` tools such as message ack/inbox/progress, and MAW's dispatch notices). The agent's own messages, your messages and errors always stay. Palette: *transcript conversation only* / *transcript show all*. Note on thinking: MAW shows only what a provider itself streams. In testing (Claude Code 2.1.309 with Sonnet 5.5, Codex 0.166 with GPT-6.1), neither returned readable reasoning text (Claude sends an empty, signed thinking block; Codex a `reasoning` item with an empty summary), so those lines stay empty until a provider/model exposes them.
+
 Try it with no providers at all (scripted *mock* agents; it exercises MAW itself, not Claude/Codex):
 
 ```bash

@@ -402,6 +402,80 @@ impl Engine {
         })
     }
 
+    /// Why removing this agent would lose unfinished work (empty = safe to remove).
+    pub fn removal_blockers(&self, id: &AgentId) -> CoreResult<Vec<String>> {
+        self.read(|db| removal_blockers_in(db, &self.project.id, id))
+    }
+
+    /// Remove an agent from the project. Unfinished work blocks it unless `force`; with `force`
+    /// the agent's tasks are released back to the pool. Finished tasks keep their history, its git
+    /// worktree and branch are left on disk (never deleted), and undelivered mail is closed.
+    pub fn remove_agent(&self, id: &AgentId, force: bool) -> CoreResult<RemovedAgent> {
+        self.tx(|db, emit| {
+            let a = db.get_agent(id)?.ok_or_else(|| CoreError::not_found("agent", id))?;
+            let blockers = removal_blockers_in(db, &self.project.id, id)?;
+            if !force && !blockers.is_empty() {
+                return Err(CoreError::Conflict(format!(
+                    "{} has unfinished work: {}. Remove it with force to release its tasks",
+                    a.name,
+                    blockers.join("; ")
+                )));
+            }
+            let mut released = vec![];
+            for mut t in db.list_tasks(&self.project.id)? {
+                let mut dirty = false;
+                if t.reviewer_agent_id.as_ref() == Some(id) {
+                    t.reviewer_agent_id = None;
+                    dirty = true;
+                }
+                if t.owner_agent_id.as_ref() == Some(id) {
+                    match t.status {
+                        TaskStatus::Done | TaskStatus::Failed | TaskStatus::Canceled => {}
+                        TaskStatus::Running | TaskStatus::Assigned | TaskStatus::Blocked | TaskStatus::Ready => {
+                            let was = t.status;
+                            t.owner_agent_id = None;
+                            t.blocked_reason = None;
+                            t.progress = 0;
+                            db.update_task(&t)?;
+                            if was != TaskStatus::Ready {
+                                self.transition(emit, db, &mut t, TaskStatus::Ready, EventKind::TaskReleased, json!({ "reason": "agent removed" }))?;
+                            }
+                            db.end_attempts(&t.id, "agent_removed", None)?;
+                            released.push(t.key.clone());
+                            dirty = false;
+                        }
+                        // finished work awaiting review/verification stays; only the owner link goes
+                        TaskStatus::InReview | TaskStatus::Verifying | TaskStatus::Backlog => {
+                            t.owner_agent_id = None;
+                            dirty = true;
+                        }
+                    }
+                }
+                if dirty {
+                    db.update_task(&t)?;
+                }
+            }
+            if let Some(mut g) = db.current_goal(&self.project.id)? {
+                if g.leader_agent_id.as_ref() == Some(id) {
+                    g.leader_agent_id = None;
+                    db.update_goal(&g)?;
+                }
+            }
+            db.close_undelivered_for(id)?;
+            db.expire_agent_approvals(id)?;
+            let worktree = a.workspace.clone().filter(|w| w.contains(".maw/worktrees"));
+            emit.push(
+                EventKind::AgentRemoved,
+                Some(id),
+                None,
+                json!({ "name": a.name, "role": a.role.as_str(), "provider": a.provider.as_str(), "released_tasks": released, "forced": force, "worktree": worktree }),
+            );
+            db.delete_agent(id)?;
+            self.revoke_tokens(id);
+            Ok(RemovedAgent { name: a.name, released_tasks: released, worktree })
+        })
+    }
+
     /// Change the model an agent's NEXT session starts with (`None` = the provider's default).
     /// A live session keeps its current model until it reconnects; see `Supervisor::reconfigure_agent`.
     pub fn set_agent_model(&self, id: &AgentId, model: Option<String>) -> CoreResult<Agent> {
@@ -530,18 +604,39 @@ impl Engine {
         })
     }
 
+    /// Record provider-reported usage. Providers report cumulative numbers per session/thread, so
+    /// the increment since the previous report is computed here and attached to the event together
+    /// with the task the agent was working on, which lets views attribute tokens to tasks.
+    /// A report lower than the previous one means the provider session restarted: it then counts
+    /// in full.
     pub fn record_usage(&self, id: &AgentId, usage: UsageMetrics) -> CoreResult<()> {
         self.tx(|db, emit| {
             let mut a = db
                 .get_agent(id)?
                 .ok_or_else(|| CoreError::not_found("agent", id))?;
+            let inc = |new: Option<u64>, old: Option<u64>| match (new, old) {
+                (Some(n), Some(o)) if n >= o => n - o,
+                (Some(n), _) => n,
+                _ => 0,
+            };
+            let d_in = inc(usage.input_tokens, a.usage.input_tokens);
+            let d_out = inc(usage.output_tokens, a.usage.output_tokens);
+            let d_total = inc(usage.total_tokens, a.usage.total_tokens).max(d_in + d_out);
+            let d_cost = match (usage.cost_usd, a.usage.cost_usd) {
+                (Some(n), Some(o)) if n >= o => n - o,
+                (Some(n), _) => n,
+                _ => 0.0,
+            };
             a.usage = usage.clone();
             db.update_agent(&a)?;
             emit.push(
                 EventKind::AgentUsage,
                 Some(id),
-                None,
-                json!({ "usage": usage }),
+                a.current_task_id.as_ref(),
+                json!({
+                    "agent": a.name, "model": a.model, "usage": usage,
+                    "delta": { "input": d_in, "output": d_out, "total": d_total, "cost_usd": d_cost }
+                }),
             );
             Ok(())
         })
@@ -845,6 +940,40 @@ impl Engine {
     pub fn now() -> DateTime<Utc> {
         Utc::now()
     }
+}
+
+/// What `Engine::remove_agent` did.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RemovedAgent {
+    pub name: String,
+    pub released_tasks: Vec<String>,
+    /// The agent's git worktree, left on disk for the user to inspect or delete.
+    pub worktree: Option<String>,
+}
+
+fn removal_blockers_in(db: &Db, project: &ProjectId, id: &AgentId) -> CoreResult<Vec<String>> {
+    let a = db
+        .get_agent(id)?
+        .ok_or_else(|| CoreError::not_found("agent", id))?;
+    let mut v = vec![];
+    for t in db.list_tasks(project)? {
+        if t.owner_agent_id.as_ref() == Some(id)
+            && matches!(
+                t.status,
+                TaskStatus::Running | TaskStatus::InReview | TaskStatus::Verifying
+            )
+        {
+            v.push(format!("{} \"{}\" is {}", t.key, t.title, t.status));
+        }
+    }
+    if a.role == Role::Leader {
+        if let Some(g) = db.current_goal(project)? {
+            if matches!(g.status, GoalStatus::Active | GoalStatus::Verifying) {
+                v.push("it is the Leader of the active goal".into());
+            }
+        }
+    }
+    Ok(v)
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

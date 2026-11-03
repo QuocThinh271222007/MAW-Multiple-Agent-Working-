@@ -46,6 +46,8 @@ pub(crate) struct Shared {
     request_timeout: Duration,
     /// Reasoning effort sent with every `turn/start` (None = Codex default for the model).
     effort: StdMutex<Option<String>>,
+    /// Reasoning items whose text was already forwarded as deltas (not repeated on completion).
+    reasoned: StdMutex<std::collections::HashSet<String>>,
 }
 
 fn lock<T>(m: &StdMutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -78,6 +80,7 @@ impl Shared {
             capture,
             request_timeout,
             effort: StdMutex::new(None),
+            reasoned: StdMutex::new(Default::default()),
         })
     }
 
@@ -294,6 +297,22 @@ impl Shared {
                 lock(&self.approvals).remove(&protocol::rpc_id_string(id));
             }
             return;
+        }
+        if method.starts_with("item/reasoning/") {
+            if let Some(id) = params.get("itemId").and_then(Value::as_str) {
+                lock(&self.reasoned).insert(id.to_string());
+            }
+        }
+        if method == "item/completed"
+            && params.pointer("/item/type").and_then(Value::as_str) == Some("reasoning")
+        {
+            let id = params
+                .pointer("/item/id")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if lock(&self.reasoned).remove(id) {
+                return; // its text already streamed
+            }
         }
         for ev in protocol::translate_notification(method, params) {
             match &ev {

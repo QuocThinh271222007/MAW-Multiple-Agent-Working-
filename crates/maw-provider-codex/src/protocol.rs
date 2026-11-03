@@ -129,6 +129,17 @@ pub fn translate_notification(method: &str, params: &Value) -> Vec<ProviderEvent
             .get("item")
             .map(translate_item_completed)
             .unwrap_or_default(),
+        // Reasoning the model/Codex chooses to stream (summaries; raw text only if enabled).
+        "item/reasoning/summaryTextDelta" | "item/reasoning/textDelta" => s(params, "delta")
+            .map(|d| {
+                vec![ProviderEvent::Reasoning {
+                    text: d.to_string(),
+                }]
+            })
+            .unwrap_or_default(),
+        "item/reasoning/summaryPartAdded" => vec![ProviderEvent::Reasoning {
+            text: "\n\n".into(),
+        }],
         "item/agentMessage/delta" => s(params, "delta")
             .map(|d| {
                 vec![ProviderEvent::MessageDelta {
@@ -258,6 +269,36 @@ fn translate_item_completed(item: &Value) -> Vec<ProviderEvent> {
             }],
             _ => vec![],
         },
+        // A finished reasoning item: use whatever readable text it carries (summary first, then
+        // content). Models that only reason internally return both empty, which shows nothing.
+        Some("reasoning") => {
+            let texts = |key: &str| -> Vec<String> {
+                item.get(key)
+                    .and_then(Value::as_array)
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|e| {
+                                e.as_str().map(String::from).or_else(|| {
+                                    e.get("text").and_then(Value::as_str).map(String::from)
+                                })
+                            })
+                            .filter(|t| !t.trim().is_empty())
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            };
+            let mut t = texts("summary");
+            if t.is_empty() {
+                t = texts("content");
+            }
+            if t.is_empty() {
+                vec![]
+            } else {
+                vec![ProviderEvent::Reasoning {
+                    text: t.join("\n\n"),
+                }]
+            }
+        }
         Some("commandExecution") => vec![ProviderEvent::CommandCompleted {
             call_id: id,
             exit_code: item.get("exitCode").and_then(Value::as_i64),
@@ -763,5 +804,58 @@ mod effort_tests {
         assert!(turn_start_params("thr", "hi", Some(""))
             .get("effort")
             .is_none());
+    }
+}
+
+#[cfg(test)]
+mod reasoning_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn reasoning_summaries_become_reasoning_events() {
+        let ev = translate_notification(
+            "item/reasoning/summaryTextDelta",
+            &json!({"delta":"Checking the repo","itemId":"r1","summaryIndex":0}),
+        );
+        assert!(
+            matches!(ev.as_slice(), [ProviderEvent::Reasoning { text }] if text == "Checking the repo")
+        );
+        let ev = translate_notification(
+            "item/reasoning/textDelta",
+            &json!({"delta":"raw","itemId":"r1"}),
+        );
+        assert!(matches!(ev.as_slice(), [ProviderEvent::Reasoning { text }] if text == "raw"));
+        let ev = translate_notification(
+            "item/reasoning/summaryPartAdded",
+            &json!({"itemId":"r1","summaryIndex":1}),
+        );
+        assert!(
+            matches!(ev.as_slice(), [ProviderEvent::Reasoning { text }] if text == "
+
+")
+        );
+        // malformed: no delta
+        assert!(translate_notification("item/reasoning/summaryTextDelta", &json!({})).is_empty());
+    }
+
+    #[test]
+    fn completed_reasoning_items_use_readable_text_and_ignore_empty_ones() {
+        let done = |item: serde_json::Value| {
+            translate_notification("item/completed", &json!({ "item": item }))
+        };
+        let ev = done(
+            json!({"type":"reasoning","id":"r1","summary":[{"text":"Look at the tests."},"Then edit."],"content":[]}),
+        );
+        assert!(
+            matches!(ev.as_slice(), [ProviderEvent::Reasoning { text }] if text == "Look at the tests.\n\nThen edit."),
+            "{ev:?}"
+        );
+        let ev = done(json!({"type":"reasoning","id":"r2","summary":[],"content":["raw thought"]}));
+        assert!(
+            matches!(ev.as_slice(), [ProviderEvent::Reasoning { text }] if text == "raw thought")
+        );
+        // what the live probe showed for the tested models: nothing readable
+        assert!(done(json!({"type":"reasoning","id":"r3","summary":[],"content":[]})).is_empty());
     }
 }

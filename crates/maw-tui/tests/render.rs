@@ -1166,3 +1166,349 @@ fn a_dialog_opened_before_the_catalog_arrives_fills_in_when_it_does() {
         _ => unreachable!(),
     }
 }
+
+// ---- token usage view ------------------------------------------------------------------------
+
+fn usage_event(
+    app: &App,
+    agent_idx: usize,
+    task_idx: Option<usize>,
+    delta: u64,
+    age_secs: i64,
+) -> maw_core::Event {
+    let snap = app.snap.as_ref().unwrap();
+    let mut e = maw_core::Event::new(
+        snap.project.id.clone(),
+        EventKind::AgentUsage,
+        json!({ "delta": { "total": delta, "input": delta, "output": 0, "cost_usd": 0.0 } }),
+    );
+    e.agent_id = Some(snap.agents[agent_idx].id.clone());
+    e.task_id = task_idx.map(|i| snap.tasks[i].id.clone());
+    e.timestamp = app.now - chrono::Duration::seconds(age_secs);
+    e
+}
+
+fn app_with_usage() -> App {
+    let mut a = app();
+    {
+        let s = a.snap.as_mut().unwrap();
+        s.agents[0].usage = UsageMetrics {
+            input_tokens: Some(9_000),
+            output_tokens: Some(3_345),
+            total_tokens: Some(12_345),
+            cost_usd: Some(0.0421),
+            reported_by_provider: true,
+        };
+        s.agents[1].usage = UsageMetrics {
+            input_tokens: Some(40_000),
+            output_tokens: Some(2_000),
+            total_tokens: Some(42_000),
+            cost_usd: None,
+            reported_by_provider: true,
+        };
+        // agents[2], agents[3]: never reported
+    }
+    a.usage_events = vec![
+        usage_event(&a, 1, Some(2), 800, 60),
+        usage_event(&a, 1, Some(2), 1200, 400),
+        usage_event(&a, 0, None, 300, 90),
+    ];
+    a
+}
+
+#[test]
+fn tokens_view_shows_reported_usage_shares_rates_and_honest_notes() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let mut a = app_with_usage();
+    // the `$` key opens it
+    handle_key(
+        &mut a,
+        KeyEvent::new(KeyCode::Char('$'), KeyModifiers::NONE),
+    );
+    assert_eq!(a.view, View::Tokens);
+    let name0 = a.snap.as_ref().unwrap().agents[0].name.clone();
+    let name1 = a.snap.as_ref().unwrap().agents[1].name.clone();
+    let t = render_text(&a, 150, 40);
+    assert!(t.contains("TOKEN USAGE"), "{t}");
+    assert!(t.contains(&name0) && t.contains(&name1));
+    assert!(t.contains("54.3k"), "project total 12,345 + 42,000: {t}");
+    assert!(t.contains("12.3k") && t.contains("42.0k"), "{t}");
+    assert!(
+        t.contains("$0.0421"),
+        "Claude's own cost estimate is shown with its label: {t}"
+    );
+    assert!(t.contains("never estimated"), "{t}");
+    assert!(t.contains("2/4 agents reporting"), "{t}");
+    assert!(
+        t.contains("no usage reported yet"),
+        "agents that never reported are not shown as zero: {t}"
+    );
+    assert!(
+        t.contains("TOKENS BY TASK") && t.contains("2.0k"),
+        "800 + 1200 attributed to one task: {t}"
+    );
+    assert!(
+        t.contains("tokens outside any task") || t.contains("outside any task"),
+        "{t}"
+    );
+    assert!(t.contains("█") || t.contains("░"), "share bars");
+    assert!(t.contains("TOK/MIN"), "{t}");
+    // header carries the running total on every view
+    a.view = View::Dashboard;
+    assert!(render_text(&a, 150, 40).contains("Tokens: 54.3k"));
+    // palette entry exists and works
+    assert!(maw_tui::app::COMMANDS
+        .iter()
+        .any(|c| c.name == "view tokens"));
+}
+
+#[test]
+fn tokens_view_adapts_and_never_panics() {
+    let mut a = app_with_usage();
+    a.view = View::Tokens;
+    for (w, h) in [
+        (200, 60),
+        (150, 40),
+        (110, 30),
+        (90, 24),
+        (80, 24),
+        (60, 16),
+        (40, 10),
+        (20, 5),
+    ] {
+        a.size = (w, h);
+        let t = render_text(&a, w, h);
+        if w >= 80 && h >= 20 {
+            assert!(t.contains("TOKEN USAGE"), "{w}x{h}\n{t}");
+        }
+    }
+    // no data at all
+    let mut empty = App::new(Theme::new(false));
+    empty.view = View::Tokens;
+    let _ = render_text(&empty, 100, 30);
+}
+
+// ---- conversation filters --------------------------------------------------------------------
+
+fn app_with_mixed_transcript() -> App {
+    let mut a = app();
+    let id = a.agents()[1].id.clone();
+    a.transcripts.insert(
+        id,
+        vec![
+            line(LineKind::User, "please add login"),
+            line(LineKind::Thinking, "THINK-TEXT plan the change"),
+            line(LineKind::Protocol, "▶ mcp__maw__maw_message_ack {id}"),
+            line(LineKind::Tool, "▶ Read src/auth.rs"),
+            line(LineKind::Command, "$ cargo test"),
+            line(LineKind::Output, "OUTPUT-TEXT 18 passed"),
+            line(LineKind::System, "SYSTEM-TEXT connected"),
+            line(LineKind::Assistant, "ASSISTANT-TEXT done, tests pass"),
+            line(LineKind::Error, "ERROR-TEXT something odd"),
+        ],
+    );
+    a.selected_agent = 1;
+    a.view = View::AgentDetail;
+    a
+}
+
+#[test]
+fn filters_hide_thinking_logs_and_protocol_independently_and_keep_the_conversation() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let key = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::SHIFT);
+    let mut a = app_with_mixed_transcript();
+    let all = render_text(&a, 130, 40);
+    for needle in [
+        "please add login",
+        "THINK-TEXT",
+        "maw_message_ack",
+        "Read src/auth.rs",
+        "cargo test",
+        "OUTPUT-TEXT",
+        "SYSTEM-TEXT",
+        "ASSISTANT-TEXT",
+        "ERROR-TEXT",
+    ] {
+        assert!(
+            all.contains(needle),
+            "default shows everything: missing {needle}\n{all}"
+        );
+    }
+    assert!(
+        all.contains("T thinking ✓")
+            && all.contains("L tool logs ✓")
+            && all.contains("P MAW protocol ✓"),
+        "{all}"
+    );
+
+    // P hides only the MAW protocol lines
+    handle_key(&mut a, key('P'));
+    let t = render_text(&a, 130, 40);
+    assert!(
+        !t.contains("maw_message_ack")
+            && t.contains("Read src/auth.rs")
+            && t.contains("THINK-TEXT"),
+        "{t}"
+    );
+    assert!(
+        t.contains("P MAW protocol ✗"),
+        "the bar says what is hidden: {t}"
+    );
+
+    // T hides thinking
+    handle_key(&mut a, key('T'));
+    assert!(!render_text(&a, 130, 40).contains("THINK-TEXT"));
+
+    // L hides tool calls, commands, output and system lines, but never messages or errors
+    handle_key(&mut a, key('L'));
+    let t = render_text(&a, 130, 40);
+    for hidden in [
+        "Read src/auth.rs",
+        "cargo test",
+        "OUTPUT-TEXT",
+        "SYSTEM-TEXT",
+    ] {
+        assert!(!t.contains(hidden), "{hidden} should be hidden\n{t}");
+    }
+    for kept in ["please add login", "ASSISTANT-TEXT", "ERROR-TEXT"] {
+        assert!(t.contains(kept), "{kept} must stay\n{t}");
+    }
+
+    // toggling back restores everything
+    for c in ['P', 'T', 'L'] {
+        handle_key(&mut a, key(c));
+    }
+    assert!(render_text(&a, 130, 40).contains("THINK-TEXT"));
+}
+
+#[test]
+fn conversation_only_preset_keeps_thinking_and_show_all_restores_it() {
+    use maw_tui::app::{run_cmd, Cmd};
+    let mut a = app_with_mixed_transcript();
+    run_cmd(&mut a, Cmd::ConversationOnly);
+    let t = render_text(&a, 130, 40);
+    assert!(
+        t.contains("THINK-TEXT") && t.contains("ASSISTANT-TEXT") && t.contains("please add login")
+    );
+    assert!(!t.contains("maw_message_ack") && !t.contains("cargo test"));
+    run_cmd(&mut a, Cmd::ShowAllLines);
+    assert!(render_text(&a, 130, 40).contains("maw_message_ack"));
+    for name in [
+        "transcript thinking",
+        "transcript tool logs",
+        "transcript protocol",
+        "transcript conversation only",
+        "transcript show all",
+    ] {
+        assert!(
+            maw_tui::app::COMMANDS.iter().any(|c| c.name == name),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn filters_also_apply_to_search_and_copy_so_what_you_see_is_what_you_search() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let mut a = app_with_mixed_transcript();
+    handle_key(
+        &mut a,
+        KeyEvent::new(KeyCode::Char('P'), KeyModifiers::SHIFT),
+    );
+    assert!(
+        !a.full_transcript_text().contains("maw_message_ack"),
+        "copy honours the filter"
+    );
+    assert!(a.full_transcript_text().contains("ASSISTANT-TEXT"));
+    a.search = Some(maw_tui::app::SearchState {
+        input: {
+            let mut i = TextInput::new();
+            i.set("maw_message_ack");
+            i
+        },
+        editing: false,
+        current: 0,
+    });
+    assert!(
+        a.search_matches().is_empty(),
+        "hidden lines are not search hits"
+    );
+}
+
+#[test]
+fn grid_cards_respect_the_filters_too() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let mut a = app_with_mixed_transcript();
+    a.view = View::Agents;
+    assert!(render_text(&a, 150, 40).contains("maw_message_ack"));
+    handle_key(
+        &mut a,
+        KeyEvent::new(KeyCode::Char('P'), KeyModifiers::SHIFT),
+    );
+    assert!(!render_text(&a, 150, 40).contains("maw_message_ack"));
+}
+
+// ---- removing an agent ------------------------------------------------------------------------
+
+#[test]
+fn removing_an_agent_needs_explicit_confirmation_and_can_force() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use maw_tui::app::Action;
+    let key = |c| KeyEvent::new(c, KeyModifiers::NONE);
+    let mut a = app();
+    a.selected_agent = 1;
+    let target = a.agents()[1].clone();
+    handle_key(
+        &mut a,
+        KeyEvent::new(KeyCode::Char('X'), KeyModifiers::SHIFT),
+    );
+    assert!(
+        matches!(&a.overlay, Overlay::Dialog(d) if matches!(&d.kind, maw_tui::app::DialogKind::RemoveAgent { agent } if *agent == target.id))
+    );
+    let t = render_text(&a, 100, 30);
+    assert!(
+        t.contains(&target.name) && t.contains("Really remove it?"),
+        "{t}"
+    );
+
+    // default answer is "no": Enter through the fields must NOT remove anything
+    handle_key(&mut a, key(KeyCode::Enter));
+    let acts = handle_key(&mut a, key(KeyCode::Enter));
+    assert!(acts.is_empty(), "{acts:?}");
+    match &a.overlay {
+        Overlay::Dialog(d) => assert!(
+            d.error.as_deref().unwrap_or("").contains("confirm"),
+            "{:?}",
+            d.error
+        ),
+        _ => panic!("dialog should stay open with an explanation"),
+    }
+    // say yes (focus back on the first field), safe mode: no force
+    handle_key(&mut a, KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+    handle_key(&mut a, key(KeyCode::Right));
+    let acts = handle_key(&mut a, key(KeyCode::Enter));
+    assert!(acts.is_empty(), "moves to the second field first");
+    let acts = handle_key(&mut a, key(KeyCode::Enter));
+    assert!(
+        matches!(acts.as_slice(), [Action::RemoveAgent { agent, force: false }] if *agent == target.id),
+        "{acts:?}"
+    );
+    // with "release its tasks": force
+    let mut b = app();
+    b.selected_agent = 1;
+    handle_key(
+        &mut b,
+        KeyEvent::new(KeyCode::Char('X'), KeyModifiers::SHIFT),
+    );
+    handle_key(&mut b, key(KeyCode::Right)); // yes
+    handle_key(&mut b, key(KeyCode::Tab));
+    handle_key(&mut b, key(KeyCode::Right)); // release
+    let acts = handle_key(&mut b, key(KeyCode::Enter));
+    assert!(
+        matches!(acts.as_slice(), [Action::RemoveAgent { force: true, .. }]),
+        "{acts:?}"
+    );
+    assert!(maw_tui::app::COMMANDS
+        .iter()
+        .any(|c| c.name == "agent remove"));
+}

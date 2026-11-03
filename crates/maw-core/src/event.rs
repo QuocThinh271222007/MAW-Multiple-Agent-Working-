@@ -32,6 +32,7 @@ macro_rules! event_kinds {
 
 event_kinds! {
     AgentRegistered => "agent.registered",
+    AgentRemoved => "agent.removed",
     AgentConnected => "agent.connected",
     AgentDisconnected => "agent.disconnected",
     AgentStateChanged => "agent.state_changed",

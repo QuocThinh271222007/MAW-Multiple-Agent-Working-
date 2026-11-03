@@ -59,6 +59,9 @@ pub struct Mapper {
     turn_id: String,
     tools: HashMap<String, ToolMeta>,
     reported_mcp: HashSet<String>,
+    /// Thinking text already forwarded from streaming deltas for the current message (so the
+    /// final assistant block is not shown twice).
+    thinking_streamed: bool,
 }
 
 const MAX_DETAIL: usize = 160;
@@ -147,6 +150,7 @@ impl Mapper {
             turn_id: String::new(),
             tools: HashMap::new(),
             reported_mcp: HashSet::new(),
+            thinking_streamed: false,
         }
     }
 
@@ -261,7 +265,16 @@ impl Mapper {
         let Some(ev) = v.get("event") else { return };
         if str_field(ev, "type") == Some("content_block_delta") {
             if let Some(d) = ev.get("delta") {
-                // Only visible text; thinking deltas are deliberately not forwarded.
+                // Thinking is forwarded only as far as Claude Code itself streams it to clients.
+                if str_field(d, "type") == Some("thinking_delta") {
+                    if let Some(t) = str_field(d, "thinking").filter(|t| !t.is_empty()) {
+                        self.ensure_turn(out);
+                        self.thinking_streamed = true;
+                        out.push(Out::Event(ProviderEvent::Reasoning {
+                            text: t.to_string(),
+                        }));
+                    }
+                }
                 if str_field(d, "type") == Some("text_delta") {
                     if let Some(t) = str_field(d, "text") {
                         self.ensure_turn(out);
@@ -292,8 +305,20 @@ impl Mapper {
         let Some(blocks) = v.pointer("/message/content").and_then(Value::as_array) else {
             return;
         };
+        // streamed deltas already showed this message's thinking; the flag covers one message
+        let streamed_thinking = std::mem::take(&mut self.thinking_streamed);
         for b in blocks {
             match str_field(b, "type").unwrap_or("") {
+                "thinking" => {
+                    // complete block; skip it when the deltas already showed this text
+                    if !streamed_thinking {
+                        if let Some(t) = str_field(b, "thinking").filter(|t| !t.is_empty()) {
+                            out.push(Out::Event(ProviderEvent::Reasoning {
+                                text: t.to_string(),
+                            }));
+                        }
+                    }
+                }
                 "text" => {
                     if let Some(t) = str_field(b, "text").filter(|t| !t.is_empty()) {
                         out.push(Out::Event(ProviderEvent::Message {
@@ -570,6 +595,39 @@ mod tests {
         outs.into_iter()
             .filter_map(|o| if let Out::Event(e) = o { Some(e) } else { None })
             .collect()
+    }
+
+    #[test]
+    fn thinking_is_forwarded_once_whether_streamed_or_only_in_the_final_block() {
+        let reasoning = |evs: &[ProviderEvent]| -> String {
+            evs.iter()
+                .filter_map(|e| match e {
+                    ProviderEvent::Reasoning { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect()
+        };
+        // streamed deltas + the final block that repeats them: shown once
+        let streamed = events(run(&[
+            json!({"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"First, "}}}),
+            json!({"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"read the file."}}}),
+            json!({"type":"assistant","message":{"content":[{"type":"thinking","thinking":"First, read the file."},{"type":"text","text":"Done."}]}}),
+        ]));
+        assert_eq!(reasoning(&streamed), "First, read the file.");
+        // no deltas (partial messages off): the complete block is the only source
+        let block_only = events(run(&[
+            json!({"type":"assistant","message":{"content":[{"type":"thinking","thinking":"Plan: edit then test."},{"type":"text","text":"ok"}]}}),
+        ]));
+        assert_eq!(reasoning(&block_only), "Plan: edit then test.");
+        // the visible answer is untouched
+        assert!(block_only
+            .iter()
+            .any(|e| matches!(e, ProviderEvent::Message { text } if text == "ok")));
+        // an empty / redacted block yields nothing
+        let empty = events(run(&[
+            json!({"type":"assistant","message":{"content":[{"type":"thinking","thinking":""},{"type":"redacted_thinking","data":"xyz"}]}}),
+        ]));
+        assert!(reasoning(&empty).is_empty());
     }
 
     #[test]

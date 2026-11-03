@@ -114,6 +114,12 @@ enum Cmd {
         #[arg(long)]
         provider: Option<String>,
     },
+    /// Token usage per agent and task, as reported by the providers
+    Usage {
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
     /// Print the MCP tool reference
     Tools {
         #[arg(long)]
@@ -186,6 +192,16 @@ enum AgentCmd {
         name: String,
         /// e.g. low | medium | high | xhigh | max, or `default`
         level: Option<String>,
+    },
+    /// Remove an agent from the project (its git worktree is left on disk)
+    Remove {
+        name: String,
+        /// Release the agent's unfinished tasks instead of refusing
+        #[arg(long)]
+        force: bool,
+        /// Do not ask for confirmation
+        #[arg(short, long)]
+        yes: bool,
     },
     /// Set the permission profile used the next time the agent connects: safe | balanced | autonomous
     Permission {
@@ -393,6 +409,7 @@ async fn real_main(cli: Cli) -> Result<()> {
         Some(Cmd::Config { cmd }) => cmd_config(&ctx, cmd),
         Some(Cmd::Demo { headless, fast }) => cmd_demo(headless, fast).await,
         Some(Cmd::Models { provider }) => cmd_models(&ctx, provider).await,
+        Some(Cmd::Usage { json }) => cmd_usage(&ctx, project_arg.as_deref(), json),
         Some(Cmd::Tools { markdown }) => {
             print_tools(markdown);
             Ok(())
@@ -659,6 +676,42 @@ async fn cmd_agent(ctx: &Ctx, project: Option<&str>, cmd: AgentCmd) -> Result<()
                 a.name,
                 a.effort.as_deref().unwrap_or("provider default")
             );
+        }
+        AgentCmd::Remove { name, force, yes } => {
+            use std::io::{BufRead, IsTerminal, Write};
+            let a = anyhow_core(eng.resolve_agent(&name))?;
+            if app::read_runtime_info(ctx, &p).is_some() {
+                bail!("MAW is running for this project: remove '{}' from its TUI (press X on the agent) or stop MAW first, so the live session is stopped cleanly", a.name);
+            }
+            let blockers = anyhow_core(eng.removal_blockers(&a.id))?;
+            if !blockers.is_empty() && !force {
+                bail!(
+                    "{} has unfinished work: {}. Re-run with --force to release its tasks",
+                    a.name,
+                    blockers.join("; ")
+                );
+            }
+            if !yes {
+                if !std::io::stdin().is_terminal() {
+                    bail!("refusing to remove without confirmation: pass --yes");
+                }
+                print!("Remove {} ({} / {})? [y/N] ", a.name, a.provider, a.role);
+                std::io::stdout().flush()?;
+                let mut line = String::new();
+                std::io::stdin().lock().read_line(&mut line)?;
+                if !matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+                    println!("Kept {}.", a.name);
+                    return Ok(());
+                }
+            }
+            let r = anyhow_core(eng.remove_agent(&a.id, force))?;
+            println!("Removed {}.", r.name);
+            if !r.released_tasks.is_empty() {
+                println!("Released tasks: {}", r.released_tasks.join(", "));
+            }
+            if let Some(w) = r.worktree {
+                println!("Its git worktree was left in place: {w}  (delete it yourself if you no longer need it)");
+            }
         }
         AgentCmd::Permission { name, profile } => {
             let a = anyhow_core(eng.resolve_agent(&name))?;
@@ -1234,5 +1287,95 @@ async fn offer_login(ctx: &Ctx, kind: ProviderKind) -> Result<()> {
             status.code()
         ),
     }
+    Ok(())
+}
+
+fn cmd_usage(ctx: &Ctx, project: Option<&str>, json: bool) -> Result<()> {
+    use maw_tui::usage::{derive_usage, fmt_cost, fmt_tokens};
+    let p = resolve_project(ctx, project, false)?;
+    let eng = open_utility_engine(ctx, &p)?;
+    let snap = anyhow_core(eng.snapshot())?;
+    let events = anyhow_core(
+        eng.read(|db| db.events_of_kind(eng.project_id(), EventKind::AgentUsage, 5000)),
+    )?;
+    let r = derive_usage(&snap.agents, &snap.tasks, &events, chrono::Utc::now());
+    if json {
+        let agents: Vec<_> = r
+            .agents
+            .iter()
+            .map(|a| {
+                serde_json::json!({
+                    "agent": a.name, "provider": a.provider.as_str(), "model": a.model, "effort": a.effort,
+                    "input_tokens": a.input, "output_tokens": a.output, "total_tokens": a.total,
+                    "cost_usd_client_estimate": a.cost_usd, "share": a.share,
+                    "tokens_per_minute_5m": a.rate_per_min, "seconds_since_last_report": a.last_report_secs,
+                })
+            })
+            .collect();
+        let tasks: Vec<_> = r
+            .tasks
+            .iter()
+            .map(|t| serde_json::json!({ "task": t.key, "title": t.title, "tokens": t.tokens }))
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "source": "reported by the providers; never estimated by MAW",
+                "total_tokens": r.total_tokens, "input_tokens": r.total_input, "output_tokens": r.total_output,
+                "cost_usd_client_estimate": r.total_cost_usd, "agents_reporting": r.agents_reporting, "agents_total": r.agents_total,
+                "unattributed_tokens": r.unattributed_tokens, "agents": agents, "tasks": tasks,
+            }))?
+        );
+        return Ok(());
+    }
+    println!(
+        "Token usage for '{}' (as reported by the providers; MAW never estimates tokens)\n",
+        p.name
+    );
+    println!(
+        "{:<16} {:<8} {:<20} {:>8} {:>8} {:>8} {:>6} {:>9}",
+        "AGENT", "PROVIDER", "MODEL", "INPUT", "OUTPUT", "TOTAL", "SHARE", "COST"
+    );
+    for a in &r.agents {
+        let n = |v: Option<u64>| v.map(fmt_tokens).unwrap_or_else(|| "-".into());
+        println!(
+            "{:<16} {:<8} {:<20} {:>8} {:>8} {:>8} {:>5.0}% {:>9}",
+            a.name,
+            a.provider.as_str(),
+            a.model.as_deref().unwrap_or("default"),
+            n(a.input),
+            n(a.output),
+            n(a.total),
+            a.share * 100.0,
+            a.cost_usd.map(fmt_cost).unwrap_or_else(|| "-".into())
+        );
+    }
+    println!(
+        "\nTotal: {} tokens (in {} / out {}){}  ·  {}/{} agents have reported usage",
+        fmt_tokens(r.total_tokens),
+        fmt_tokens(r.total_input),
+        fmt_tokens(r.total_output),
+        r.total_cost_usd
+            .map(|c| format!(
+                "  ·  cost {} (Claude Code's client-side estimate)",
+                fmt_cost(c)
+            ))
+            .unwrap_or_default(),
+        r.agents_reporting,
+        r.agents_total
+    );
+    if !r.tasks.is_empty() {
+        println!("\nBy task (increments recorded while the task was the agent's current one):");
+        for t in r.tasks.iter().take(10) {
+            println!("  {:<6} {:>8}  {}", t.key, fmt_tokens(t.tokens), t.title);
+        }
+        if r.unattributed_tokens > 0 {
+            println!(
+                "  (+ {} tokens outside any task)",
+                fmt_tokens(r.unattributed_tokens)
+            );
+        }
+    }
+    println!("\nNote: totals are each provider's cumulative figure for its current session. Codex reports tokens only; provider plan/quota limits are not exposed.");
     Ok(())
 }

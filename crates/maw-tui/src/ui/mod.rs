@@ -6,6 +6,7 @@ pub mod goal;
 pub mod misc;
 pub mod overlays;
 pub mod tasks;
+pub mod usage_view;
 pub mod widgets;
 
 use crate::app::{App, Level, Overlay, View};
@@ -65,6 +66,7 @@ fn render_body(f: &mut Frame, area: Rect, app: &App) {
         View::Approvals => misc::render_approvals(f, area, app),
         View::Logs => misc::render_logs(f, area, app),
         View::Config => misc::render_config(f, area, app),
+        View::Tokens => usage_view::render_tokens(f, area, app),
     }
 }
 
@@ -83,9 +85,19 @@ fn render_header(f: &mut Frame, area: Rect, app: &App) {
     };
     let sched = if paused { "⏸ PAUSED" } else { "▶ running" };
     let mut text = format!(
-        " MAW ─ Multiple Agent Working │ {project} │ {} │ Agents: {} │ {mode} │ {sched} ",
+        " MAW ─ Multiple Agent Working │ {project} │ {} │ Agents: {} │ Tokens: {} │ {mode} │ {sched} ",
         app.view.title(),
-        app.agents().len()
+        app.agents().len(),
+        crate::usage::fmt_tokens(
+            app.agents()
+                .iter()
+                .map(|a| {
+                    a.usage.total_tokens.unwrap_or(
+                        a.usage.input_tokens.unwrap_or(0) + a.usage.output_tokens.unwrap_or(0),
+                    )
+                })
+                .sum()
+        )
     );
     // The view keys are always present in full; on a narrow terminal the bar scrolls sideways
     // (mouse wheel over it) instead of cutting them off. The working folder comes last so it
@@ -156,6 +168,7 @@ fn footer_hint(app: &App) -> &'static str {
         View::Approvals => "↑↓ select · y approve · Y approve for session · n deny · x deny+abort",
         View::Logs => "↑↓ scroll · End latest · ? help",
         View::Config => "+/- concurrency · [ ] lease · u auto-assign · ? help",
+        View::Tokens => "token figures are reported by the providers · $ this view · d dashboard · ? help",
     }
 }
 

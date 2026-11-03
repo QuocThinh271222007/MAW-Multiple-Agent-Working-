@@ -851,3 +851,187 @@ fn effort_survives_reopening_the_database() {
         (Some("gpt-6-luna"), Some("xhigh"))
     );
 }
+
+// ---------------------------------------------------------------- removing agents
+
+#[test]
+fn removing_an_agent_releases_idle_work_but_protects_work_in_flight() {
+    let f = setup();
+    call(&f, &f.leader, "maw_task_create", json!({ "title": "A" })).unwrap();
+    call(&f, &f.leader, "maw_task_create", json!({ "title": "B" })).unwrap();
+    f.engine
+        .assign_task(&f.leader, "T-2", &f.w1.id().0)
+        .unwrap(); // ASSIGNED, not started
+    make_running(&f, "T-1", &f.w1); // RUNNING
+
+    // unfinished work blocks a plain removal and changes nothing
+    let e = f.engine.remove_agent(&f.w1.id(), false).unwrap_err();
+    assert_eq!(e.code(), "conflict");
+    assert!(e.to_string().contains("T-1"), "{e}");
+    assert!(f.engine.get_agent(&f.w1.id()).is_ok());
+    assert_eq!(
+        f.engine.get_task("T-1").unwrap().status,
+        TaskStatus::Running
+    );
+
+    // with force both tasks go back to the pool
+    let r = f.engine.remove_agent(&f.w1.id(), true).unwrap();
+    assert_eq!(r.name, "w1");
+    let mut released = r.released_tasks.clone();
+    released.sort();
+    assert_eq!(released, vec!["T-1", "T-2"]);
+    for k in ["T-1", "T-2"] {
+        let t = f.engine.get_task(k).unwrap();
+        assert_eq!(
+            (t.status, t.owner_agent_id),
+            (TaskStatus::Ready, None),
+            "{k}"
+        );
+    }
+    assert!(f.engine.get_agent(&f.w1.id()).is_err(), "the agent is gone");
+    // the name can be reused
+    assert!(f.engine.resolve_agent("w1").is_err());
+    f.engine
+        .add_agent(
+            "w1",
+            ProviderKind::Mock,
+            Role::Worker,
+            None,
+            PermissionProfile::Balanced,
+            None,
+        )
+        .unwrap();
+    let ev = f
+        .engine
+        .read(|db| db.events_since(f.engine.project_id(), 0, 10_000))
+        .unwrap();
+    let removed = ev
+        .iter()
+        .find(|e| e.event_type == EventKind::AgentRemoved)
+        .expect("agent.removed event");
+    assert_eq!(removed.payload["name"], "w1");
+    assert_eq!(removed.payload["forced"], true);
+}
+
+#[test]
+fn removal_keeps_history_and_closes_undelivered_mail() {
+    let f = setup();
+    call(
+        &f,
+        &f.leader,
+        "maw_task_create",
+        json!({ "title": "Done thing", "no_file_changes_expected": true }),
+    )
+    .unwrap();
+    make_running(&f, "T-1", &f.w1);
+    call(&f, &f.w1, "maw_task_submit_result", json!({ "task": "T-1", "summary": "s", "evidence": [{ "kind": "verification", "summary": "ok", "passed": true }] })).unwrap();
+    call(
+        &f,
+        &f.leader,
+        "maw_task_verify",
+        json!({ "task": "T-1", "pass": true, "notes": "checked" }),
+    )
+    .unwrap();
+    // mail the agent never read
+    call(
+        &f,
+        &f.leader,
+        "maw_message_send",
+        json!({ "to": "w1", "message_type": "STATUS", "subject": "fyi", "content": "hello" }),
+    )
+    .unwrap();
+    assert_eq!(f.engine.undelivered_for(&f.w1.id()).unwrap().len(), 1);
+
+    // a finished task is not "unfinished work": plain removal works
+    f.engine.remove_agent(&f.w1.id(), false).unwrap();
+    let t = f.engine.get_task("T-1").unwrap();
+    assert_eq!(t.status, TaskStatus::Done);
+    assert_eq!(
+        t.owner_agent_id,
+        Some(f.w1.id()),
+        "history keeps who did it"
+    );
+    assert!(
+        f.engine.undelivered_for(&f.w1.id()).unwrap().is_empty(),
+        "no mail stays pending for a deleted agent"
+    );
+    assert!(
+        !f.engine
+            .agents_with_pending_messages()
+            .unwrap()
+            .contains(&f.w1.id()),
+        "the scheduler never looks for a deleted agent's mail"
+    );
+}
+
+#[test]
+fn removing_the_leader_of_an_active_goal_needs_force() {
+    let f = setup();
+    let e = f.engine.remove_agent(&f.leader.id(), false).unwrap_err();
+    assert_eq!(e.code(), "conflict");
+    assert!(e.to_string().contains("Leader"), "{e}");
+    f.engine.remove_agent(&f.leader.id(), true).unwrap();
+    assert!(f.engine.leader().unwrap().is_none());
+    assert_eq!(
+        f.engine.current_goal().unwrap().unwrap().leader_agent_id,
+        None
+    );
+    assert_eq!(
+        f.engine
+            .remove_agent(&f.leader.id(), true)
+            .unwrap_err()
+            .code(),
+        "not_found"
+    );
+}
+
+// ---------------------------------------------------------------- token accounting
+
+fn usage(i: u64, o: u64, cost: Option<f64>) -> UsageMetrics {
+    UsageMetrics {
+        input_tokens: Some(i),
+        output_tokens: Some(o),
+        total_tokens: Some(i + o),
+        cost_usd: cost,
+        reported_by_provider: true,
+    }
+}
+
+#[test]
+fn usage_reports_become_increments_attributed_to_the_current_task() {
+    let f = setup();
+    call(&f, &f.leader, "maw_task_create", json!({ "title": "A" })).unwrap();
+    let w = f.w1.id();
+    f.engine.record_usage(&w, usage(100, 20, None)).unwrap(); // before any task
+    make_running(&f, "T-1", &f.w1);
+    f.engine
+        .record_usage(&w, usage(300, 60, Some(0.01)))
+        .unwrap(); // cumulative: +200 in, +40 out
+    f.engine
+        .record_usage(&w, usage(350, 70, Some(0.015)))
+        .unwrap(); // +50 in, +10 out
+    f.engine.record_usage(&w, usage(10, 5, None)).unwrap(); // lower than before: the session restarted, count in full
+
+    let ev = f
+        .engine
+        .read(|db| db.events_of_kind(f.engine.project_id(), EventKind::AgentUsage, 100))
+        .unwrap();
+    let deltas: Vec<u64> = ev
+        .iter()
+        .map(|e| e.payload["delta"]["total"].as_u64().unwrap())
+        .collect();
+    assert_eq!(deltas, vec![120, 240, 60, 15]);
+    let t1 = f.engine.get_task("T-1").unwrap();
+    assert!(
+        ev[0].task_id.is_none(),
+        "reports before any task are unattributed"
+    );
+    assert_eq!(ev[1].task_id.as_ref(), Some(&t1.id));
+    assert!((ev[2].payload["delta"]["cost_usd"].as_f64().unwrap() - 0.005).abs() < 1e-9);
+    // the stored agent usage is the latest cumulative report, flagged as provider-reported
+    let a = f.engine.get_agent(&w).unwrap();
+    assert_eq!(
+        (a.usage.total_tokens, a.usage.reported_by_provider),
+        (Some(15), true)
+    );
+}

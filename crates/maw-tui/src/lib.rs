@@ -16,6 +16,7 @@ pub mod input;
 pub mod runtime;
 pub mod theme;
 pub mod ui;
+pub mod usage;
 
 #[doc(hidden)]
 pub mod testutil;

@@ -158,6 +158,12 @@ pub enum ProviderEvent {
     Message {
         text: String,
     },
+    /// A chunk of reasoning that the provider itself streams to its clients (Codex reasoning
+    /// summaries, Claude thinking blocks). Shown in the transcript only; never persisted as an
+    /// event. MAW does not try to obtain reasoning the provider does not hand out.
+    Reasoning {
+        text: String,
+    },
     ToolStarted {
         call_id: String,
         name: String,
