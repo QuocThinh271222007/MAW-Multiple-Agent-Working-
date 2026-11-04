@@ -11,8 +11,14 @@ pub fn codex(path: Option<String>) -> Arc<dyn AgentProvider> {
     maw_provider_codex::CodexProvider::arc(cfg)
 }
 
-pub fn ollama(c: &crate::config::OllamaSection) -> Arc<dyn AgentProvider> {
+/// `state_dir`: where local conversations are kept so agents resume after a restart (`None` for
+/// commands that never run an agent session).
+pub fn ollama(
+    c: &crate::config::OllamaSection,
+    state_dir: Option<std::path::PathBuf>,
+) -> Arc<dyn AgentProvider> {
     maw_provider_ollama::OllamaProvider::arc(maw_provider_ollama::OllamaConfig {
+        state_dir,
         url: c.url.clone().filter(|u| !u.trim().is_empty()),
         num_ctx: c.num_ctx,
         keep_alive: c.keep_alive.clone(),

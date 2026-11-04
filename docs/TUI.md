@@ -194,3 +194,12 @@ A panel with no source shows "no data", never a zero. Charts turn yellow at 85% 
   running/paused, then project, agents, tokens and the folder. The performance view is `%`, tokens
   `$`. The mouse wheel still scrolls the bar sideways where the terminal passes it on (verified in a
   pseudo-terminal; some terminals keep wheel events for themselves).
+
+## Added: saved conversations, /thinking on|off, Alt+arrows
+
+* Conversations are stored in the project database and restored when you open the agent view.
+* In the message box `/thinking on|off`, `/tool logs on|off` and `/protocol on|off` set the transcript
+  filters (the T / L / P keys are letters while you type). Without `on`/`off` they toggle.
+* `Alt+←` / `Alt+→` scroll the title bar. Some terminals (cmd) turn the mouse wheel into arrow keys and
+  never report the pointer position, so the wheel cannot tell the bar from the body there; `?` shows how
+  many mouse events MAW has received (0 = the terminal is not passing the mouse on).

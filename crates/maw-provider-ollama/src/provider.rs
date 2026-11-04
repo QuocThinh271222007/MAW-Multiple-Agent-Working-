@@ -485,6 +485,8 @@ impl AgentProvider for OllamaProvider {
             tools,
             mcp,
             speed: self.speed.clone(),
+            state_dir: self.cfg.state_dir.clone(),
+            resume_id: cfg.resume_native_id.clone(),
         };
         let (handle, rx) = OllamaSession::start(params);
         Ok((handle, rx))

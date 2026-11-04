@@ -40,6 +40,15 @@ fn schema_of<T: JsonSchema>() -> Value {
 struct Empty {}
 
 #[derive(Deserialize, JsonSchema)]
+struct GoalCreateArgs {
+    /// What the team should achieve.
+    objective: String,
+    /// How to tell it is done: concrete, checkable statements.
+    #[serde(default)]
+    success_criteria: Vec<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
 struct GoalUpdateArgs {
     /// Replace the objective text (user only).
     objective: Option<String>,
@@ -356,7 +365,8 @@ macro_rules! spec {
 pub fn tool_specs() -> Vec<ToolSpec> {
     vec![
         spec!("maw_goal_get", "Get the project's current goal, status, milestone and focus.", ANY, true, Empty),
-        spec!("maw_goal_update", "Leader: update goal criteria/focus/milestone/status. Completion requires every task verified. Revisions are recorded.", L, false, GoalUpdateArgs),
+        spec!("maw_goal_create", "Leader: create the project's goal when none is active (fails while one is). Only the user can change or cancel an existing goal.", L, false, GoalCreateArgs),
+        spec!("maw_goal_update","Leader: update goal criteria/focus/milestone/status. Completion requires every task verified. Revisions are recorded.", L, false, GoalUpdateArgs),
         spec!("maw_goal_get_history", "List all goal revisions with reasons and authors.", ANY, true, Empty),
         spec!("maw_plan_get", "Get the latest plan revision and its history.", ANY, true, Empty),
         spec!("maw_plan_propose_revision", "Leader: record a new plan revision (milestones, next actions, reason).", L, false, PlanArgs),
@@ -503,6 +513,11 @@ impl Engine {
                 let g = self.current_goal()?;
                 let p = self.progress()?;
                 Ok(json!({ "goal": g, "progress": p }))
+            }
+            "maw_goal_create" => {
+                let a: GoalCreateArgs = parse(args)?;
+                let g = self.create_goal_as(actor, &a.objective, a.success_criteria)?;
+                Ok(json!({ "goal": g }))
             }
             "maw_goal_update" => {
                 let a: GoalUpdateArgs = parse(args)?;

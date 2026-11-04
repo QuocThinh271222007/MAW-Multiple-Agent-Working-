@@ -110,7 +110,7 @@ pub async fn run(ctx: &Ctx) -> bool {
     }
     // local models (Ollama)
     {
-        let p = crate::providers::ollama(&ctx.cfg.ollama);
+        let p = crate::providers::ollama(&ctx.cfg.ollama, None);
         match p.detect().await {
             Ok(i) if i.installed => {
                 lines.push(ok(format!(

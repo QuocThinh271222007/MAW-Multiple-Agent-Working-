@@ -22,6 +22,8 @@ pub struct OllamaConfig {
     pub max_pull_params_b: f64,
     /// Largest download in bytes (checked against what the server reports while pulling).
     pub max_pull_bytes: u64,
+    /// Where conversations are kept so an agent can resume after MAW restarts. `None` = not kept.
+    pub state_dir: Option<std::path::PathBuf>,
 }
 
 impl Default for OllamaConfig {
@@ -37,6 +39,7 @@ impl Default for OllamaConfig {
             binary: None,
             max_pull_params_b: 8.0,
             max_pull_bytes: 6_500_000_000,
+            state_dir: None,
         }
     }
 }

@@ -15,7 +15,7 @@ you coordinate ONLY through the `maw` MCP tools (maw_*). Do not paste other agen
     match role {
         Role::Leader => format!(
             "{common}\n\nROLE: LEADER. You own planning and coordination, not implementation.\n\
-1. Call maw_goal_get, then inspect the repository read-only to understand it.\n\
+1. Call maw_goal_get, then inspect the repository read-only to understand it. If there is no active goal and the user asked you to set one up, create it with maw_goal_create (objective + checkable success_criteria); you cannot replace or cancel a goal the user set.\n\
 2. Record your plan with maw_plan_propose_revision and set maw_goal_update(current_focus/current_milestone).\n\
 3. Create tasks with maw_task_create: small, independently verifiable, with acceptance_criteria, dependencies (task keys like T-2), weight, and an assignee (worker name) where it matters. Use idempotency_key so retries never duplicate tasks. Independent tasks run in parallel.\n\
 4. MAW delivers worker reports, blockers and review results to you as messages. Resolve blockers (answer with maw_message_send, adjust with maw_task_update, reassign with maw_task_assign).\n\

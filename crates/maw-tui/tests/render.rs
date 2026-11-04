@@ -607,6 +607,32 @@ fn narrow_title_bar_can_be_scrolled_to_reveal_every_view_key() {
 }
 
 #[test]
+fn alt_arrows_scroll_the_title_bar_and_help_says_whether_the_mouse_reaches_maw() {
+    use crossterm::event::MouseEventKind::ScrollDown;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let mut a = app();
+    a.selected_agent = 1;
+    a.goto(View::AgentDetail); // the message box has focus: letters are text
+    let _ = at(&mut a, View::AgentDetail, 60, 24);
+    let alt = |c| KeyEvent::new(c, KeyModifiers::ALT);
+    for _ in 0..40 {
+        handle_key(&mut a, alt(KeyCode::Right));
+    }
+    assert!(a.header_scroll > 0, "Alt+Right scrolled the bar");
+    let end = a.header_scroll;
+    handle_key(&mut a, alt(KeyCode::Left));
+    assert!(a.header_scroll < end);
+    assert_eq!(a.composer.value(), "", "nothing was typed");
+
+    // the help overlay reports whether any mouse event arrived
+    handle_key(&mut a, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    a.overlay = Overlay::Help;
+    assert!(render_text(&a, 120, 40).contains("none received"));
+    maw_tui::app::handle_mouse(&mut a, wheel(ScrollDown, 10));
+    assert!(render_text(&a, 120, 40).contains("1 mouse events received"));
+}
+
+#[test]
 fn wheel_in_the_body_still_scrolls_the_content_not_the_bar() {
     use crossterm::event::MouseEventKind::ScrollDown;
     let mut a = app();

@@ -53,26 +53,176 @@ pub struct TranscriptLine {
     pub open: bool,
 }
 
+impl LineKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            LineKind::Assistant => "assistant",
+            LineKind::Tool => "tool",
+            LineKind::Command => "command",
+            LineKind::Output => "output",
+            LineKind::System => "system",
+            LineKind::Error => "error",
+            LineKind::User => "user",
+            LineKind::Thinking => "thinking",
+            LineKind::Protocol => "protocol",
+        }
+    }
+    fn parse(s: &str) -> Option<LineKind> {
+        Some(match s {
+            "assistant" => LineKind::Assistant,
+            "tool" => LineKind::Tool,
+            "command" => LineKind::Command,
+            "output" => LineKind::Output,
+            "system" => LineKind::System,
+            "error" => LineKind::Error,
+            "user" => LineKind::User,
+            "thinking" => LineKind::Thinking,
+            "protocol" => LineKind::Protocol,
+            _ => return None,
+        })
+    }
+}
+
+/// The conversation of every agent: kept in memory for the TUI and written to the database as
+/// lines are completed, so it survives closing MAW (the way a Claude Code or Codex session can be
+/// resumed). A line still being streamed is written when it ends, when the turn ends, when the
+/// agent disconnects and at shutdown. Text was already redacted when it was pushed.
 #[derive(Default)]
 struct Transcripts {
     lines: Mutex<HashMap<AgentId, VecDeque<TranscriptLine>>>,
+    store: Option<Arc<maw_storage::Store>>,
+    /// Finished lines waiting for the next batch write.
+    pending: Mutex<Vec<(AgentId, TranscriptLine)>>,
 }
 
+/// Lines that trigger a write by themselves.
+const COMMIT_BATCH: usize = 64;
+
 impl Transcripts {
+    fn with_store(store: Arc<maw_storage::Store>) -> Self {
+        Transcripts {
+            lines: Mutex::default(),
+            store: Some(store),
+            pending: Mutex::default(),
+        }
+    }
+    /// The agent's queue, loading what was saved by earlier runs the first time it is needed.
+    fn queue<'a>(
+        &self,
+        m: &'a mut HashMap<AgentId, VecDeque<TranscriptLine>>,
+        agent: &AgentId,
+    ) -> &'a mut VecDeque<TranscriptLine> {
+        if !m.contains_key(agent) {
+            let mut q = VecDeque::new();
+            if let Some(s) = &self.store {
+                if let Ok(rows) = s.read(|db| db.recent_transcript(agent, TRANSCRIPT_CAP)) {
+                    for (at, kind, text) in rows {
+                        if let Some(kind) = LineKind::parse(&kind) {
+                            q.push_back(TranscriptLine {
+                                at,
+                                kind,
+                                text,
+                                open: false,
+                            });
+                        }
+                    }
+                }
+            }
+            m.insert(agent.clone(), q);
+        }
+        m.get_mut(agent).expect("inserted above")
+    }
+    /// Queue a finished line for the database. Lines are written in batches (one transaction,
+    /// one disk sync) by `commit`: a command can print thousands of lines.
+    fn save(&self, agent: &AgentId, line: &TranscriptLine) {
+        if self.store.is_none() {
+            return;
+        }
+        let len = match self.pending.lock() {
+            Ok(mut p) => {
+                p.push((agent.clone(), line.clone()));
+                p.len()
+            }
+            Err(_) => return,
+        };
+        if len >= COMMIT_BATCH {
+            self.commit();
+        }
+    }
+    /// Write everything queued. Called when a batch fills up, on the supervisor's tick, when a
+    /// turn ends, when an agent disconnects and at shutdown.
+    fn commit(&self) {
+        let Some(s) = &self.store else { return };
+        let batch: Vec<(AgentId, TranscriptLine)> = match self.pending.lock() {
+            Ok(mut p) => std::mem::take(&mut *p),
+            Err(_) => return,
+        };
+        if batch.is_empty() {
+            return;
+        }
+        let res = s.write(|db| {
+            for (agent, l) in &batch {
+                db.append_transcript_line(agent, l.at, l.kind.as_str(), &l.text, TRANSCRIPT_CAP)?;
+            }
+            Ok(())
+        });
+        if let Err(e) = res {
+            tracing::warn!("could not save {} transcript lines: {e}", batch.len());
+        }
+    }
+    /// Write out the lines still being streamed (they become finished lines).
+    fn flush(&self, agent: &AgentId) {
+        if let Ok(mut m) = self.lines.lock() {
+            if let Some(q) = m.get_mut(agent) {
+                for l in q.iter_mut().filter(|l| l.open) {
+                    l.open = false;
+                    self.save(agent, l);
+                }
+            }
+        }
+        self.commit();
+    }
+    fn flush_all(&self) {
+        let ids: Vec<AgentId> = self
+            .lines
+            .lock()
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default();
+        for id in ids {
+            self.flush(&id);
+        }
+        self.commit();
+    }
+    fn forget(&self, agent: &AgentId) {
+        if let Ok(mut m) = self.lines.lock() {
+            m.remove(agent);
+        }
+        if let Ok(mut p) = self.pending.lock() {
+            p.retain(|(a, _)| a != agent);
+        }
+        if let Some(s) = &self.store {
+            let _ = s.write(|db| db.delete_transcript(agent));
+        }
+    }
     fn push(&self, agent: &AgentId, kind: LineKind, text: impl Into<String>) {
         let text = maw_core::redact::redact(&text.into());
         if let Ok(mut m) = self.lines.lock() {
-            let q = m.entry(agent.clone()).or_default();
+            let q = self.queue(&mut m, agent);
             // a non-assistant line closes any streaming assistant line
             if let Some(last) = q.back_mut() {
-                last.open = false;
+                if last.open {
+                    last.open = false;
+                    self.save(agent, last);
+                }
             }
-            q.push_back(TranscriptLine {
+            let line = TranscriptLine {
                 at: Utc::now(),
                 kind,
                 text,
                 open: false,
-            });
+            };
+            self.save(agent, &line);
+            q.push_back(line);
             while q.len() > TRANSCRIPT_CAP {
                 q.pop_front();
             }
@@ -86,10 +236,11 @@ impl Transcripts {
     fn delta_kind(&self, agent: &AgentId, kind: LineKind, text: &str) {
         let text = maw_core::redact::redact(text);
         if let Ok(mut m) = self.lines.lock() {
-            let q = m.entry(agent.clone()).or_default();
+            let q = self.queue(&mut m, agent);
             if let Some(l) = q.back_mut() {
                 if l.open && l.kind != kind {
                     l.open = false;
+                    self.save(agent, l);
                 }
             }
             match q.back_mut() {
@@ -111,27 +262,31 @@ impl Transcripts {
     fn finish_message(&self, agent: &AgentId, text: &str) {
         let text = maw_core::redact::redact(text);
         if let Ok(mut m) = self.lines.lock() {
-            let q = m.entry(agent.clone()).or_default();
+            let q = self.queue(&mut m, agent);
             match q.back_mut() {
                 Some(l) if l.kind == LineKind::Assistant && l.open => {
                     l.text = text;
                     l.open = false;
+                    self.save(agent, l);
                 }
-                _ => q.push_back(TranscriptLine {
-                    at: Utc::now(),
-                    kind: LineKind::Assistant,
-                    text,
-                    open: false,
-                }),
+                _ => {
+                    let line = TranscriptLine {
+                        at: Utc::now(),
+                        kind: LineKind::Assistant,
+                        text,
+                        open: false,
+                    };
+                    self.save(agent, &line);
+                    q.push_back(line);
+                }
             }
         }
     }
     fn get(&self, agent: &AgentId) -> Vec<TranscriptLine> {
-        self.lines
-            .lock()
-            .ok()
-            .and_then(|m| m.get(agent).map(|q| q.iter().cloned().collect()))
-            .unwrap_or_default()
+        match self.lines.lock() {
+            Ok(mut m) => self.queue(&mut m, agent).iter().cloned().collect(),
+            Err(_) => vec![],
+        }
     }
 }
 
@@ -164,13 +319,14 @@ pub struct Supervisor {
 impl Supervisor {
     pub fn new(engine: Arc<Engine>) -> Arc<Supervisor> {
         let (tx, _) = watch::channel(0);
+        let store = engine.store().clone();
         Arc::new(Supervisor {
             engine,
             providers: RwLock::new(HashMap::new()),
             catalog_providers: RwLock::new(HashMap::new()),
             sessions: AsyncMutex::new(HashMap::new()),
             mcp_url: RwLock::new(None),
-            transcripts: Transcripts::default(),
+            transcripts: Transcripts::with_store(store),
             ui_tick: tx,
             cancel: CancellationToken::new(),
             reminded: Mutex::new(HashSet::new()),
@@ -565,9 +721,7 @@ impl Supervisor {
         if let Ok(mut s) = self.user_stopped.lock() {
             s.remove(id);
         }
-        if let Ok(mut t) = self.transcripts.lines.lock() {
-            t.remove(id);
-        }
+        self.transcripts.forget(id);
         self.bump();
         Ok(removed)
     }
@@ -585,6 +739,7 @@ impl Supervisor {
             }
         }
         let live = self.sessions.lock().await.remove(id);
+        self.transcripts.flush(id);
         if let Some(l) = live {
             let _ = tokio::time::timeout(Duration::from_secs(10), l.handle.shutdown()).await;
             if let Ok(mut p) = l.pump.lock() {
@@ -870,6 +1025,7 @@ impl Supervisor {
                 outcome,
                 error,
             } => {
+                self.transcripts.flush(id); // a finished turn leaves no half-written line behind
                 self.engine.emit_custom(EventKind::AgentTurnCompleted, Some(id), None, json!({ "agent": name, "turn_id": turn_id, "outcome": format!("{outcome:?}"), "error": error }));
                 if let Some(e) = &error {
                     self.transcripts
@@ -1141,7 +1297,8 @@ impl Supervisor {
             tokio::select! {
                 _ = self.cancel.cancelled() => break,
                 _ = wake.notified() => {}
-                _ = tick.tick() => {}
+                // finished transcript lines reach the database at most once per tick
+                _ = tick.tick() => self.transcripts.commit(),
             }
             if let Err(e) = self.scheduler_pass().await {
                 tracing::warn!("scheduler pass failed: {e}");
@@ -1794,6 +1951,8 @@ impl Supervisor {
     pub async fn shutdown(self: &Arc<Self>) {
         self.cancel.cancel();
         let sessions: Vec<(AgentId, Arc<Live>)> = self.sessions.lock().await.drain().collect();
+        self.transcripts.flush_all();
+        self.transcripts.commit();
         for (id, l) in sessions {
             let _ = tokio::time::timeout(Duration::from_secs(10), l.handle.shutdown()).await;
             if let Ok(mut p) = l.pump.lock() {
@@ -1812,3 +1971,83 @@ impl Supervisor {
 
 #[allow(dead_code)]
 fn _assert_path(_: &Path) {}
+
+#[cfg(test)]
+mod transcript_tests {
+    use super::*;
+
+    fn kinds(v: &[TranscriptLine]) -> Vec<(LineKind, String)> {
+        v.iter().map(|l| (l.kind, l.text.clone())).collect()
+    }
+
+    #[test]
+    fn the_conversation_is_saved_and_comes_back_after_a_restart() {
+        let store = Arc::new(maw_storage::Store::open_in_memory().unwrap());
+        let a = AgentId::from("agent_1");
+        let first = Transcripts::with_store(store.clone());
+        first.push(&a, LineKind::User, "say hello");
+        first.delta(&a, "Hel");
+        first.delta(&a, "lo!"); // one streamed reply, still open
+        first.push(&a, LineKind::Tool, "read README.md"); // closes it
+        first.push(
+            &a,
+            LineKind::Error,
+            "key sk-ant-api03-AAAAAAAAAAAAAAAAAAAA leaked",
+        );
+        first.delta_kind(&a, LineKind::Thinking, "hmm"); // open when "MAW closes"
+        first.flush_all();
+
+        // a new process: nothing in memory, everything from the database, in order
+        let second = Transcripts::with_store(store.clone());
+        let got = second.get(&a);
+        assert_eq!(
+            kinds(&got)[..3],
+            [
+                (LineKind::User, "say hello".to_string()),
+                (LineKind::Assistant, "Hello!".to_string()),
+                (LineKind::Tool, "read README.md".to_string()),
+            ]
+        );
+        assert!(got.iter().all(|l| !l.open), "restored lines are finished");
+        assert!(got[3].text.contains("[REDACTED]") && !got[3].text.contains("AAAAAAAA"));
+        assert_eq!(
+            got[4].kind,
+            LineKind::Thinking,
+            "the line open at shutdown was flushed"
+        );
+        // new lines continue after the restored ones, and other agents are separate
+        second.push(&a, LineKind::User, "again");
+        assert_eq!(second.get(&a).len(), got.len() + 1);
+        assert!(second.get(&AgentId::from("agent_2")).is_empty());
+        // removing an agent forgets its conversation for good
+        second.forget(&a);
+        assert!(Transcripts::with_store(store).get(&a).is_empty());
+    }
+
+    #[test]
+    fn nothing_open_is_written_twice_and_the_history_is_bounded() {
+        let store = Arc::new(maw_storage::Store::open_in_memory().unwrap());
+        let a = AgentId::from("agent_1");
+        let t = Transcripts::with_store(store.clone());
+        t.delta(&a, "streaming");
+        t.flush(&a);
+        t.flush(&a); // second flush finds nothing open
+        assert_eq!(Transcripts::with_store(store.clone()).get(&a).len(), 1);
+        for i in 0..(TRANSCRIPT_CAP + 200) {
+            t.push(&a, LineKind::System, format!("line {i}"));
+        }
+        t.commit();
+        let rows = store
+            .read(|db| db.recent_transcript(&a, usize::MAX >> 1))
+            .unwrap();
+        assert!(
+            rows.len() <= TRANSCRIPT_CAP + 64,
+            "stored lines stay bounded: {}",
+            rows.len()
+        );
+        assert_eq!(
+            rows.last().unwrap().2,
+            format!("line {}", TRANSCRIPT_CAP + 199)
+        );
+    }
+}

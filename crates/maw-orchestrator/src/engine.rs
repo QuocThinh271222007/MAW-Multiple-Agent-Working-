@@ -656,6 +656,23 @@ impl Engine {
 
     /// Create the project's goal (user objective). Fails if an active goal exists.
     pub fn create_goal(&self, text: &str, criteria: Vec<String>) -> CoreResult<Goal> {
+        self.create_goal_as(&Actor::User, text, criteria)
+    }
+
+    /// Create the goal as the user or as the Leader. Either way it fails while another goal is
+    /// active, so a Leader can never replace an objective the user set; only the user may change
+    /// or cancel an existing one. The author is recorded in the revision history.
+    pub fn create_goal_as(
+        &self,
+        actor: &Actor,
+        text: &str,
+        criteria: Vec<String>,
+    ) -> CoreResult<Goal> {
+        if !actor.is_leader() {
+            return Err(CoreError::Forbidden(
+                "only the Leader (or the user) can create the goal".into(),
+            ));
+        }
         if text.trim().is_empty() {
             return Err(CoreError::InvalidInput("goal text is empty".into()));
         }
@@ -692,15 +709,19 @@ impl Engine {
                 revision: 1,
                 text: goal.text.clone(),
                 success_criteria: criteria,
-                reason: "initial objective".into(),
-                author: Actor::User.id(),
+                reason: if actor.is_privileged() {
+                    "initial objective".into()
+                } else {
+                    "objective created by the Leader".into()
+                },
+                author: actor.id(),
                 created_at: Utc::now(),
             })?;
             emit.push(
                 EventKind::GoalCreated,
+                actor.agent_id().as_ref(),
                 None,
-                None,
-                json!({ "goal_id": goal.id, "text": goal.text }),
+                json!({ "goal_id": goal.id, "text": goal.text, "by": actor.id() }),
             );
             Ok(goal)
         })

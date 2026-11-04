@@ -509,3 +509,86 @@ async fn a_successful_submit_ends_the_turn_but_a_rejected_one_lets_the_model_ret
     session.shutdown().await.unwrap();
     server.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_conversation_survives_a_restart_like_resuming_claude_or_codex() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let fake = fake_ollama(
+        vec![
+            answer("noted, the code word is plum"),
+            answer("it was plum"),
+        ],
+        vec!["completion", "tools"],
+    )
+    .await;
+    let with_state = |url: &str| {
+        OllamaProvider::new(OllamaConfig {
+            url: Some(url.to_string()),
+            idle_timeout: Duration::from_secs(10),
+            state_dir: Some(state.path().to_path_buf()),
+            ..Default::default()
+        })
+    };
+
+    // first run: say something, then close MAW
+    let p = with_state(&fake.url);
+    let (s1, mut rx) = p
+        .start_session(cfg(dir.path(), PermissionProfile::Safe, None))
+        .await
+        .unwrap();
+    let Some(ProviderEvent::Connected {
+        native_session_id: Some(id),
+    }) = rx.recv().await
+    else {
+        panic!("a session id is announced")
+    };
+    s1.send_input(AgentInput::text("the code word is plum"))
+        .await
+        .unwrap();
+    collect_turn(&mut rx).await;
+    s1.shutdown().await.unwrap();
+    assert!(
+        state.path().join(format!("{id}.json")).exists(),
+        "the conversation was written to disk"
+    );
+
+    // second run (a new provider, like a new process) resumes by that id
+    let p2 = with_state(&fake.url);
+    let mut c = cfg(dir.path(), PermissionProfile::Safe, None);
+    c.resume_native_id = Some(id.clone());
+    let (s2, mut rx2) = p2.start_session(c).await.unwrap();
+    assert!(matches!(
+        rx2.recv().await,
+        Some(ProviderEvent::Connected { native_session_id: Some(ref again) }) if *again == id
+    ));
+    assert!(s2.capabilities().resume);
+    s2.send_input(AgentInput::text("what was the code word?"))
+        .await
+        .unwrap();
+    collect_turn(&mut rx2).await;
+    let sent = fake.chats.lock().unwrap().last().cloned().unwrap();
+    let text = sent["messages"].to_string();
+    assert!(
+        text.contains("the code word is plum") && text.contains("noted, the code word is plum"),
+        "the model receives the earlier turns again: {text}"
+    );
+    s2.shutdown().await.unwrap();
+
+    // an id with no saved conversation starts fresh and says so, instead of failing
+    let mut c = cfg(dir.path(), PermissionProfile::Safe, None);
+    c.resume_native_id = Some("ollama-00000000000000000000000000000000".into());
+    let (s3, mut rx3) = with_state(&fake.url).start_session(c).await.unwrap();
+    let mut saw_notice = false;
+    for _ in 0..2 {
+        if let Some(ProviderEvent::Error {
+            message,
+            fatal: false,
+        }) = rx3.recv().await
+        {
+            saw_notice = message.contains("could not be found");
+        }
+    }
+    assert!(saw_notice, "a lost conversation is reported, not hidden");
+    s3.shutdown().await.unwrap();
+}

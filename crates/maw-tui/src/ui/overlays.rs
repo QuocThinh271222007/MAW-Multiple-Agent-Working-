@@ -45,7 +45,11 @@ pub const HELP: &[(&str, &str)] = &[
     ),
     (
         "T / L / P",
-        "Agent views: show/hide thinking / tool logs / MAW protocol lines (palette: transcript conversation only)",
+        "Show/hide thinking / tool logs / MAW protocol lines. In the message box type /thinking off, /tool logs on, /protocol off",
+    ),
+    (
+        "Alt+← / Alt+→",
+        "Scroll the title bar sideways (the mouse wheel does it too, where the terminal passes the mouse on)",
     ),
     (
         "/model  or  M",
@@ -90,7 +94,7 @@ pub const HELP: &[(&str, &str)] = &[
 
 pub fn render_help(f: &mut Frame, area: Rect, app: &App) {
     let t = &app.theme;
-    let r = centered(area, 90, (HELP.len() as u16 + 4).min(area.height));
+    let r = centered(area, 90, (HELP.len() as u16 + 6).min(area.height));
     f.render_widget(Clear, r);
     let block = panel(
         Line::from(Span::styled(" HELP · Esc to close ", t.bold())),
@@ -100,7 +104,7 @@ pub fn render_help(f: &mut Frame, area: Rect, app: &App) {
     let inner = block.inner(r);
     f.render_widget(block, r);
     let w = inner.width as usize;
-    let lines: Vec<Line> = HELP
+    let mut lines: Vec<Line> = HELP
         .iter()
         .map(|(k, d)| {
             Line::from(vec![
@@ -109,6 +113,18 @@ pub fn render_help(f: &mut Frame, area: Rect, app: &App) {
             ])
         })
         .collect();
+    let mouse = if app.mouse_seen > 0 {
+        format!(
+            "{} mouse events received: the terminal passes the mouse on",
+            app.mouse_seen
+        )
+    } else {
+        "none received (scroll once, reopen ?): the terminal may turn the wheel into ↑↓".to_string()
+    };
+    lines.push(Line::from(vec![
+        Span::styled(format!("{:<24}", "Mouse status"), t.accent()),
+        Span::raw(truncate(&mouse, w.saturating_sub(24))),
+    ]));
     f.render_widget(Paragraph::new(lines), inner);
 }
 

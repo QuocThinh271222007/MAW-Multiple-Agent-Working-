@@ -9,6 +9,7 @@ pub mod catalog;
 mod config;
 pub mod history;
 pub mod mcp;
+pub mod persist;
 mod provider;
 pub mod server;
 pub mod session;

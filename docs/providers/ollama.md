@@ -154,3 +154,16 @@ RAM; the view shows the split so you can tell why it is slow.
   (model from `MAW_LIVE_OLLAMA_MODEL`, default `qwen3:4b`). Verified once: `qwen3:4b` created a file
   with `write_file` and streamed its reasoning. Not yet verified with a real model: `read_file`,
   `edit_file`, `search_text`, `run_command`, the `maw_*` tools, and a full Leader/Worker/verify cycle.
+
+## Conversations are kept
+
+* **What you see.** Every agent's conversation (your messages, its replies, tool lines) is written
+  to the project database (`transcript_lines`, migration 0003, up to 2000 lines per agent, secrets
+  redacted) and loaded again when the agent view opens. This applies to all providers, not only Ollama.
+* **What the model remembers.** Ollama keeps no conversations, so MAW saves the model's side itself in
+  `<project data dir>/ollama-sessions/<id>.json` (mode 0600, redacted) at the end of each turn and on
+  disconnect. When MAW reconnects the agent with its saved session id the model gets the earlier turns
+  again, like `--resume` for Claude Code and Codex. If the file is gone the agent starts fresh and the
+  transcript says so. Long histories are still trimmed to the context window as before.
+* **Not saved:** a line still streaming when the process is killed (a normal quit and a finished turn
+  write it); approvals that were pending.

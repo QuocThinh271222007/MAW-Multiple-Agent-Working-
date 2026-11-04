@@ -105,11 +105,14 @@ pub enum Providers {
 }
 
 /// Real provider adapters from configuration.
-pub fn real_providers(cfg: &MawConfig) -> Vec<Arc<dyn AgentProvider>> {
+pub fn real_providers(
+    cfg: &MawConfig,
+    ollama_state: Option<std::path::PathBuf>,
+) -> Vec<Arc<dyn AgentProvider>> {
     vec![
         crate::providers::codex(cfg.codex.path.clone()),
         crate::providers::claude(cfg.claude.path.clone()),
-        crate::providers::ollama(&cfg.ollama),
+        crate::providers::ollama(&cfg.ollama, ollama_state),
     ]
 }
 
@@ -133,14 +136,15 @@ pub async fn boot(
     let sup = Supervisor::new(engine.clone());
     match providers {
         Providers::Real => {
-            for pr in real_providers(&ctx.cfg) {
+            let state = ctx.dirs.project_dir(&p.name).join("ollama-sessions");
+            for pr in real_providers(&ctx.cfg, Some(state)) {
                 sup.register_provider(pr);
             }
         }
         Providers::Mock(script) => {
             sup.register_provider(MockProvider::new(engine.clone(), script));
             // real providers are consulted for their model lists only (the demo never runs them)
-            for pr in real_providers(&ctx.cfg) {
+            for pr in real_providers(&ctx.cfg, None) {
                 sup.register_catalog_provider(pr);
             }
         }

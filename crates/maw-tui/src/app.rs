@@ -892,6 +892,9 @@ pub struct App {
     /// Horizontal scroll offsets of the title bar and the hint bar (mouse wheel over the bar).
     pub header_scroll: usize,
     pub footer_scroll: usize,
+    /// Mouse events received so far. Zero after using the wheel means the terminal does not pass
+    /// the mouse on (it may turn the wheel into arrow keys), which `?` explains.
+    pub mouse_seen: u64,
     /// Largest useful offsets, written by the renderer so the reducer can clamp.
     pub header_max: Cell<usize>,
     pub footer_max: Cell<usize>,
@@ -944,6 +947,7 @@ impl App {
             composer_sel: 0,
             header_scroll: 0,
             footer_scroll: 0,
+            mouse_seen: 0,
             header_max: Cell::new(0),
             footer_max: Cell::new(0),
             now: Utc::now(),
@@ -1373,6 +1377,7 @@ pub fn run_cmd(app: &mut App, cmd: Cmd) -> Vec<Action> {
 pub fn handle_mouse(app: &mut App, m: MouseEvent) -> Vec<Action> {
     // Wheel over the title bar or the hint bar scrolls that bar sideways (Shift+wheel and
     // horizontal wheels work anywhere on it), so long key lists can always be read.
+    app.mouse_seen += 1;
     let on_header = m.row == 0;
     let on_footer = app.size.1 > 0 && m.row == app.size.1 - 1;
     let dir: Option<isize> = match m.kind {
@@ -1815,6 +1820,20 @@ fn normal_key(app: &mut App, key: KeyEvent) -> Vec<Action> {
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
     let page = (app.size.1 as isize - 8).max(3);
     let in_agent_view = matches!(app.view, View::Dashboard | View::Agents | View::AgentDetail);
+
+    // Alt+Left / Alt+Right scroll the title bar. Some terminals (cmd, for one) turn the wheel into
+    // arrow keys and never report where the pointer is, so the bar needs a keyboard way too.
+    if key.modifiers.contains(KeyModifiers::ALT)
+        && matches!(key.code, KeyCode::Left | KeyCode::Right)
+    {
+        const STEP: usize = 8;
+        app.header_scroll = if key.code == KeyCode::Left {
+            app.header_scroll.saturating_sub(STEP)
+        } else {
+            (app.header_scroll + STEP).min(app.header_max.get())
+        };
+        return vec![];
+    }
 
     // the agent view has a message box that takes the keys until Tab moves to browse mode
     if app.view == View::AgentDetail && app.search.is_none() {

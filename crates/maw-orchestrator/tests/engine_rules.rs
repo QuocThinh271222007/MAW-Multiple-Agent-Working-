@@ -537,6 +537,56 @@ fn handoff_moves_ownership_only_on_accept() {
 }
 
 #[test]
+fn the_leader_can_create_a_goal_only_when_none_is_active() {
+    let f = setup(); // the user's goal "build auth" is active
+                     // a Leader can never replace an objective the user set
+    let e = call(
+        &f,
+        &f.leader,
+        "maw_goal_create",
+        json!({ "objective": "something else" }),
+    )
+    .unwrap_err();
+    assert_eq!(e.code(), "conflict");
+    assert_eq!(f.engine.current_goal().unwrap().unwrap().text, "build auth");
+    // workers and reviewers cannot create goals at all
+    for who in [&f.w1, &f.reviewer] {
+        let e = call(&f, who, "maw_goal_create", json!({ "objective": "x" })).unwrap_err();
+        assert_eq!(e.code(), "forbidden");
+    }
+    // once the user has cancelled it, the Leader may set the next one
+    f.engine
+        .update_goal(
+            &Actor::User,
+            GoalPatch {
+                status: Some(GoalStatus::Canceled),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let r = call(
+        &f,
+        &f.leader,
+        "maw_goal_create",
+        json!({ "objective": "ship the login page", "success_criteria": ["login works"] }),
+    )
+    .unwrap();
+    assert_eq!(r["goal"]["text"], "ship the login page");
+    let hist = f.engine.goal_history().unwrap();
+    assert_eq!(hist.len(), 1);
+    assert!(hist[0].reason.contains("Leader") && hist[0].author != Actor::User.id());
+    // and the Leader still cannot rewrite the objective it created
+    let e = call(
+        &f,
+        &f.leader,
+        "maw_goal_update",
+        json!({ "objective": "other" }),
+    )
+    .unwrap_err();
+    assert_eq!(e.code(), "forbidden");
+}
+
+#[test]
 fn goal_cannot_complete_with_open_tasks_and_text_is_user_only() {
     let f = setup();
     call(&f, &f.leader, "maw_task_create", json!({ "title": "A" })).unwrap();

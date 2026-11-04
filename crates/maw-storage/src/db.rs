@@ -741,6 +741,71 @@ impl<'a> Db<'a> {
         rows.collect::<Result<_, _>>().map_err(se)
     }
 
+    // ---- transcripts (what an agent said and did; see migration 0003) ----
+    /// Append one line and keep only the newest `keep` lines of that agent.
+    pub fn append_transcript_line(
+        &self,
+        agent: &AgentId,
+        at: DateTime<Utc>,
+        kind: &str,
+        text: &str,
+        keep: usize,
+    ) -> CoreResult<()> {
+        self.0
+            .execute(
+                "INSERT INTO transcript_lines(agent_id, at, kind, text) VALUES (?1,?2,?3,?4)",
+                params![agent.0, ts(at), kind, text],
+            )
+            .map_err(se)?;
+        // cheap bound: trim only now and then, and only the excess
+        let id = self.0.last_insert_rowid();
+        if id % 64 == 0 {
+            self.0
+                .execute(
+                    "DELETE FROM transcript_lines WHERE agent_id=?1 AND id <= \
+                     (SELECT id FROM transcript_lines WHERE agent_id=?1 ORDER BY id DESC LIMIT 1 OFFSET ?2)",
+                    params![agent.0, keep as i64],
+                )
+                .map_err(se)?;
+        }
+        Ok(())
+    }
+    /// The newest `limit` lines of an agent, oldest first: `(at, kind, text)`.
+    pub fn recent_transcript(
+        &self,
+        agent: &AgentId,
+        limit: usize,
+    ) -> CoreResult<Vec<(DateTime<Utc>, String, String)>> {
+        let mut st = self
+            .0
+            .prepare(
+                "SELECT at, kind, text FROM (SELECT id, at, kind, text FROM transcript_lines \
+                 WHERE agent_id=?1 ORDER BY id DESC LIMIT ?2) ORDER BY id",
+            )
+            .map_err(se)?;
+        let rows = st
+            .query_map(params![agent.0, limit as i64], |r| {
+                let at: String = r.get(0)?;
+                Ok((at, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+            })
+            .map_err(se)?;
+        let mut out = vec![];
+        for r in rows {
+            let (at, kind, text) = r.map_err(se)?;
+            let at = DateTime::parse_from_rfc3339(&at)
+                .map(|d| d.with_timezone(&Utc))
+                .unwrap_or_else(|_| Utc::now());
+            out.push((at, kind, text));
+        }
+        Ok(out)
+    }
+    pub fn delete_transcript(&self, agent: &AgentId) -> CoreResult<()> {
+        self.0
+            .execute("DELETE FROM transcript_lines WHERE agent_id=?1", [&agent.0])
+            .map_err(se)?;
+        Ok(())
+    }
+
     // ---- messages ----
     pub fn insert_message(&self, m: &Message, idempotency_key: Option<&str>) -> CoreResult<()> {
         self.0
@@ -1258,7 +1323,11 @@ mod tests {
             let s = Store::open(&path).unwrap();
             assert_eq!(
                 s.applied_migrations().unwrap(),
-                vec!["0001_init".to_string(), "0002_agent_effort".to_string()]
+                vec![
+                    "0001_init".to_string(),
+                    "0002_agent_effort".to_string(),
+                    "0003_transcripts".to_string()
+                ]
             );
             s.write(|db| {
                 project(db);
@@ -1267,7 +1336,7 @@ mod tests {
             .unwrap();
         }
         let s = Store::open(&path).unwrap();
-        assert_eq!(s.applied_migrations().unwrap().len(), 2);
+        assert_eq!(s.applied_migrations().unwrap().len(), 3);
         assert_eq!(s.read(|db| db.list_projects()).unwrap().len(), 1);
     }
 

@@ -9,6 +9,7 @@
 use crate::api::{self, ChatChunk, ToolCall};
 use crate::history;
 use crate::mcp::McpConnection;
+use crate::persist;
 use crate::tools::{self, Gate, LocalTools};
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -51,6 +52,10 @@ pub struct SessionParams {
     pub mcp: Option<McpConnection>,
     /// Where each request's measured speed is published for the performance view.
     pub speed: SpeedCell,
+    /// Directory where conversations are kept so they can be resumed (`None`: not kept).
+    pub state_dir: Option<std::path::PathBuf>,
+    /// The session id saved by an earlier run, when MAW is reconnecting this agent.
+    pub resume_id: Option<String>,
 }
 
 #[derive(Default)]
@@ -71,9 +76,21 @@ struct Shared {
     tx: mpsc::Sender<ProviderEvent>,
     inner: Mutex<Inner>,
     tool_defs: Vec<Value>,
+    native_id: String,
 }
 
 impl Shared {
+    /// Keep the conversation on disk so the session can be resumed. A failure is logged only.
+    fn save_history(&self) {
+        let Some(dir) = &self.p.state_dir else {
+            return;
+        };
+        let history = self.lock().history.clone();
+        if let Err(e) = persist::save(dir, &self.native_id, &history) {
+            tracing::warn!("could not save the conversation: {e}");
+        }
+    }
+
     fn lock(&self) -> MutexGuard<'_, Inner> {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -95,12 +112,32 @@ impl OllamaSession {
         if let Some(m) = &p.mcp {
             defs.extend(m.definitions.iter().cloned());
         }
-        let native_id = format!("ollama-{}", uuid::Uuid::new_v4().simple());
+        // Resume the saved conversation when there is one; otherwise start a fresh session and
+        // say so, as the other providers do when an earlier conversation is gone.
+        let mut notice = None;
+        let (native_id, history) = match (&p.resume_id, &p.state_dir) {
+            (Some(id), Some(dir)) => match persist::load(dir, id) {
+                Some(h) => (id.clone(), h),
+                None => {
+                    notice = Some("the earlier conversation of this agent could not be found; starting a new one".to_string());
+                    (persist::new_id(), vec![])
+                }
+            },
+            (Some(_), None) => {
+                notice = Some("conversations are not being kept; starting a new one".to_string());
+                (persist::new_id(), vec![])
+            }
+            _ => (persist::new_id(), vec![]),
+        };
         let shared = Arc::new(Shared {
             p,
             tx,
-            inner: Mutex::new(Inner::default()),
+            inner: Mutex::new(Inner {
+                history,
+                ..Inner::default()
+            }),
             tool_defs: defs,
+            native_id: native_id.clone(),
         });
         let s = shared.clone();
         let id = native_id.clone();
@@ -109,6 +146,13 @@ impl OllamaSession {
                 native_session_id: Some(id),
             })
             .await;
+            if let Some(message) = notice {
+                s.emit(ProviderEvent::Error {
+                    message,
+                    fatal: false,
+                })
+                .await;
+            }
         });
         (Arc::new(OllamaSession { shared, native_id }), rx)
     }
@@ -124,7 +168,7 @@ impl AgentSession for OllamaSession {
         Capabilities {
             streaming: true,
             interrupt: true,
-            resume: false,
+            resume: self.shared.p.state_dir.is_some(),
             steer_active_turn: false,
             approvals: true,
             mcp_http: true,
@@ -190,6 +234,7 @@ impl AgentSession for OllamaSession {
             was_open
         };
         if was_open {
+            self.shared.save_history();
             self.shared
                 .emit(ProviderEvent::Disconnected {
                     reason: "session shut down".into(),
@@ -251,6 +296,7 @@ async fn run_turn(sh: Arc<Shared>, text: String, turn_id: String, cancel: Cancel
         g.cancel = None;
         g.pending.clear();
     }
+    sh.save_history();
     sh.emit(ProviderEvent::TurnCompleted {
         turn_id,
         outcome,

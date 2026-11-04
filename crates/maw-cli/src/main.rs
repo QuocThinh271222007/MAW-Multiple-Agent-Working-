@@ -158,7 +158,7 @@ enum AgentCmd {
     Add {
         #[arg(long)]
         name: String,
-        /// claude | codex
+        /// claude | codex | ollama (a local model run by MAW)
         #[arg(long)]
         provider: String,
         /// leader | worker | reviewer | specialist
@@ -477,7 +477,7 @@ async fn cmd_auth(ctx: &Ctx, cmd: AuthCmd) -> Result<()> {
             for (name, p) in [
                 ("codex", providers::codex(ctx.cfg.codex.path.clone())),
                 ("claude", providers::claude(ctx.cfg.claude.path.clone())),
-                ("ollama", providers::ollama(&ctx.cfg.ollama)),
+                ("ollama", providers::ollama(&ctx.cfg.ollama, None)),
             ] {
                 let info = p.detect().await;
                 match info {
@@ -1199,7 +1199,7 @@ enum ModelsCmd {
 
 async fn cmd_models_pull(ctx: &Ctx, name: Option<String>) -> Result<()> {
     use std::io::{BufRead, IsTerminal, Write};
-    let p = providers::ollama(&ctx.cfg.ollama);
+    let p = providers::ollama(&ctx.cfg.ollama, None);
     let name = match name {
         Some(n) => n,
         None => {
@@ -1308,7 +1308,7 @@ async fn cmd_models(ctx: &Ctx, provider: Option<String>) -> Result<()> {
         let p = match kind {
             ProviderKind::Claude => providers::claude(ctx.cfg.claude.path.clone()),
             ProviderKind::Codex => providers::codex(ctx.cfg.codex.path.clone()),
-            ProviderKind::Ollama => providers::ollama(&ctx.cfg.ollama),
+            ProviderKind::Ollama => providers::ollama(&ctx.cfg.ollama, None),
             ProviderKind::Mock => continue,
         };
         println!("{kind}:");
@@ -1344,7 +1344,7 @@ async fn models_for(ctx: &Ctx, kind: ProviderKind) -> Vec<maw_core::provider::Mo
     let p = match kind {
         ProviderKind::Claude => providers::claude(ctx.cfg.claude.path.clone()),
         ProviderKind::Codex => providers::codex(ctx.cfg.codex.path.clone()),
-        ProviderKind::Ollama => providers::ollama(&ctx.cfg.ollama),
+        ProviderKind::Ollama => providers::ollama(&ctx.cfg.ollama, None),
         ProviderKind::Mock => return vec![],
     };
     match tokio::time::timeout(Duration::from_secs(45), p.list_models()).await {

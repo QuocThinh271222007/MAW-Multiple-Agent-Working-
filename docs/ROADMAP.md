@@ -50,3 +50,9 @@
 ## Added: message box, pickers, top bar, small-model fixes
 - TUI: always-on message box and `/` command menu in the agent view; single-decision pickers for model / effort / permissions / download; view keys first in the top bar. Driven end to end in a pseudo-terminal against the real binary; not yet used by hand in a real terminal.
 - Ollama as a Worker over MCP, measured live with `qwen3:4b`: it did the task and, after fixes (inlined `$ref` schemas, error text listing valid evidence kinds, turn ends after a successful submit/block/review), reported on the first try (425 s / 51k tokens before, 180 s / 20k after; one run each). Leader and Reviewer with a local model are untried and `agent add` warns about the Leader.
+
+## Added: saved conversations, Leader creates goals, Ollama autostart fix
+- Transcripts persist (table `transcript_lines`, batched writes, redacted, 2000 lines/agent) and reload; the Ollama provider saves/resumes the model-side history per session id. Tested with the real engine/DB and a fake Ollama; the conversation rows were also confirmed in a real `maw` run, the model-side resume only against the fake server.
+- `maw_goal_create` (Leader): creates a goal only when none is active; the objective text of an existing goal stays user-only.
+- Ollama `auth_status` no longer reports a stopped server as an auth failure while autostart is on, so connecting an agent after a reboot starts the server (tested with a fake `ollama`, not after a real reboot).
+- User chat messages to an agent no longer ask for an acknowledgement; small models answer in plain text.
