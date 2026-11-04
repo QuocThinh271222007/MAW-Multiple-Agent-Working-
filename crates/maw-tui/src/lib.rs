@@ -10,6 +10,8 @@
 //! `Engine::snapshot()` and sends commands through `Engine`/`Supervisor`.
 
 pub mod app;
+pub mod canvas;
+pub mod canvas_input;
 pub mod events;
 pub mod flow;
 pub mod input;

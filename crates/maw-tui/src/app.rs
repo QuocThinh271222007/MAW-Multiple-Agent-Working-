@@ -19,6 +19,8 @@ pub enum View {
     Tasks,
     Goal,
     Flow,
+    /// The unbounded node graph of the whole project (key `b`).
+    Canvas,
     Approvals,
     Logs,
     Config,
@@ -27,12 +29,13 @@ pub enum View {
 }
 
 impl View {
-    pub const TABS: [View; 10] = [
+    pub const TABS: [View; 11] = [
         View::Dashboard,
         View::Agents,
         View::Tasks,
         View::Goal,
         View::Flow,
+        View::Canvas,
         View::Approvals,
         View::Logs,
         View::Tokens,
@@ -48,6 +51,7 @@ impl View {
             View::Tasks => "Tasks",
             View::Goal => "Goal",
             View::Flow => "Flow",
+            View::Canvas => "Board",
             View::Approvals => "Approvals",
             View::Logs => "Logs",
             View::Config => "Config",
@@ -62,6 +66,7 @@ impl View {
             View::Tasks => 't',
             View::Goal => 'g',
             View::Flow => 'f',
+            View::Canvas => 'b',
             View::Approvals => 'o',
             View::Logs => 'l',
             View::Config => 'c',
@@ -156,6 +161,16 @@ pub enum Action {
     },
     /// Reload model lists and reconnect agents that are down.
     Refresh,
+    /// Remember the board's layout (JSON) for the next run.
+    SaveCanvas(String),
+    /// A new plan revision written by the user: summary, milestones (title, task keys), next
+    /// actions and why.
+    ProposePlan {
+        summary: String,
+        milestones: Vec<(String, Vec<String>)>,
+        next_actions: Vec<String>,
+        reason: String,
+    },
     DisconnectAgent(AgentId),
     InterruptAgent(AgentId),
     MessageAgent {
@@ -258,6 +273,8 @@ pub enum Cmd {
     PanelTokens,
     PanelStatus,
     PanelFlow,
+    ViewCanvas,
+    PlanNew,
     TaskNew,
     Workspace,
     ToggleThinking,
@@ -311,6 +328,16 @@ pub const COMMANDS: &[CommandSpec] = &[
         cmd: Cmd::Workspace,
         name: "workspace",
         desc: "where agent worktrees are created: /workspace project | wsl | windows (without an argument: show)",
+    },
+    CommandSpec {
+        cmd: Cmd::ViewCanvas,
+        name: "board",
+        desc: "unbounded node graph: objective, plan, tasks, agents, conversations; click to open, drag to move (b)",
+    },
+    CommandSpec {
+        cmd: Cmd::PlanNew,
+        name: "plan new",
+        desc: "write a new plan revision by hand: summary, milestones, next actions (P on the board)",
     },
     CommandSpec {
         cmd: Cmd::PanelFlow,
@@ -692,6 +719,7 @@ pub enum DialogKind {
     ReleaseTask { key: String },
     CancelTask { key: String },
     NewTask,
+    NewPlan,
 }
 
 #[derive(Clone, Debug)]
@@ -728,6 +756,25 @@ impl Dialog {
                 Field::text("Description", false, "what to do and where to put it"),
                 Field::text("Done when", false, "checks, separated by ';'"),
                 Field::select("Assign to", &choices, 0),
+            ],
+            focus: 0,
+            error: None,
+        }
+    }
+    /// A plan revision made by hand.
+    pub fn new_plan() -> Dialog {
+        Dialog {
+            title: "New plan revision".into(),
+            kind: DialogKind::NewPlan,
+            fields: vec![
+                Field::text("Summary", true, "the plan in one or two sentences"),
+                Field::text(
+                    "Milestones",
+                    false,
+                    "separate with ';', link tasks like: Backend [T-1 T-2]; Tests [T-3]",
+                ),
+                Field::text("Next actions", false, "separate with ';'"),
+                Field::text("Why", false, "what changed since the last revision"),
             ],
             focus: 0,
             error: None,
@@ -879,6 +926,33 @@ impl Dialog {
                     .filter(|s| !s.is_empty())
                     .collect(),
             },
+            DialogKind::NewPlan => Action::ProposePlan {
+                summary: v(0),
+                milestones: v(1)
+                    .split(';')
+                    .map(str::trim)
+                    .filter(|m| !m.is_empty())
+                    .map(|m| match (m.find('['), m.ends_with(']')) {
+                        (Some(i), true) => (
+                            m[..i].trim().to_string(),
+                            m[i + 1..m.len() - 1]
+                                .split(|c: char| c.is_whitespace() || c == ',')
+                                .filter(|k| !k.is_empty())
+                                .map(String::from)
+                                .collect(),
+                        ),
+                        _ => (m.to_string(), vec![]),
+                    })
+                    .collect(),
+                next_actions: v(2)
+                    .split(';')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect(),
+                reason: Some(v(3))
+                    .filter(|r| !r.is_empty())
+                    .unwrap_or_else(|| "revised by the user".into()),
+            },
             DialogKind::NewTask => Action::CreateTask {
                 title: v(0),
                 description: v(1),
@@ -1015,6 +1089,8 @@ pub struct App {
     pub side_max: Cell<usize>,
     /// Columns the side window occupies on screen (set by the renderer), for the mouse wheel.
     pub side_cols: Cell<(u16, u16)>,
+    /// The board (`View::Canvas`): view, selection and where the user put nodes.
+    pub canvas: crate::canvas::CanvasState,
     /// Per agent: the running turn's clock and token count (see `track_turns`).
     pub turn_marks: HashMap<AgentId, TurnMark>,
     /// Mouse events received so far. Zero after using the wheel means the terminal does not pass
@@ -1078,6 +1154,7 @@ impl App {
             side_scroll: 0,
             side_max: Cell::new(0),
             side_cols: Cell::new((0, 0)),
+            canvas: crate::canvas::CanvasState::default(),
             header_max: Cell::new(0),
             footer_max: Cell::new(0),
             now: Utc::now(),
@@ -1214,6 +1291,12 @@ impl App {
             self.view = v;
             if v == View::AgentDetail {
                 self.composer_focus = true;
+            }
+            if v == View::Canvas && !self.canvas.framed {
+                let scene = crate::canvas::build_scene(self);
+                let (w, h) = (self.size.0, self.size.1.saturating_sub(2 + 6));
+                self.canvas.fit(&scene, w, h);
+                self.canvas.framed = true;
             }
         }
         self.detail_scroll = 0;
@@ -1367,6 +1450,17 @@ pub fn run_cmd(app: &mut App, cmd: Cmd) -> Vec<Action> {
             "worktrees: type /workspace project | wsl | windows in the message box (without an argument it shows the current one)",
             Level::Info,
         ),
+        Cmd::ViewCanvas => app.goto(View::Canvas),
+        Cmd::PlanNew => {
+            if app.snap.as_ref().and_then(|s| s.goal.as_ref()).is_none() {
+                app.set_toast(
+                    "there is no objective yet: set one first (G, or /goal set), then write a plan",
+                    Level::Error,
+                );
+            } else {
+                app.overlay = Overlay::Dialog(Dialog::new_plan());
+            }
+        }
         Cmd::PanelFlow => open_panel(app, SidePanel::Flow, true),
         Cmd::TaskNew => {
             let workers: Vec<String> = app
@@ -1606,6 +1700,9 @@ pub fn handle_mouse(app: &mut App, m: MouseEvent) -> Vec<Action> {
             (*off + STEP).min(max)
         };
         return vec![];
+    }
+    if app.view == View::Canvas && matches!(app.overlay, Overlay::None) {
+        return crate::canvas_input::canvas_mouse(app, m);
     }
     // wheel over the side window scrolls the window, not the conversation
     if app.side.is_some() && app.view == View::AgentDetail {
@@ -2134,6 +2231,13 @@ fn normal_key(app: &mut App, key: KeyEvent) -> Vec<Action> {
         return vec![];
     }
 
+    // the board has its own keys; the rest (views, help, quit ...) are the global ones
+    if app.view == View::Canvas {
+        if let Some(actions) = crate::canvas_input::canvas_key(app, &key) {
+            return actions;
+        }
+    }
+
     // the agent view has a message box that takes the keys until Tab moves to browse mode
     if app.view == View::AgentDetail && app.search.is_none() {
         if app.composer_focus {
@@ -2263,6 +2367,7 @@ fn normal_key(app: &mut App, key: KeyEvent) -> Vec<Action> {
         KeyCode::Char('c') => return run_cmd(app, Cmd::ViewConfig),
         KeyCode::Char('$') => return run_cmd(app, Cmd::ViewTokens),
         KeyCode::Char('%') => return run_cmd(app, Cmd::ViewPerf),
+        KeyCode::Char('b') => return run_cmd(app, Cmd::ViewCanvas),
         KeyCode::Char('w') if app.view == View::Perf => {
             app.perf_window = (app.perf_window + 1) % crate::ui::perf_view::WINDOWS.len();
         }

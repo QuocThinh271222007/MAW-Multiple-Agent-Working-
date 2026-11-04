@@ -254,3 +254,43 @@ current choice. Not saved to the configuration file; `maw workspace <mode>` is.
 3. **Workers** take a task, work in their own git worktree and submit a result with evidence.
 4. The **Leader verifies** (or a Reviewer approves) - only then is the task DONE. When every task is done
    the Leader completes the objective, and MAW merges the workers' branches into `maw/integration`.
+
+## The board (`b`, `/board`)
+
+An unbounded node graph of the whole project, in the spirit of Blender's node editor. Everything on it
+comes from live state; nothing is drawn by hand.
+
+| node | what it is | edges |
+|---|---|---|
+| ☺ you | your messages and the objective start here | you -> objective |
+| ◎ objective | the goal, its success criteria, milestone | objective -> plan |
+| ▤ plan | the latest plan revision: summary, milestones, next actions | plan -> the first tasks |
+| ■ task | key, status, owner, dependencies, criteria, evidence, blocker | task -> the tasks that wait for it; task -> its agent |
+| ⚙ ♛ ✎ agent | role, state, model, permission, current task, tokens, **its git branch and how far integration is** | agent -> its conversation |
+| ✉ conversation | the last messages of that agent's conversation | |
+| ✉ message | the latest messages between you and the agents or between agents, with their text | sender -> message -> recipient |
+
+Tasks sit in columns by how deep they are in the dependency chain, so you read the work left to right.
+A marker runs along the edges of what is happening now (a running task, a busy agent, a message from the
+last minute).
+
+**Zoom** (`+` / `-`, or the wheel): four levels - overview (a few letters per node), one line each, cards,
+and cards with their details. `0` (or Home) zooms out until everything is in view. A small map in the
+corner shows where you are.
+
+**Move around:** arrows select the nearest node that way, `Tab` / `Shift+Tab` go through them in reading
+order, `Shift+arrows` and `PgUp`/`PgDn` pan, dragging the background pans, dragging a node moves it
+(positions snap to a quarter slot and are remembered next time, with the zoom and the place you were).
+
+**Open:** `Enter` or a double click. The objective and plan open the goal view, a task opens it on the
+task board, an agent or a conversation opens that agent's conversation (`Esc` comes back to the board),
+a message opens its full text.
+
+**Create and act, without leaving the board:** `G` set or redirect the objective, `P` write a plan
+revision (milestones can name the tasks they cover: `Backend [T-1 T-2]; Docs`), `n` add a task (with an
+agent selected it is offered to that agent), and on the selected node `v` verify, `x` cancel, `e` release,
+`R` requeue a task; `m` message, `C` connect, `D` stop, `i` interrupt an agent. The inspector below the
+canvas shows the selected node in full and the keys that apply to it.
+
+The mouse needs a terminal that reports it. In cmd the wheel arrives as arrow keys, so selection and
+`+` / `-` / Shift+arrows are the way there.

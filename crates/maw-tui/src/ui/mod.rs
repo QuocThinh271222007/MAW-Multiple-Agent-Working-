@@ -1,6 +1,7 @@
 //! Rendering. Pure functions of `&App`: no I/O, no engine calls, deterministic given `app.now`.
 
 pub mod agents;
+pub mod canvas_view;
 pub mod flow_view;
 pub mod goal;
 pub mod misc;
@@ -65,6 +66,7 @@ fn render_body(f: &mut Frame, area: Rect, app: &App) {
         View::Tasks => tasks::render_tasks_view(f, area, app),
         View::Goal => goal::render_goal_view(f, area, app),
         View::Flow => flow_view::render_flow_view(f, area, app),
+        View::Canvas => canvas_view::render_canvas(f, area, app),
         View::Approvals => misc::render_approvals(f, area, app),
         View::Logs => misc::render_logs(f, area, app),
         View::Config => misc::render_config(f, area, app),
@@ -121,7 +123,8 @@ fn render_header(f: &mut Frame, area: Rect, app: &App) {
     let full = tabs(false);
     // full view names whenever they fit on their own; the status after them may scroll
     // running / paused is always right after the name: it must never scroll out of sight
-    let mut text = if format!(" MAW {sched} │ {full} │ ").chars().count() <= w {
+    // full names only when the project name still fits after them
+    let mut text = if format!(" MAW {sched} │ {full} │ ").chars().count() + 14 <= w {
         format!(" MAW {sched} │ {full} │ {status} ")
     } else {
         format!(" MAW {sched} │ {} │ {status} ", tabs(true))
@@ -181,6 +184,7 @@ fn footer_hint(app: &App) -> &'static str {
         View::Tasks => "↑↓←→ select · Enter detail · R requeue · e release · x cancel · v verify · ? help",
         View::Goal => "↑↓ scroll · Enter/G redirect objective · ? help",
         View::Flow => "Tab graph/list · ↑↓ scroll · ? help",
+        View::Canvas => "arrows select · Shift+arrows or drag pan · + - zoom · 0 fit · Enter open · n task · P plan · G objective · ? help",
         View::Approvals => "↑↓ select · y approve · Y approve for session · n deny · x deny+abort",
         View::Logs => "↑↓ scroll · End latest · ? help",
         View::Config => "+/- concurrency · [ ] lease · u auto-assign · ? help",

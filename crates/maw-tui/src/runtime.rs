@@ -603,6 +603,47 @@ async fn execute(
             sup.connect_all().await;
             Ok("connect attempted for all agents".into())
         }
+        Action::SaveCanvas(json) => {
+            // a view preference, not project state: kept next to the other small settings
+            let e = engine.clone();
+            let _ = blk(move || {
+                e.store()
+                    .write(|db| db.kv_set(e.project_id(), "board_layout", &json))
+            })
+            .await;
+            Ok(String::new())
+        }
+        Action::ProposePlan {
+            summary,
+            milestones,
+            next_actions,
+            reason,
+        } => {
+            let ms: Vec<maw_core::Milestone> = milestones
+                .into_iter()
+                .map(|(title, task_keys)| maw_core::Milestone {
+                    title,
+                    done: false,
+                    task_keys,
+                })
+                .collect();
+            match on_engine!(
+                e,
+                e.propose_plan(
+                    &maw_orchestrator::Actor::User,
+                    &summary,
+                    ms,
+                    next_actions,
+                    &reason
+                )
+            ) {
+                Ok(p) => Ok(format!("plan revision {} recorded", p.revision)),
+                Err(m) if m.contains("goal") => {
+                    Err("there is no objective yet: set one first (G, or /goal set)".into())
+                }
+                Err(m) => Err(m),
+            }
+        }
         Action::Refresh => {
             // model lists first (they may have changed: a download, a login), then the agents
             for kind in [
@@ -750,6 +791,13 @@ async fn event_loop(engine: &Arc<Engine>, sup: &Arc<Supervisor>, opts: &TuiOptio
     let mut app = App::new(Theme::from_env(opts.monochrome));
     if let Ok(sz) = terminal.size() {
         app.size = (sz.width, sz.height);
+    }
+    // the board's layout from the last run (positions the user chose, zoom and place)
+    if let Ok(Some(saved)) = engine
+        .store()
+        .read(|db| db.kv_get(engine.project_id(), "board_layout"))
+    {
+        app.canvas.load_json(&saved);
     }
     let frame = Duration::from_millis(1000 / opts.max_fps.clamp(1, 60) as u64);
     // `None` while the terminal is handed to a provider's login command.

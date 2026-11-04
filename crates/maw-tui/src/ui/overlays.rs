@@ -38,6 +38,10 @@ pub const HELP: &[(&str, &str)] = &[
         "Command palette (in agent detail '/' searches the transcript)",
     ),
     (
+        "b  or  /board",
+        "The board: an unbounded node graph of objective, plan, tasks, agents, conversations and messages. Click or arrows select, Enter or double click opens, drag moves a node or pans, + - zoom, 0 fits all, n task, P plan, G objective",
+    ),
+    (
         "G  or  /goal set",
         "Set the objective: the Leader plans it into tasks (redirects it when one is active)",
     ),

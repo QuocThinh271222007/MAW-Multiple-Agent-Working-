@@ -190,3 +190,10 @@ plans it into **tasks** (the task board, key `t`); you can add one yourself with
 tasks turn DONE and, when all are done, the objective completes. Watch it with `/flow` (live, beside the
 conversation), `/status`, `/performance` and `/tokens`. Without a Leader agent nothing plans for you:
 add one (`a`) before setting an objective.
+
+### The board
+
+`b` (or `/board`) opens an unbounded, zoomable graph of the whole project: objective, plan, tasks and
+how they depend on each other, the agents and the git branch each works on, their conversations and the
+messages between them. Click or double click to open a conversation, a task or a message, drag nodes
+around, and create objectives, plans and tasks right there. See `docs/TUI.md`.
