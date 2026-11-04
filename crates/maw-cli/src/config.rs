@@ -6,11 +6,22 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UiConfig {
     pub monochrome: bool,
+    /// Capture the mouse (clicks, drags, wheel). On unless turned off: the board and the side
+    /// windows are built for it.
     pub mouse: bool,
+}
+
+impl Default for UiConfig {
+    fn default() -> Self {
+        UiConfig {
+            monochrome: false,
+            mouse: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -222,6 +233,19 @@ mod tests {
         );
         let s = toml::to_string_pretty(&c).unwrap();
         assert!(toml::from_str::<MawConfig>(&s).is_ok());
+    }
+
+    /// A derived `Default` once made this `false`, so a normal `maw` never captured the mouse (only
+    /// the demo did) and every click was lost.
+    #[test]
+    fn the_mouse_is_captured_unless_the_user_turns_it_off() {
+        assert!(MawConfig::default().ui.mouse, "no config file");
+        let c: MawConfig = toml::from_str("").unwrap();
+        assert!(c.ui.mouse, "empty config file");
+        let c: MawConfig = toml::from_str("[ui]\nmonochrome = true\n").unwrap();
+        assert!(c.ui.mouse && c.ui.monochrome, "[ui] without a mouse key");
+        let c: MawConfig = toml::from_str("[ui]\nmouse = false\n").unwrap();
+        assert!(!c.ui.mouse, "an explicit false still turns it off");
     }
 
     #[test]

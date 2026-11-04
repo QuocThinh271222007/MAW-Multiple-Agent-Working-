@@ -128,7 +128,8 @@ Interactive demo (mock provider, not a real Claude/Codex run):
 
 ## Known gaps
 
-* No mouse clicking (wheel scroll only); no text selection inside the TUI (use `y`/`Y`).
+* The mouse is captured by default (`[ui] mouse = false` in config.toml turns it off): the board uses
+  clicks, drags and the wheel, the other views the wheel. No text selection inside the TUI (use `y`/`Y`).
 * OSC 52 depends on the terminal allowing clipboard writes; the internal buffer is the fallback.
 * Transcript search is case-insensitive substring only, over wrapped display rows.
 * Flow diagram supports one row of workers/reviewers (falls back to the edge list when they don't fit).
