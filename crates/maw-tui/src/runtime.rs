@@ -409,36 +409,7 @@ async fn execute(
     }
     match action {
         Action::Quit | Action::Copy(_) | Action::RunShell(_) => Ok(String::new()),
-        Action::PullModel { name } => {
-            let (ptx, mut prx) = mpsc::channel::<maw_core::provider::PullProgress>(64);
-            let (t2, n2) = (tx.clone(), name.clone());
-            let fwd = tokio::spawn(async move {
-                let mut last = Instant::now() - Duration::from_secs(2);
-                while let Some(p) = prx.recv().await {
-                    if p.total == 0 || last.elapsed() < Duration::from_millis(900) {
-                        continue;
-                    }
-                    last = Instant::now();
-                    let _ = t2
-                        .send(UiMsg::Toast(
-                            format!(
-                                "downloading {n2}: {}% ({:.1}/{:.1} GB)",
-                                p.completed * 100 / p.total,
-                                p.completed as f64 / 1e9,
-                                p.total as f64 / 1e9
-                            ),
-                            Level::Info,
-                        ))
-                        .await;
-                }
-            });
-            let res = sup.pull_model(ProviderKind::Ollama, &name, ptx).await;
-            let _ = fwd.await;
-            if let Ok(list) = sup.list_models(ProviderKind::Ollama).await {
-                let _ = tx.send(UiMsg::Models(ProviderKind::Ollama, list)).await;
-            }
-            res.map_err(err_text)
-        }
+        Action::PullModel { name } => pull_reporting(&sup, &tx, &name).await.map_err(err_text),
         Action::SetAgentModel {
             agent,
             model,
@@ -524,6 +495,18 @@ async fn execute(
             effort,
             permission,
         } => {
+            // a suggested local model that is not on the machine yet is downloaded first (with the
+            // usual size limits), so picking it in the list is all it takes
+            if let (ProviderKind::Ollama, Some(m)) = (provider, &model) {
+                let installed = sup
+                    .list_models(provider)
+                    .await
+                    .map(|l| l.iter().any(|x| &x.id == m))
+                    .unwrap_or(false);
+                if !installed && sup.pull_suggestions(provider).iter().any(|s| &s.id == m) {
+                    pull_reporting(&sup, &tx, m).await.map_err(err_text)?;
+                }
+            }
             if let Some(m) = &model {
                 sup.validate_model(provider, m).await.map_err(err_text)?;
             }
@@ -766,6 +749,43 @@ async fn execute(
             Ok("configuration updated".into())
         }
     }
+}
+
+/// Download a model, showing the progress as notices at the bottom, and refresh the model lists
+/// afterwards. Used by the download shop and by Add agent for a model that is not on the machine yet.
+async fn pull_reporting(
+    sup: &Arc<Supervisor>,
+    tx: &mpsc::Sender<UiMsg>,
+    name: &str,
+) -> maw_core::CoreResult<String> {
+    let (ptx, mut prx) = mpsc::channel::<maw_core::provider::PullProgress>(64);
+    let (t2, n2) = (tx.clone(), name.to_string());
+    let fwd = tokio::spawn(async move {
+        let mut last = Instant::now() - Duration::from_secs(2);
+        while let Some(p) = prx.recv().await {
+            if p.total == 0 || last.elapsed() < Duration::from_millis(900) {
+                continue;
+            }
+            last = Instant::now();
+            let _ = t2
+                .send(UiMsg::Toast(
+                    format!(
+                        "downloading {n2}: {}% ({:.1}/{:.1} GB)",
+                        p.completed * 100 / p.total,
+                        p.completed as f64 / 1e9,
+                        p.total as f64 / 1e9
+                    ),
+                    Level::Info,
+                ))
+                .await;
+        }
+    });
+    let res = sup.pull_model(ProviderKind::Ollama, name, ptx).await;
+    let _ = fwd.await;
+    if let Ok(list) = sup.list_models(ProviderKind::Ollama).await {
+        let _ = tx.send(UiMsg::Models(ProviderKind::Ollama, list)).await;
+    }
+    res
 }
 
 // ------------------------------------------------------------------ main loop

@@ -311,3 +311,12 @@ While the line has the keys, letters are text. `Tab` (on an empty line or after 
 `a`, `G` ...); `/` or `!` in hotkey mode returns to the line with that character already typed. `:` and
 `Ctrl+P` still open the command palette as a list. On a terminal shorter than 16 rows there is no
 command line and everything works as before (`/` and `!` fall back to the palette and the shell dialog).
+
+## Model shop and Add agent
+
+* Open the shop with `/shop` (or `/download model`, or `:` then "shop"). There is no single-key hotkey.
+  It lists the Ollama library and Hugging Face models with size, maker and effort; Enter downloads.
+* `a` (Add agent) with provider `ollama` also lists the suggested models that are not on this machine
+  yet, marked `⬇`. Picking one downloads it first (progress in the notices at the bottom), then adds
+  and connects the agent. Models marked `⬇` have no effort levels listed because none are known until
+  they are installed.

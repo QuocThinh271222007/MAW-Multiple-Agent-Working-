@@ -500,6 +500,11 @@ pub const COMMANDS: &[CommandSpec] = &[
         desc: "download a local model for Ollama agents (suggestions up to 8B)",
     },
     CommandSpec {
+        cmd: Cmd::PullModel,
+        name: "shop",
+        desc: "the model shop: pick a model from the Ollama library or Hugging Face to download",
+    },
+    CommandSpec {
         cmd: Cmd::AgentPermission,
         name: "permissions",
         desc: "set safe / balanced / autonomous for the selected agent",
@@ -1333,6 +1338,29 @@ impl App {
         self.size.1 >= 16
     }
 
+    /// The model lists the add-agent dialog offers: what each provider reports, and for Ollama also
+    /// the suggested models that are not downloaded yet. Picking one of those downloads it when the
+    /// agent is added; nothing is downloaded before that.
+    pub fn add_agent_models(&self) -> HashMap<ProviderKind, Vec<ModelChoice>> {
+        let mut out = self.models.clone();
+        let list = out.entry(ProviderKind::Ollama).or_default();
+        let have: std::collections::HashSet<String> = list.iter().map(|m| m.id.clone()).collect();
+        for s in &self.pull_suggestions {
+            if !have.contains(&s.id) {
+                list.push(ModelChoice {
+                    description: format!("⬇ {}", s.description),
+                    source: "catalog".into(),
+                    reasoning_efforts: vec![],
+                    ..s.clone()
+                });
+            }
+        }
+        if list.is_empty() {
+            out.remove(&ProviderKind::Ollama);
+        }
+        out
+    }
+
     pub fn is_text_mode(&self) -> bool {
         !matches!(self.overlay, Overlay::None)
             || self.search.as_ref().map(|s| s.editing).unwrap_or(false)
@@ -1564,7 +1592,7 @@ pub fn run_cmd(app: &mut App, cmd: Cmd) -> Vec<Action> {
                 .agents()
                 .iter()
                 .any(|a| a.provider == ProviderKind::Mock);
-            app.overlay = Overlay::Dialog(Dialog::add_agent_for(&app.models, demo));
+            app.overlay = Overlay::Dialog(Dialog::add_agent_for(&app.add_agent_models(), demo));
         }
         Cmd::ConnectAgent => {
             if let Some(a) = need_agent(app) {
@@ -1898,14 +1926,17 @@ fn dialog_key(app: &mut App, mut d: Dialog, key: KeyEvent) -> Vec<Action> {
 /// Keep the Model / Effort pick-lists consistent with what was just chosen.
 fn after_dialog_edit(app: &App, d: &mut Dialog) {
     match d.kind.clone() {
-        DialogKind::AddAgent if d.focus == 1 => refresh_add_agent(d, &app.models, true),
-        DialogKind::AddAgent if d.focus == 3 => refresh_add_agent(d, &app.models, false),
+        DialogKind::AddAgent if d.focus == 1 => refresh_add_agent(d, &app.add_agent_models(), true),
+        DialogKind::AddAgent if d.focus == 3 => {
+            refresh_add_agent(d, &app.add_agent_models(), false)
+        }
         _ => {}
     }
 }
 
 /// Re-run the add-agent list refresh when the model catalog arrives while the dialog is open.
 pub fn refresh_open_dialog(app: &mut App) {
+    let models = app.add_agent_models();
     if let Overlay::Dialog(d) = &mut app.overlay {
         if d.kind == DialogKind::AddAgent
             && d.fields
@@ -1913,7 +1944,7 @@ pub fn refresh_open_dialog(app: &mut App) {
                 .map(|f| f.choices.len() <= 1)
                 .unwrap_or(false)
         {
-            refresh_add_agent(d, &app.models, true);
+            refresh_add_agent(d, &models, true);
         }
     }
 }
@@ -1940,6 +1971,8 @@ fn refresh_add_agent(
             f.hint = if list.is_empty() {
                 "no model list for this provider (not installed / still loading): the default is used"
                     .into()
+            } else if list.iter().any(|m| m.source == "catalog") {
+                "⬇ = not on this machine yet: it is downloaded when you add the agent".into()
             } else {
                 "←/→ to change".into()
             };
