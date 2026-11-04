@@ -310,6 +310,18 @@ async fn run_login(name: &str, kind: ProviderKind, cmd: &[String]) -> Result<(),
 enum UiMsg {
     Toast(String, Level),
     Models(ProviderKind, Vec<ModelChoice>),
+    /// Progress of a model download.
+    Pull {
+        name: String,
+        status: String,
+        completed: u64,
+        total: u64,
+    },
+    /// A model download ended (finished, failed or stopped).
+    PullEnd {
+        name: String,
+        outcome: crate::downloads::Outcome,
+    },
     Shell {
         cmd: String,
         lines: Vec<String>,
@@ -414,7 +426,25 @@ async fn execute(
     }
     match action {
         Action::Quit | Action::Copy(_) | Action::RunShell(_) => Ok(String::new()),
-        Action::PullModel { name } => pull_reporting(&sup, &tx, &name).await.map_err(err_text),
+        Action::PullModel { name } => {
+            // progress and the outcome reach the screen as downloads, not as one-line notices
+            let _ = pull_reporting(&sup, &tx, &name).await;
+            Ok(String::new())
+        }
+        Action::StopPull { name } => {
+            let stop = PULLS
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&name)
+                .cloned();
+            match stop {
+                Some(n) => {
+                    n.notify_one();
+                    Ok(String::new())
+                }
+                None => Err(format!("{name} is not downloading")),
+            }
+        }
         Action::SetAgentModel {
             agent,
             model,
@@ -509,7 +539,7 @@ async fn execute(
                     .map(|l| l.iter().any(|x| &x.id == m))
                     .unwrap_or(false);
                 if !installed && sup.pull_suggestions(provider).iter().any(|s| &s.id == m) {
-                    pull_reporting(&sup, &tx, m).await.map_err(err_text)?;
+                    pull_reporting(&sup, &tx, m).await?;
                 }
             }
             if let Some(m) = &model {
@@ -756,41 +786,87 @@ async fn execute(
     }
 }
 
-/// Download a model, showing the progress as notices at the bottom, and refresh the model lists
-/// afterwards. Used by the download shop and by Add agent for a model that is not on the machine yet.
+/// Downloads in progress, by model name, each with the signal that stops it.
+static PULLS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Notify>>>,
+> = std::sync::LazyLock::new(Default::default);
+
+/// Download a model and report it to the screen as a download: progress about four times a second,
+/// then how it ended. It can be stopped from outside (`Action::StopPull`): the connection is
+/// dropped, Ollama keeps what was fetched, and a later download continues from there. Used by the
+/// shop and by Add agent for a model that is not on the machine yet.
 async fn pull_reporting(
     sup: &Arc<Supervisor>,
     tx: &mpsc::Sender<UiMsg>,
     name: &str,
-) -> maw_core::CoreResult<String> {
+) -> Result<String, String> {
+    use crate::downloads::Outcome;
+    let stop = Arc::new(tokio::sync::Notify::new());
+    {
+        let mut g = PULLS.lock().unwrap_or_else(|e| e.into_inner());
+        if g.contains_key(name) {
+            return Err(format!("{name} is already being downloaded"));
+        }
+        g.insert(name.to_string(), stop.clone());
+    }
+    let _ = tx
+        .send(UiMsg::Pull {
+            name: name.to_string(),
+            status: "starting".into(),
+            completed: 0,
+            total: 0,
+        })
+        .await;
     let (ptx, mut prx) = mpsc::channel::<maw_core::provider::PullProgress>(64);
     let (t2, n2) = (tx.clone(), name.to_string());
     let fwd = tokio::spawn(async move {
         let mut last = Instant::now() - Duration::from_secs(2);
+        let mut last_status = String::new();
         while let Some(p) = prx.recv().await {
-            if p.total == 0 || last.elapsed() < Duration::from_millis(900) {
+            if last.elapsed() < Duration::from_millis(250) && p.status == last_status {
                 continue;
             }
             last = Instant::now();
+            last_status = p.status.clone();
             let _ = t2
-                .send(UiMsg::Toast(
-                    format!(
-                        "downloading {n2}: {}% ({:.1}/{:.1} GB)",
-                        p.completed * 100 / p.total,
-                        p.completed as f64 / 1e9,
-                        p.total as f64 / 1e9
-                    ),
-                    Level::Info,
-                ))
+                .send(UiMsg::Pull {
+                    name: n2.clone(),
+                    status: p.status,
+                    completed: p.completed,
+                    total: p.total,
+                })
                 .await;
         }
     });
-    let res = sup.pull_model(ProviderKind::Ollama, name, ptx).await;
+    let res = tokio::select! {
+        r = sup.pull_model(ProviderKind::Ollama, name, ptx) => Some(r),
+        _ = stop.notified() => None,
+    };
     let _ = fwd.await;
+    PULLS.lock().unwrap_or_else(|e| e.into_inner()).remove(name);
     if let Ok(list) = sup.list_models(ProviderKind::Ollama).await {
         let _ = tx.send(UiMsg::Models(ProviderKind::Ollama, list)).await;
     }
-    res
+    let (outcome, ret) = match res {
+        Some(Ok(m)) => (Outcome::Done(m.clone()), Ok(m)),
+        Some(Err(e)) => {
+            let t = err_text(e);
+            // the error type's own prefixes say nothing to the person reading
+            let t = t
+                .trim_start_matches("precondition failed: ")
+                .trim_start_matches("protocol error: ")
+                .to_string();
+            (Outcome::Failed(t.clone()), Err(t))
+        }
+        None => (Outcome::Stopped, Err(format!("download of {name} stopped"))),
+    };
+    let _ = tx
+        .send(UiMsg::PullEnd {
+            name: name.to_string(),
+            outcome,
+        })
+        .await;
+    ret
 }
 
 // ------------------------------------------------------------------ console switch for the board
@@ -984,6 +1060,18 @@ async fn event_loop(engine: &Arc<Engine>, sup: &Arc<Supervisor>, opts: &TuiOptio
             Some(msg) = msg_rx.recv() => {
                 match msg {
                     UiMsg::Toast(t, l) => app.set_toast(t, l),
+                    UiMsg::Pull { name, status, completed, total } => {
+                        app.downloads.progress(&name, &status, completed, total, Utc::now());
+                    }
+                    UiMsg::PullEnd { name, outcome } => {
+                        let (text, level) = match &outcome {
+                            crate::downloads::Outcome::Done(m) => (m.clone(), Level::Ok),
+                            crate::downloads::Outcome::Failed(m) => (format!("download of {name} failed: {m}"), Level::Error),
+                            crate::downloads::Outcome::Stopped => (format!("download of {name} stopped (/downloads: r continues it)"), Level::Info),
+                        };
+                        app.downloads.finish(&name, outcome, Utc::now());
+                        app.set_toast(text, level);
+                    }
                     UiMsg::Models(kind, list) => {
                         app.models.insert(kind, list);
                         // a dialog opened before the catalog arrived gets its lists filled in

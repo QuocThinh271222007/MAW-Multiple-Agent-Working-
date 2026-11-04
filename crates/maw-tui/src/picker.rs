@@ -408,7 +408,15 @@ fn finish(app: &mut App, p: &PickerState, value: String) -> Vec<Action> {
             }],
             Err(_) => vec![],
         },
-        PickerKind::Pull => vec![Action::PullModel { name: value }],
+        PickerKind::Pull => {
+            // show the download at once, with its bar and the keys to stop it
+            app.overlay = Overlay::Downloads;
+            if app.downloads.is_active(&value) {
+                return vec![];
+            }
+            app.downloads.begin(&value, app.now);
+            vec![Action::PullModel { name: value }]
+        }
     }
 }
 

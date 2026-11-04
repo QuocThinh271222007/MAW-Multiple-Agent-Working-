@@ -361,3 +361,14 @@ search is empty), the same download mechanism for both. Type to search (name, ma
 `F2` (or `Ctrl+O`) cycles the order: recommended, name, smallest, largest, fewest parameters, maker,
 installed first. A typed `owner/repo` on the Hugging Face tab downloads `hf.co/owner/repo`.
 
+## Downloads
+
+Picking a model in the shop (or adding an agent that uses a model not on the machine yet) starts a
+download and opens `/downloads`: a bar per download with percent, size, speed and time left, and the
+keys `x` stop, `r` resume or retry, `d` remove, `c` clear finished, `Esc` close. A one-row gauge stays above
+the footer on every screen while something downloads. Stopping drops the connection; Ollama keeps what was
+fetched, so resuming continues from there. A failure stays in the list with its whole reason (it used to
+be a notice that disappeared after a few seconds). The most common reason on a fresh install: the model is
+newer than the Ollama server ("requires a newer version of Ollama"); the message names the running
+version and says to update Ollama.
+

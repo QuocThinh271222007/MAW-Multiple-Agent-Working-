@@ -2,6 +2,7 @@
 
 pub mod agents;
 pub mod canvas_view;
+pub mod downloads;
 pub mod flow_view;
 pub mod goal;
 pub mod misc;
@@ -42,12 +43,16 @@ pub fn render(f: &mut Frame, app: &App) {
     let rows = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(1),
+        Constraint::Length(gauge_rows(app, area.height)),
         Constraint::Length(footer_rows(app, area.width)),
     ])
     .split(area);
     render_header(f, rows[0], app);
     render_body(f, rows[1], app);
-    render_footer(f, rows[2], app);
+    if rows[2].height > 0 {
+        downloads::render_gauge(f, rows[2], app);
+    }
+    render_footer(f, rows[3], app);
     match &app.overlay {
         Overlay::None => {}
         Overlay::Help => overlays::render_help(f, rows[1], app),
@@ -55,7 +60,13 @@ pub fn render(f: &mut Frame, app: &App) {
         Overlay::Dialog(d) => overlays::render_dialog(f, rows[1], app, d),
         Overlay::Picker(p) => overlays::render_picker(f, rows[1], app, p),
         Overlay::Output(o) => overlays::render_output(f, rows[1], app, o),
+        Overlay::Downloads => downloads::render_downloads(f, rows[1], app),
     }
+}
+
+/// One row for the download gauge while a model is downloading (when the screen has room).
+fn gauge_rows(app: &App, height: u16) -> u16 {
+    u16::from(height >= 10 && app.downloads.active().next().is_some())
 }
 
 fn render_body(f: &mut Frame, area: Rect, app: &App) {

@@ -143,6 +143,30 @@ impl OllamaProvider {
         v.get("version").and_then(Value::as_str).map(String::from)
     }
 
+    /// Ollama's own error on one line, and for "needs a newer Ollama" the version that is running and
+    /// where to get a newer one (new models are ahead of old servers; nothing is wrong with the model).
+    async fn explain_pull_error(&self, base: &str, raw: &str) -> String {
+        let one_line = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+        if !one_line.contains("newer version of Ollama") {
+            return one_line;
+        }
+        let running = self
+            .get_json(base, "/api/version")
+            .await
+            .ok()
+            .and_then(|j| j.get("version").and_then(Value::as_str).map(String::from))
+            .map(|v| format!("version {v}"))
+            .unwrap_or_else(|| "an older version".into());
+        let pre = if one_line.contains("pre-release") {
+            " This model may need a pre-release build: https://github.com/ollama/ollama/releases"
+        } else {
+            ""
+        };
+        format!(
+            "{one_line} -> the Ollama server MAW talks to is {running}. Update Ollama on the machine that runs it (https://ollama.com/download), restart it, and download again.{pre}"
+        )
+    }
+
     async fn get_json(&self, base: &str, path: &str) -> Result<Value, String> {
         let r = tokio::time::timeout(
             Duration::from_secs(8),
@@ -262,9 +286,9 @@ impl AgentProvider for OllamaProvider {
                 .ok()
                 .and_then(|v| v.get("error").and_then(Value::as_str).map(String::from))
                 .unwrap_or(t);
+            let msg = self.explain_pull_error(&base, msg.trim()).await;
             return Err(ProviderError::Protocol(format!(
-                "Ollama refused the download: {}",
-                msg.trim()
+                "Ollama refused the download: {msg}"
             )));
         }
         let mut stream = resp.bytes_stream();
@@ -285,6 +309,7 @@ impl AgentProvider for OllamaProvider {
                     continue;
                 };
                 if let Some(e) = v.get("error").and_then(Value::as_str) {
+                    let e = self.explain_pull_error(&base, e).await;
                     return Err(ProviderError::Protocol(format!(
                         "Ollama could not download '{name}': {e}"
                     )));

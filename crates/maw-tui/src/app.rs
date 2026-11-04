@@ -144,6 +144,10 @@ pub enum Action {
     PullModel {
         name: String,
     },
+    /// Stop a running download (what was fetched is kept; downloading again continues from it).
+    StopPull {
+        name: String,
+    },
     /// Run the provider's official login for this agent's provider, then connect it.
     LoginAgent(AgentId),
     /// Remove an agent from the project (stops its session). `force` releases unfinished tasks.
@@ -295,6 +299,7 @@ pub enum Cmd {
     MessageAgent,
     AgentModel,
     PullModel,
+    Downloads,
     AgentPermission,
     Shell,
     Pause,
@@ -505,6 +510,11 @@ pub const COMMANDS: &[CommandSpec] = &[
         desc: "the model shop: pick a model from the Ollama library or Hugging Face to download",
     },
     CommandSpec {
+        cmd: Cmd::Downloads,
+        name: "downloads",
+        desc: "progress of model downloads: bars, speed, time left; stop, resume, remove",
+    },
+    CommandSpec {
         cmd: Cmd::AgentPermission,
         name: "permissions",
         desc: "set safe / balanced / autonomous for the selected agent",
@@ -638,6 +648,8 @@ pub enum Overlay {
     Dialog(Dialog),
     /// One-decision list (model, effort, permissions, download).
     Picker(crate::picker::PickerState),
+    /// The list of model downloads with their progress and the keys to control them.
+    Downloads,
     /// Scrollable text result (e.g. of a `!` shell command).
     Output(OutputState),
 }
@@ -1076,6 +1088,8 @@ pub struct App {
     pub pull_suggestions: Vec<ModelChoice>,
     /// Rows the output panel has after wrapping (set when drawn; the keys scroll up to it).
     pub output_rows: std::cell::Cell<usize>,
+    /// Model downloads: running ones, and how finished ones ended.
+    pub downloads: crate::downloads::Downloads,
     /// Machine performance samples (filled while the Perf view or a local agent needs them).
     pub perf: maw_core::perf::PerfHistory,
     /// Index into `ui::perf_view::WINDOWS`.
@@ -1152,6 +1166,7 @@ impl App {
             models: HashMap::new(),
             pull_suggestions: Vec::new(),
             output_rows: std::cell::Cell::new(0),
+            downloads: Default::default(),
             perf: maw_core::perf::PerfHistory::new(1),
             perf_window: 1,
             composer: TextInput::new(),
@@ -1653,6 +1668,7 @@ pub fn run_cmd(app: &mut App, cmd: Cmd) -> Vec<Action> {
                 ));
             }
         }
+        Cmd::Downloads => app.overlay = Overlay::Downloads,
         Cmd::AgentPermission => {
             if let Some(a) = need_agent(app) {
                 app.overlay = Overlay::Picker(crate::picker::permission_picker(&a));
@@ -1802,6 +1818,44 @@ pub fn handle_mouse(app: &mut App, m: MouseEvent) -> Vec<Action> {
     out
 }
 
+/// Keys of the downloads list: move, stop, resume, remove.
+fn downloads_key(app: &mut App, key: KeyEvent) -> Vec<Action> {
+    use crate::downloads::DlState;
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter => return vec![],
+        KeyCode::Up | KeyCode::Char('k') => app.downloads.move_selection(-1),
+        KeyCode::Down | KeyCode::Char('j') => app.downloads.move_selection(1),
+        KeyCode::Char('x') | KeyCode::Delete => {
+            if let Some(d) = app.downloads.selected_item() {
+                if d.state == DlState::Downloading {
+                    let name = d.name.clone();
+                    app.overlay = Overlay::Downloads;
+                    return vec![Action::StopPull { name }];
+                }
+            }
+        }
+        KeyCode::Char('r') => {
+            if let Some(d) = app.downloads.selected_item() {
+                if matches!(d.state, DlState::Failed | DlState::Stopped) {
+                    let name = d.name.clone();
+                    app.downloads.begin(&name, app.now);
+                    app.overlay = Overlay::Downloads;
+                    return vec![Action::PullModel { name }];
+                }
+            }
+        }
+        KeyCode::Char('d') => {
+            if !app.downloads.remove_selected() {
+                app.set_toast("stop it first (x), then it can be removed", Level::Info);
+            }
+        }
+        KeyCode::Char('c') => app.downloads.clear_finished(),
+        _ => {}
+    }
+    app.overlay = Overlay::Downloads;
+    vec![]
+}
+
 fn output_key(app: &mut App, mut o: OutputState, key: KeyEvent) -> Vec<Action> {
     let page = (app.size.1 as usize).saturating_sub(8).max(3);
     let max = app.output_rows.get().max(o.lines.len()).saturating_sub(1);
@@ -1842,6 +1896,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Vec<Action> {
         Overlay::Palette(p) => return palette_key(app, p, key),
         Overlay::Picker(p) => return crate::picker::picker_key(app, p, key),
         Overlay::Output(o) => return output_key(app, o, key),
+        Overlay::Downloads => return downloads_key(app, key),
         Overlay::Help => {
             if !matches!(
                 key.code,

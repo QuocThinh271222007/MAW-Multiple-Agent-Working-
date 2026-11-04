@@ -135,3 +135,46 @@ async fn server_errors_are_shown_to_the_user() {
         .unwrap_err();
     assert!(e.to_string().contains("file does not exist"), "{e}");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_server_too_old_for_the_model_is_told_apart_from_a_broken_download() {
+    let url = fake(
+        lines(vec![
+            json!({"error":"pull model manifest: 412: \nThe model you are attempting to pull requires a newer version of Ollama.\nPlease download the latest version at:\n"}),
+        ]),
+        vec![],
+    )
+    .await;
+    let (tx, _rx) = mpsc::channel(8);
+    let e = provider(&url, 6_500_000_000)
+        .pull_model("nemotron-3.5-bolt:e4b", tx)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("requires a newer version of Ollama"), "{e}");
+    assert!(e.contains("version t"), "names the running version: {e}");
+    assert!(e.contains("https://ollama.com/download"), "{e}");
+    assert!(!e.contains('\n'), "one line: {e:?}");
+    assert!(
+        !e.contains("pre-release build"),
+        "no pre-release advice for a plain 412: {e}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pre_release_model_says_so() {
+    let url = fake(
+        lines(vec![
+            json!({"error":"pull model manifest: 412: The model you are attempting to pull requires a newer version of Ollama that may be in pre-release. Please see https://github.com/ollama/ollama/releases"}),
+        ]),
+        vec![],
+    )
+    .await;
+    let (tx, _rx) = mpsc::channel(8);
+    let e = provider(&url, 6_500_000_000)
+        .pull_model("some-preview:7b", tx)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("pre-release build"), "{e}");
+}

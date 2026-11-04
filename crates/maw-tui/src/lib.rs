@@ -12,6 +12,7 @@
 pub mod app;
 pub mod canvas;
 pub mod canvas_input;
+pub mod downloads;
 pub mod events;
 pub mod flow;
 pub mod input;
