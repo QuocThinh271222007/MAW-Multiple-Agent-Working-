@@ -151,7 +151,7 @@ fn render_task_list(f: &mut Frame, area: Rect, app: &App, sel: Option<&Task>, fo
     f.render_widget(block, area);
     if order.is_empty() {
         f.render_widget(
-            Paragraph::new("No tasks yet. The Leader creates them once a goal is set.")
+            Paragraph::new("No tasks yet. Set an objective (G) and the Leader plans tasks for the workers, or press n to add one yourself.")
                 .style(t.dim()),
             inner,
         );

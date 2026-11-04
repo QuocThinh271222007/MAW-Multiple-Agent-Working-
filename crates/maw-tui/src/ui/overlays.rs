@@ -37,7 +37,18 @@ pub const HELP: &[(&str, &str)] = &[
         "/  or  :  or Ctrl+P",
         "Command palette (in agent detail '/' searches the transcript)",
     ),
-    ("G", "Set the objective (or redirect it when one is active)"),
+    (
+        "G  or  /goal set",
+        "Set the objective: the Leader plans it into tasks (redirects it when one is active)",
+    ),
+    (
+        "n (Tasks)  or  /task new",
+        "Add a task by hand to the current objective; leave 'Assign to' on any idle worker or pick one",
+    ),
+    (
+        "/performance /flow ...",
+        "Windows beside the conversation: /performance /flow /status /tokens (↑↓ scroll, Esc closes)",
+    ),
     ("a", "Add an agent (guided dialog)"),
     (
         "X",

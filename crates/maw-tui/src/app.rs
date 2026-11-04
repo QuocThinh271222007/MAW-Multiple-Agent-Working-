@@ -147,6 +147,13 @@ pub enum Action {
         force: bool,
     },
     ConnectAll,
+    /// Create a task as the user (it goes to the current goal).
+    CreateTask {
+        title: String,
+        description: String,
+        criteria: Vec<String>,
+        assignee: Option<String>,
+    },
     /// Reload model lists and reconnect agents that are down.
     Refresh,
     DisconnectAgent(AgentId),
@@ -203,6 +210,21 @@ pub enum SidePanel {
     Perf,
     Tokens,
     Status,
+    /// Live flow of work between the agents.
+    Flow,
+}
+
+/// How the agent view divides its width when a side window is open: the conversation's width, the
+/// window's width and whether the window sits beside it (otherwise it covers the conversation).
+/// One function for the renderer and for the text wrapping, so a line is never wrapped for a
+/// width it will not be drawn in.
+pub fn side_layout(total: u16, open: bool) -> (u16, u16, bool) {
+    let side_w = (total * 45 / 100).clamp(44, 72);
+    if open && total >= side_w + 56 {
+        (total - side_w, side_w, true)
+    } else {
+        (total, side_w, false)
+    }
 }
 
 /// One agent's turn clock: filled in while it works, summarised in `last` when it stops.
@@ -235,6 +257,8 @@ pub enum Cmd {
     PanelPerf,
     PanelTokens,
     PanelStatus,
+    PanelFlow,
+    TaskNew,
     Workspace,
     ToggleThinking,
     ToggleLogs,
@@ -287,6 +311,16 @@ pub const COMMANDS: &[CommandSpec] = &[
         cmd: Cmd::Workspace,
         name: "workspace",
         desc: "where agent worktrees are created: /workspace project | wsl | windows (without an argument: show)",
+    },
+    CommandSpec {
+        cmd: Cmd::PanelFlow,
+        name: "flow",
+        desc: "live flow of work between agents (who sends what to whom) in a window beside the conversation",
+    },
+    CommandSpec {
+        cmd: Cmd::TaskNew,
+        name: "task new",
+        desc: "create a task by hand for the current objective (n on the task board)",
     },
     CommandSpec {
         cmd: Cmd::PanelStatus,
@@ -657,6 +691,7 @@ pub enum DialogKind {
     VerifyTask { key: String },
     ReleaseTask { key: String },
     CancelTask { key: String },
+    NewTask,
 }
 
 #[derive(Clone, Debug)]
@@ -676,6 +711,23 @@ impl Dialog {
             fields: vec![
                 Field::text("Objective", true, "what should the team build?"),
                 Field::text("Success criteria", false, "separate with ';'"),
+            ],
+            focus: 0,
+            error: None,
+        }
+    }
+    /// A task made by hand. `workers` are the agents that can take it.
+    pub fn new_task(workers: &[String]) -> Dialog {
+        let mut choices: Vec<&str> = vec!["(any idle worker)"];
+        choices.extend(workers.iter().map(String::as_str));
+        Dialog {
+            title: "New task (added to the current objective)".into(),
+            kind: DialogKind::NewTask,
+            fields: vec![
+                Field::text("Title", true, "one outcome, e.g. Write bubble sort in C++"),
+                Field::text("Description", false, "what to do and where to put it"),
+                Field::text("Done when", false, "checks, separated by ';'"),
+                Field::select("Assign to", &choices, 0),
             ],
             focus: 0,
             error: None,
@@ -827,6 +879,16 @@ impl Dialog {
                     .filter(|s| !s.is_empty())
                     .collect(),
             },
+            DialogKind::NewTask => Action::CreateTask {
+                title: v(0),
+                description: v(1),
+                criteria: v(2)
+                    .split(';')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect(),
+                assignee: Some(v(3)).filter(|a| !a.starts_with('(')),
+            },
             DialogKind::RedirectGoal => Action::RedirectGoal {
                 text: v(0),
                 reason: v(1),
@@ -948,6 +1010,11 @@ pub struct App {
     pub footer_scroll: usize,
     /// The window open beside the conversation, if any.
     pub side: Option<SidePanel>,
+    /// How far the side window is scrolled, and the furthest it can go (set by the renderer).
+    pub side_scroll: usize,
+    pub side_max: Cell<usize>,
+    /// Columns the side window occupies on screen (set by the renderer), for the mouse wheel.
+    pub side_cols: Cell<(u16, u16)>,
     /// Per agent: the running turn's clock and token count (see `track_turns`).
     pub turn_marks: HashMap<AgentId, TurnMark>,
     /// Mouse events received so far. Zero after using the wheel means the terminal does not pass
@@ -1008,6 +1075,9 @@ impl App {
             mouse_seen: 0,
             turn_marks: HashMap::new(),
             side: None,
+            side_scroll: 0,
+            side_max: Cell::new(0),
+            side_cols: Cell::new((0, 0)),
             header_max: Cell::new(0),
             footer_max: Cell::new(0),
             now: Utc::now(),
@@ -1170,7 +1240,9 @@ impl App {
 
     /// Display lines of the selected agent's transcript (shared by rendering and search).
     pub fn transcript_lines(&self) -> Vec<crate::ui::agents::DisplayLine> {
-        let width = (self.size.0 as usize).saturating_sub(4).max(10);
+        // the width the conversation is really drawn in (narrower beside a side window)
+        let (tr_w, _, _) = side_layout(self.size.0, self.side.is_some());
+        let width = (tr_w as usize).saturating_sub(4).max(10);
         match self
             .selected_agent()
             .and_then(|a| self.transcripts.get(&a.id))
@@ -1295,6 +1367,23 @@ pub fn run_cmd(app: &mut App, cmd: Cmd) -> Vec<Action> {
             "worktrees: type /workspace project | wsl | windows in the message box (without an argument it shows the current one)",
             Level::Info,
         ),
+        Cmd::PanelFlow => open_panel(app, SidePanel::Flow, true),
+        Cmd::TaskNew => {
+            let workers: Vec<String> = app
+                .agents()
+                .iter()
+                .filter(|a| a.role.is_executor())
+                .map(|a| a.name.clone())
+                .collect();
+            if app.snap.as_ref().and_then(|s| s.goal.as_ref()).is_none() {
+                app.set_toast(
+                    "there is no objective yet: set one first (G, or /goal set), then add tasks",
+                    Level::Error,
+                );
+            } else {
+                app.overlay = Overlay::Dialog(Dialog::new_task(&workers));
+            }
+        }
         Cmd::PanelPerf => open_panel(app, SidePanel::Perf, true),
         Cmd::PanelTokens => open_panel(app, SidePanel::Tokens, true),
         Cmd::PanelStatus => open_panel(app, SidePanel::Status, true),
@@ -1516,6 +1605,26 @@ pub fn handle_mouse(app: &mut App, m: MouseEvent) -> Vec<Action> {
         } else {
             (*off + STEP).min(max)
         };
+        return vec![];
+    }
+    // wheel over the side window scrolls the window, not the conversation
+    if app.side.is_some() && app.view == View::AgentDetail {
+        let (x0, x1) = app.side_cols.get();
+        if x1 > x0 && m.column >= x0 && m.column < x1 {
+            let max = app.side_max.get();
+            match m.kind {
+                MouseEventKind::ScrollUp => app.side_scroll = app.side_scroll.saturating_sub(3),
+                MouseEventKind::ScrollDown => app.side_scroll = (app.side_scroll + 3).min(max),
+                _ => {}
+            }
+            return vec![];
+        }
+        // over the conversation it scrolls the conversation (the arrow keys now belong to the window)
+        match m.kind {
+            MouseEventKind::ScrollUp => app.detail_scroll += 3,
+            MouseEventKind::ScrollDown => app.detail_scroll = app.detail_scroll.saturating_sub(3),
+            _ => {}
+        }
         return vec![];
     }
     let code = match m.kind {
@@ -1793,10 +1902,12 @@ const WINDOW_ARGS: [&str; 3] = ["1m", "5m", "30m"];
 /// Open (or with `toggle`, close when already open) a side panel in the agent view. Outside the
 /// agent view the matching full view opens instead.
 fn open_panel(app: &mut App, panel: SidePanel, toggle: bool) {
+    app.side_scroll = 0;
     if app.view != View::AgentDetail {
         match panel {
             SidePanel::Perf => app.goto(View::Perf),
             SidePanel::Tokens => app.goto(View::Tokens),
+            SidePanel::Flow => app.goto(View::Flow),
             SidePanel::Status => {
                 if app.selected_agent().is_some() {
                     app.goto(View::AgentDetail);
@@ -1832,6 +1943,18 @@ fn composer_key(app: &mut App, key: &KeyEvent) -> Option<Vec<Action>> {
     let menu = composer_menu(app);
     match key.code {
         KeyCode::Tab => {
+            // after "/", Tab completes the highlighted command (like the other CLIs); a second
+            // Tab, or Tab on anything else, goes to browse mode
+            if app.composer.value().starts_with('/') {
+                if let Some(spec) = menu.get(app.composer_sel.min(menu.len().saturating_sub(1))) {
+                    let done = format!("/{} ", spec.name);
+                    if app.composer.value() != done {
+                        app.composer.set(&done);
+                        app.composer_sel = 0;
+                        return Some(vec![]);
+                    }
+                }
+            }
             app.composer_focus = false;
             Some(vec![])
         }
@@ -1842,6 +1965,7 @@ fn composer_key(app: &mut App, key: &KeyEvent) -> Option<Vec<Action>> {
         }
         KeyCode::Esc if app.side.is_some() => {
             app.side = None;
+            app.side_scroll = 0;
             Some(vec![])
         }
         KeyCode::Up if !menu.is_empty() => {
@@ -2022,6 +2146,33 @@ fn normal_key(app: &mut App, key: KeyEvent) -> Vec<Action> {
         }
     }
 
+    // a side window has the arrow keys while it is open (the conversation keeps PgUp/PgDn)
+    if app.view == View::AgentDetail && app.side.is_some() && app.search.is_none() {
+        let max = app.side_max.get();
+        let handled = match key.code {
+            KeyCode::Up => {
+                app.side_scroll = app.side_scroll.saturating_sub(1);
+                true
+            }
+            KeyCode::Down => {
+                app.side_scroll = (app.side_scroll + 1).min(max);
+                true
+            }
+            KeyCode::Home if !app.composer_focus => {
+                app.side_scroll = 0;
+                true
+            }
+            KeyCode::End if !app.composer_focus => {
+                app.side_scroll = max;
+                true
+            }
+            _ => false,
+        };
+        if handled {
+            return vec![];
+        }
+    }
+
     // keys that always work
     match key.code {
         KeyCode::Char('p') if ctrl => {
@@ -2048,6 +2199,7 @@ fn normal_key(app: &mut App, key: KeyEvent) -> Vec<Action> {
             return vec![];
         }
         KeyCode::Char('!') => return run_cmd(app, Cmd::Shell),
+        KeyCode::Char('n') if app.view == View::Tasks => return run_cmd(app, Cmd::TaskNew),
         KeyCode::Char('M') if in_agent_view => return run_cmd(app, Cmd::AgentModel),
         KeyCode::Char('X') if in_agent_view => return run_cmd(app, Cmd::AgentRemove),
         KeyCode::Char('T') if in_agent_view => return run_cmd(app, Cmd::ToggleThinking),
@@ -2057,6 +2209,7 @@ fn normal_key(app: &mut App, key: KeyEvent) -> Vec<Action> {
         KeyCode::Esc => {
             if app.side.is_some() {
                 app.side = None;
+                app.side_scroll = 0;
             } else if app.search.is_some() {
                 app.search = None;
             } else if app.view == View::AgentDetail {

@@ -371,11 +371,10 @@ pub fn render_agent_detail(f: &mut Frame, area: Rect, app: &App) {
     .split(area);
     // a window opened with /performance, /tokens or /status sits to the right of the
     // conversation when there is room, and covers it otherwise
-    let side_w = (parts[1].width * 45 / 100).clamp(44, 72);
-    let beside = app.side.is_some() && parts[1].width >= side_w + 56;
+    let (tr_w, side_w, beside) = crate::app::side_layout(parts[1].width, app.side.is_some());
     let tr = if beside {
         Rect {
-            width: parts[1].width - side_w,
+            width: tr_w,
             ..parts[1]
         }
     } else {
@@ -584,13 +583,51 @@ pub fn render_agent_detail(f: &mut Frame, area: Rect, app: &App) {
             parts[1]
         };
         f.render_widget(Clear, r);
+        app.side_cols.set((r.x, r.x + r.width));
+        app.side_max.set(0);
         match panel {
             SidePanel::Perf => super::perf_view::render_perf(f, r, app),
             SidePanel::Tokens => super::usage_view::render_tokens(f, r, app),
             SidePanel::Status => render_status(f, r, app, a),
+            SidePanel::Flow => super::flow_view::render_flow_panel(f, r, app),
         }
     }
     render_composer_menu(f, parts[1], app);
+}
+
+/// Draw `lines` (already wrapped to the width) in `inner`, scrolled by the side window's offset.
+/// Records the furthest offset so the keys and the wheel cannot run past the end.
+pub fn render_side_lines(f: &mut Frame, inner: Rect, app: &App, lines: Vec<Line<'static>>) {
+    let max = lines.len().saturating_sub(inner.height as usize);
+    app.side_max.set(max);
+    let off = app.side_scroll.min(max);
+    let more = if max > 0 {
+        format!(" {}/{}", off + 1, max + 1)
+    } else {
+        String::new()
+    };
+    let shown: Vec<Line<'static>> = lines
+        .into_iter()
+        .skip(off)
+        .take(inner.height as usize)
+        .collect();
+    f.render_widget(Paragraph::new(shown), inner);
+    if max > 0 && inner.width > 14 {
+        // a small position marker in the corner: there is more above or below
+        let mark = format!(
+            "{}{}{more}",
+            if off > 0 { "▲" } else { " " },
+            if off < max { "▼" } else { " " }
+        );
+        let w = mark.chars().count() as u16;
+        let r = Rect {
+            x: inner.x + inner.width - w.min(inner.width),
+            y: inner.y + inner.height.saturating_sub(1),
+            width: w.min(inner.width),
+            height: 1,
+        };
+        f.render_widget(Paragraph::new(Span::styled(mark, app.theme.dim())), r);
+    }
 }
 
 /// `/status`: the facts about the open agent in one place, like Claude Code's `/status`.
@@ -606,12 +643,19 @@ fn render_status(f: &mut Frame, area: Rect, app: &App, a: &Agent) {
     );
     let inner = block.inner(area);
     f.render_widget(block, area);
-    let w = (inner.width as usize).saturating_sub(12);
-    let row = |k: &str, v: String| {
-        Line::from(vec![
-            Span::styled(format!("{k:<11}"), t.dim()),
-            Span::raw(truncate(&v, w)),
-        ])
+    let w = (inner.width as usize).saturating_sub(12).max(8);
+    // long values wrap under the label instead of being cut off
+    let row = |k: &str, v: String| -> Vec<Line<'static>> {
+        wrap_text(&v, w)
+            .into_iter()
+            .enumerate()
+            .map(|(i, part)| {
+                Line::from(vec![
+                    Span::styled(format!("{:<11}", if i == 0 { k } else { "" }), t.dim()),
+                    Span::raw(part),
+                ])
+            })
+            .collect()
     };
     let none = || "—".to_string();
     let (turn, _) = turn_status(app, a);
@@ -629,12 +673,12 @@ fn render_status(f: &mut Frame, area: Rect, app: &App, a: &Agent) {
                 s.paused,
                 s.goal
                     .as_ref()
-                    .map(|g| format!("{} ({})", truncate(&g.text, 40), g.status.as_str()))
+                    .map(|g| format!("{} ({})", g.text, g.status.as_str()))
                     .unwrap_or_else(|| "no goal".into()),
             )
         })
         .unwrap_or_default();
-    let mut lines = vec![
+    let lines: Vec<Line<'static>> = [
         row("agent", format!("{} [{}]", a.name, role_tag(a.role))),
         row("provider", a.provider.to_string()),
         row("model", a.model.clone().unwrap_or_else(|| "default".into())),
@@ -674,16 +718,16 @@ fn render_status(f: &mut Frame, area: Rect, app: &App, a: &Agent) {
             "last error",
             a.last_error.clone().unwrap_or_else(|| "none".into()),
         ),
-        Line::from(""),
+        vec![Line::from("")],
         row("project", project),
         row("goal", goal),
         row(
             "scheduler",
             if paused { "paused" } else { "running" }.into(),
         ),
-    ];
-    lines.truncate(inner.height as usize);
-    f.render_widget(Paragraph::new(lines), inner);
+    ]
+    .concat();
+    render_side_lines(f, inner, app, lines);
 }
 
 pub fn task_status_counts(app: &App) -> Vec<(TaskStatus, usize)> {

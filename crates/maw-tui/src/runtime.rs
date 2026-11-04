@@ -485,6 +485,27 @@ async fn execute(
             on_engine!(e, e.create_goal(&text, criteria))?;
             Ok("objective set — the Leader will start planning".into())
         }
+        Action::CreateTask {
+            title,
+            description,
+            criteria,
+            assignee,
+        } => {
+            let nt = maw_orchestrator::tasks::NewTask {
+                title: title.clone(),
+                description,
+                acceptance_criteria: criteria,
+                assignee,
+                ..Default::default()
+            };
+            match on_engine!(e, e.create_task(&maw_orchestrator::Actor::User, nt)) {
+                Ok(t) => Ok(format!("task {} created: {}", t.key, t.title)),
+                Err(m) if m.contains("no active goal") => {
+                    Err("there is no active objective: set one first (G, or /goal set)".into())
+                }
+                Err(m) => Err(m),
+            }
+        }
         Action::RedirectGoal {
             text,
             reason,
@@ -737,7 +758,8 @@ async fn event_loop(engine: &Arc<Engine>, sup: &Arc<Supervisor>, opts: &TuiOptio
     let mut engine_open = true;
     let mut ui_rx = sup.ui_updates();
     let mut ui_open = true;
-    let mut clock = tokio::time::interval(Duration::from_secs(1));
+    // twice a second: the clock, the working line and the moving markers of /flow stay lively
+    let mut clock = tokio::time::interval(Duration::from_millis(500));
     clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let (msg_tx, mut msg_rx) = mpsc::channel::<UiMsg>(64);
     app.pull_suggestions = sup.pull_suggestions(ProviderKind::Ollama);

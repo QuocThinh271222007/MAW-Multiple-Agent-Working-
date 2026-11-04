@@ -225,3 +225,32 @@ A panel with no source shows "no data", never a zero. Charts turn yellow at 85% 
 `/workspace project|wsl|windows` in the message box changes where new agent worktrees are created while
 MAW runs (see `maw workspace` in the README for the meaning of each). Without an argument it reports the
 current choice. Not saved to the configuration file; `maw workspace <mode>` is.
+
+## Added: scrolling side windows, /flow, Tab completion, tasks by hand
+
+* **Scrolling.** While a side window is open, `Up`/`Down` (and `Home`/`End` in browse mode) scroll the
+  window and the mouse wheel scrolls whatever it is over: the window on the right, the conversation on
+  the left. The conversation keeps `PgUp`/`PgDn`. `/performance` pages through its charts the same way;
+  a small `▲▼ 3/12` marker shows there is more.
+* **Wrapping.** The conversation is wrapped to the width left beside a side window (it used to be wrapped
+  for the full screen, so the end of long lines hid under the window). Window values wrap under their
+  label, the token table switches to two lines per agent when narrow, and a long notice at the bottom
+  uses up to three rows instead of being cut.
+* **`/flow`** opens a live view beside the conversation: the agents and their state, the flows seen in the
+  last 45 s with a marker travelling from sender to receiver (`claude-lead ─▸▸●──▶ codex-backend`), what
+  each one is (ASSIGN, MESSAGE, RESULT, ...), and the most recent events. It refreshes twice a second.
+  The full graph is still `/view flow` (key `f`).
+* **Tab after `/`** types out the highlighted command (`/perf` Tab -> `/performance `); a second Tab goes
+  to browse mode.
+* **Tasks by hand.** `n` on the task board, or `/task new`: title, description, "done when" checks (`;`
+  separated) and who takes it ("(any idle worker)" or a named worker). It needs an objective first.
+
+## How the pieces fit
+
+1. **Objective (goal)**: the one sentence the whole team works toward, plus how to tell it is done. You
+   set it (`G`, or `/goal set`, or `maw run "..."`). The Leader may also create one when none is active.
+2. **Leader** turns it into a plan and **tasks** (small, checkable, with "done when" criteria and a worker).
+   You can add tasks yourself (`n`), but the Leader normally does.
+3. **Workers** take a task, work in their own git worktree and submit a result with evidence.
+4. The **Leader verifies** (or a Reviewer approves) - only then is the task DONE. When every task is done
+   the Leader completes the objective, and MAW merges the workers' branches into `maw/integration`.

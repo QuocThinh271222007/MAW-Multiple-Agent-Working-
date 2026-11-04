@@ -181,3 +181,12 @@ it connects while it has no work in flight (its leftover changes are committed o
 nothing is lost). In the TUI the same switch is `/workspace project|wsl|windows` (for that session; use
 the command above to make it permanent). Claude Code and Codex sessions are tied to a folder, so after a
 move they may start a fresh conversation (MAW says so).
+
+### Goal, tasks and the board in one minute
+
+You give the team an **objective** (`G` in the TUI, `/goal set`, or `maw run "..."`). The **Leader** agent
+plans it into **tasks** (the task board, key `t`); you can add one yourself with `n` or `/task new`.
+**Workers** do the tasks in their own worktrees and submit results; the Leader verifies them; verified
+tasks turn DONE and, when all are done, the objective completes. Watch it with `/flow` (live, beside the
+conversation), `/status`, `/performance` and `/tokens`. Without a Leader agent nothing plans for you:
+add one (`a`) before setting an objective.

@@ -2180,3 +2180,231 @@ fn workspace_command_switches_the_worktree_location() {
     assert_eq!(a.config.worktree_location, "windows");
     assert_eq!(a.view, View::AgentDetail);
 }
+
+// ---- side windows: scrolling, wrapping, /flow, Tab completion, tasks by hand
+
+fn open_agent_with_side(a: &mut App, cmd: &str) {
+    use crossterm::event::KeyCode;
+    a.selected_agent = 1;
+    a.goto(View::AgentDetail);
+    type_text(a, cmd);
+    press(a, KeyCode::Enter);
+}
+
+#[test]
+fn tab_after_a_slash_completes_the_command_and_a_second_tab_browses() {
+    use crossterm::event::KeyCode;
+    let mut a = app();
+    a.selected_agent = 1;
+    a.goto(View::AgentDetail);
+    type_text(&mut a, "/perf");
+    press(&mut a, KeyCode::Tab);
+    assert_eq!(
+        a.composer.value(),
+        "/performance ",
+        "the highlighted command is typed out"
+    );
+    assert!(a.composer_focus, "still typing");
+    press(&mut a, KeyCode::Tab);
+    assert!(!a.composer_focus, "a second Tab leaves for browse mode");
+    // Tab on plain text never completes anything
+    press(&mut a, KeyCode::Tab);
+    assert!(a.composer_focus);
+    a.composer.set("");
+    type_text(&mut a, "hello");
+    press(&mut a, KeyCode::Tab);
+    assert_eq!(a.composer.value(), "hello");
+    assert!(!a.composer_focus);
+}
+
+#[test]
+fn arrow_keys_and_the_wheel_scroll_the_side_window_not_the_conversation() {
+    use crossterm::event::{KeyCode, MouseEventKind::ScrollDown};
+    let mut a = app();
+    a.perf = perf_history(true);
+    open_agent_with_side(&mut a, "/performance");
+    let first = at(&mut a, View::AgentDetail, 160, 24);
+    assert!(
+        a.side_max.get() > 0,
+        "a short window cannot hold every chart"
+    );
+    for _ in 0..3 {
+        press(&mut a, KeyCode::Down);
+    }
+    assert_eq!(a.side_scroll, 3);
+    assert_eq!(a.detail_scroll, 0, "the conversation did not move");
+    let later = at(&mut a, View::AgentDetail, 160, 24);
+    assert_ne!(first, later, "different charts are shown after scrolling");
+    // the end is the end
+    for _ in 0..50 {
+        press(&mut a, KeyCode::Down);
+    }
+    assert_eq!(a.side_scroll, a.side_max.get());
+    press(&mut a, KeyCode::Up);
+    assert_eq!(a.side_scroll, a.side_max.get() - 1);
+
+    // the wheel scrolls whatever it is over: the window on the right, the conversation on the left
+    let (x0, _) = a.side_cols.get();
+    a.side_scroll = 0;
+    maw_tui::app::handle_mouse(
+        &mut a,
+        crossterm::event::MouseEvent {
+            kind: ScrollDown,
+            column: x0 + 3,
+            row: 8,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        },
+    );
+    assert_eq!(a.side_scroll, 3);
+    let before = a.detail_scroll;
+    maw_tui::app::handle_mouse(
+        &mut a,
+        crossterm::event::MouseEvent {
+            kind: ScrollDown,
+            column: 5,
+            row: 8,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        },
+    );
+    assert_eq!(a.side_scroll, 3, "the window stayed");
+    assert_eq!(
+        a.detail_scroll, before,
+        "no lines to scroll in this fixture, but never the window"
+    );
+}
+
+#[test]
+fn the_conversation_wraps_to_the_width_left_beside_a_side_window() {
+    use maw_orchestrator::{LineKind, TranscriptLine};
+    let mut a = app();
+    a.selected_agent = 1;
+    let id = a.agents()[1].id.clone();
+    let long = format!("{} ENDMARK", "word ".repeat(60));
+    a.transcripts.insert(
+        id,
+        vec![TranscriptLine {
+            at: chrono::Utc::now(),
+            kind: LineKind::Assistant,
+            text: long,
+            open: false,
+        }],
+    );
+    a.goto(View::AgentDetail);
+    let plain = at(&mut a, View::AgentDetail, 160, 30);
+    assert!(plain.contains("ENDMARK"));
+    open_agent_with_side(&mut a, "/status");
+    let beside = at(&mut a, View::AgentDetail, 160, 30);
+    assert!(beside.contains("STATUS"));
+    assert!(
+        beside.contains("ENDMARK"),
+        "the end of a long line is wrapped into view, not hidden under the window: {beside}"
+    );
+}
+
+#[test]
+fn status_values_wrap_instead_of_being_cut_and_the_window_scrolls() {
+    use crossterm::event::KeyCode;
+    let mut a = app();
+    a.selected_agent = 1;
+    let mut snap = a.snap.clone().unwrap();
+    snap.agents[1].workspace = Some(format!(
+        "/a/very/long/path/{}/end-of-path",
+        "segment".repeat(12)
+    ));
+    a.apply_snapshot(snap);
+    open_agent_with_side(&mut a, "/status");
+    let t = at(&mut a, View::AgentDetail, 160, 40);
+    assert!(
+        t.contains("end-of-path"),
+        "the path continues on the next row: {t}"
+    );
+    let _ = at(&mut a, View::AgentDetail, 160, 18);
+    assert!(a.side_max.get() > 0, "a short terminal needs scrolling");
+    for _ in 0..30 {
+        press(&mut a, KeyCode::Down);
+    }
+    assert!(
+        at(&mut a, View::AgentDetail, 160, 18).contains("scheduler"),
+        "the last row is reachable"
+    );
+}
+
+#[test]
+fn flow_window_shows_agents_what_is_moving_and_what_just_happened() {
+    let mut a = app();
+    open_agent_with_side(&mut a, "/flow");
+    assert_eq!(a.side, Some(maw_tui::app::SidePanel::Flow));
+    let t = at(&mut a, View::AgentDetail, 160, 48);
+    assert!(
+        t.contains("FLOW")
+            && t.contains("AGENTS")
+            && t.contains("MOVING NOW")
+            && t.contains("RECENT"),
+        "{t}"
+    );
+    assert!(t.contains("Transcript"), "the conversation stays beside it");
+    // the marker moves with the clock
+    let a1 = maw_tui::ui::flow_view::track(0, 8);
+    let a2 = maw_tui::ui::flow_view::track(3, 8);
+    assert_ne!(a1, a2);
+    assert!(a1.contains('●') && a1.ends_with('▶'));
+}
+
+#[test]
+fn a_long_notice_wraps_over_up_to_three_rows() {
+    let mut a = app();
+    a.set_toast(
+        format!(
+            "{} THE-END",
+            "this notice is much longer than the screen is wide and must not be cut off ".repeat(2)
+        ),
+        maw_tui::app::Level::Info,
+    );
+    let t = at(&mut a, View::Dashboard, 80, 24);
+    assert!(t.contains("THE-END"), "{t}");
+}
+
+#[test]
+fn tasks_can_be_created_by_hand_from_the_board_once_there_is_an_objective() {
+    use crossterm::event::KeyCode;
+    use maw_tui::app::{Action, DialogKind};
+    let mut a = app();
+    a.goto(View::Tasks);
+    press(&mut a, KeyCode::Char('n'));
+    assert!(
+        matches!(&a.overlay, Overlay::Dialog(d) if d.kind == DialogKind::NewTask),
+        "{:?}",
+        a.overlay
+    );
+    type_text(&mut a, "Write bubble sort in C++");
+    press(&mut a, KeyCode::Enter); // description
+    type_text(&mut a, "put it in bubble.cpp");
+    press(&mut a, KeyCode::Enter); // done when
+    type_text(&mut a, "it compiles; it sorts 5 numbers");
+    press(&mut a, KeyCode::Enter); // assign to
+    let acts = press(&mut a, KeyCode::Enter);
+    match acts.as_slice() {
+        [Action::CreateTask {
+            title,
+            description,
+            criteria,
+            assignee,
+        }] => {
+            assert_eq!(title, "Write bubble sort in C++");
+            assert_eq!(description, "put it in bubble.cpp");
+            assert_eq!(criteria.len(), 2);
+            assert_eq!(
+                *assignee, None,
+                "'(any idle worker)' leaves the choice to MAW"
+            );
+        }
+        o => panic!("{o:?}"),
+    }
+    // the same from the message box
+    let mut b = app();
+    b.selected_agent = 1;
+    b.goto(View::AgentDetail);
+    type_text(&mut b, "/task new");
+    press(&mut b, KeyCode::Enter);
+    assert!(matches!(&b.overlay, Overlay::Dialog(d) if d.kind == DialogKind::NewTask));
+}

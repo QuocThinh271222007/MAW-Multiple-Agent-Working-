@@ -62,7 +62,7 @@ pub fn render_goal_panel(f: &mut Frame, area: Rect, app: &App, focused: bool) {
     };
     let Some(goal) = &snap.goal else {
         f.render_widget(
-            Paragraph::new("No objective yet. Press G to set one.").style(t.warn()),
+            Paragraph::new("No objective yet. Press G (or type /goal set in an agent's message box) to set one: the Leader then plans it into tasks.").style(t.warn()),
             inner,
         );
         return;
@@ -166,7 +166,7 @@ pub fn goal_view_lines(app: &App, width: usize) -> Vec<Line<'static>> {
     let Some(snap) = &app.snap else { return l };
     let Some(goal) = &snap.goal else {
         l.push(Line::from(Span::styled(
-            "No objective yet. Press G to set one.",
+            "No objective yet. Press G (or type /goal set in an agent's message box) to set one: the Leader then plans it into tasks.",
             t.warn(),
         )));
         return l;

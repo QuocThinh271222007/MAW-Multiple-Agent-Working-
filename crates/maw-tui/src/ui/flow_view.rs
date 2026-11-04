@@ -478,3 +478,125 @@ pub fn render_flow_view(f: &mut Frame, area: Rect, app: &App) {
     let scroll = clamp_scroll(app.flow_scroll, lines.len(), inner.height as usize);
     f.render_widget(Paragraph::new(lines).scroll((scroll as u16, 0)), inner);
 }
+
+/// A short track with a moving marker: the "packet" travelling from sender to receiver. `phase`
+/// advances with the clock, and each flow starts at its own place so they do not move in step.
+pub fn track(phase: usize, len: usize) -> String {
+    let len = len.max(4);
+    let pos = phase % len;
+    (0..len)
+        .map(|i| {
+            if i == pos {
+                '●'
+            } else if (i + 1) % len == pos || (i + 2) % len == pos {
+                '▸'
+            } else {
+                '─'
+            }
+        })
+        .chain(std::iter::once('▶'))
+        .collect()
+}
+
+/// `/flow`: who is passing work to whom right now, as a live list for the side window. Flows seen
+/// in the last `ACTIVE_SECS` get a moving marker; below them the recent events in order.
+pub fn render_flow_panel(f: &mut Frame, area: Rect, app: &App) {
+    let t = &app.theme;
+    let g = graph_for(app);
+    let active: Vec<&crate::flow::FlowEdge> = g.edges.iter().filter(|e| e.active).collect();
+    let block = panel(
+        Line::from(Span::styled(
+            format!(
+                " FLOW · {} moving now · ↑↓ scroll · Esc closes ",
+                active.len()
+            ),
+            t.bold(),
+        )),
+        true,
+        t,
+    );
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    if inner.width < 12 || inner.height == 0 {
+        return;
+    }
+    let w = inner.width as usize;
+    // moves twice a second (the screen refreshes at that rate while this window is open)
+    let tick = (app.now.timestamp_millis().max(0) / 500) as usize;
+    let mut lines: Vec<Line<'static>> = vec![Line::from(Span::styled("AGENTS", t.bold()))];
+    for n in g.nodes.iter().filter(|n| n.id != ORCHESTRATOR) {
+        let (dot, st) = match n.state {
+            Some(s) => (crate::theme::state_dot(s), t.agent_state(s)),
+            None => ("●", t.dim()),
+        };
+        let what = match (n.role, n.state) {
+            (Some(r), Some(s)) => format!("  {} {}", r.as_str(), s),
+            (Some(r), None) => format!("  {}", r.as_str()),
+            (None, Some(s)) => format!("  {s}"),
+            (None, None) => String::new(),
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!("{dot} "), st),
+            Span::styled(n.label.clone(), t.bold()),
+            Span::styled(
+                truncate(&what, w.saturating_sub(n.label.chars().count() + 3)),
+                t.dim(),
+            ),
+        ]));
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::from(Span::styled("MOVING NOW", t.bold())));
+    if active.is_empty() {
+        lines.push(Line::from(Span::styled(
+            format!("  nothing in the last {ACTIVE_SECS} s"),
+            t.dim(),
+        )));
+    }
+    for (i, e) in active.iter().take(6).enumerate() {
+        lines.push(Line::from(vec![
+            Span::styled(g.label(&e.from), t.bold()),
+            Span::raw(" "),
+            Span::styled(
+                track(tick + i * 3 + (e.last_seq.max(0) as usize), 8),
+                t.accent(),
+            ),
+            Span::raw(" "),
+            Span::styled(g.label(&e.to), t.bold()),
+        ]));
+        let age = (app.now - e.last_at).num_seconds().max(0);
+        let detail = format!(
+            "  {} {} · ×{} · {age}s ago",
+            e.kind.label(),
+            e.detail,
+            e.count
+        );
+        for part in wrap_text(&detail, w.saturating_sub(1).max(8)) {
+            lines.push(Line::from(Span::styled(part, t.dim())));
+        }
+    }
+    if active.len() > 6 {
+        lines.push(Line::from(Span::styled(
+            format!("  + {} more flows (see /view flow)", active.len() - 6),
+            t.dim(),
+        )));
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::from(Span::styled("RECENT", t.bold())));
+    let name_of = |id: &str| app.agent_name(id);
+    let evs: Vec<_> = flow_events(app)
+        .iter()
+        .filter(|e| is_stream_worthy(e.event_type))
+        .collect();
+    for e in evs.iter().rev().take(14) {
+        let d = describe(e, &name_of);
+        let text = format!("{} {}", d.time, d.text);
+        let parts = wrap_text(&text, w.saturating_sub(1).max(8));
+        for (i, part) in parts.into_iter().enumerate() {
+            lines.push(Line::from(Span::styled(
+                if i == 0 { part } else { format!("   {part}") },
+                t.base(),
+            )));
+        }
+    }
+    super::agents::render_side_lines(f, inner, app, lines);
+}

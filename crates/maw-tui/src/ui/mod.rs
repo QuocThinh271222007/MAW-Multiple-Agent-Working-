@@ -41,7 +41,7 @@ pub fn render(f: &mut Frame, app: &App) {
     let rows = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(1),
-        Constraint::Length(1),
+        Constraint::Length(footer_rows(app, area.width)),
     ])
     .split(area);
     render_header(f, rows[0], app);
@@ -189,6 +189,20 @@ fn footer_hint(app: &App) -> &'static str {
     }
 }
 
+/// The notice line (toast) may need more than one row; it is wrapped, not cut off.
+fn footer_rows(app: &App, width: u16) -> u16 {
+    match app
+        .toast
+        .as_ref()
+        .filter(|x| (app.now - x.at).num_seconds() < 8)
+    {
+        Some(toast) => widgets::wrap_text(&format!(" {}", toast.text), width.max(1) as usize)
+            .len()
+            .clamp(1, 3) as u16,
+        None => 1,
+    }
+}
+
 fn render_footer(f: &mut Frame, area: Rect, app: &App) {
     let t = &app.theme;
     let w = area.width as usize;
@@ -202,13 +216,12 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
             Level::Ok => t.ok(),
             Level::Error => t.err(),
         };
-        f.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                truncate(&format!(" {}", toast.text), w),
-                st,
-            ))),
-            area,
-        );
+        let rows: Vec<Line> = widgets::wrap_text(&format!(" {}", toast.text), w.max(1))
+            .into_iter()
+            .take(area.height.max(1) as usize)
+            .map(|r| Line::from(Span::styled(r, st)))
+            .collect();
+        f.render_widget(Paragraph::new(rows), area);
     } else {
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(

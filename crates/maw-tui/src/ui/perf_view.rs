@@ -171,7 +171,7 @@ pub fn render_perf(f: &mut Frame, area: Rect, app: &App) {
                 if app.view == crate::app::View::Perf {
                     "w changes the window"
                 } else {
-                    "/performance 1m|5m|30m changes the window · Esc closes"
+                    "/performance 1m|5m|30m · ↑↓ more charts · Esc closes"
                 }
             ),
             t.bold(),
@@ -262,8 +262,22 @@ pub fn render_perf(f: &mut Frame, area: Rect, app: &App) {
         Line::from(mspans),
         Line::styled(format!("CPU/RAM: {sys} · GPU: {gpu_src}"), t.dim()),
     ];
-    let [top, rest] = Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).areas(inner);
-    f.render_widget(Paragraph::new(head), top);
+    // the header lines wrap in a narrow window instead of being cut at the edge
+    let head_w = (inner.width as usize).max(1);
+    let head_h = head
+        .iter()
+        .map(|l| l.width().max(1).div_ceil(head_w))
+        .sum::<usize>()
+        .clamp(3, 9) as u16;
+    let [top, rest] = Layout::vertical([
+        Constraint::Length(head_h.min(inner.height)),
+        Constraint::Min(0),
+    ])
+    .areas(inner);
+    f.render_widget(
+        Paragraph::new(head).wrap(ratatui::widgets::Wrap { trim: false }),
+        top,
+    );
 
     // charts, most useful for local models first
     let window = win as f64;
@@ -360,6 +374,17 @@ pub fn render_perf(f: &mut Frame, area: Rect, app: &App) {
         );
         return;
     }
+    // in a side window the charts that do not fit are reached with the arrow keys
+    let in_side = app.view != crate::app::View::Perf;
+    let max_first = specs.len().saturating_sub(cells);
+    let first = if in_side {
+        app.side_scroll.min(max_first)
+    } else {
+        0
+    };
+    if in_side {
+        app.side_max.set(max_first);
+    }
     let nrows = (cells as u16).div_ceil(cols);
     let row_areas =
         Layout::vertical(vec![Constraint::Ratio(1, nrows as u32); nrows as usize]).split(rest);
@@ -371,7 +396,7 @@ pub fn render_perf(f: &mut Frame, area: Rect, app: &App) {
             if idx >= cells {
                 break;
             }
-            chart(f, *c, app, window, &specs[idx]);
+            chart(f, *c, app, window, &specs[first + idx]);
             idx += 1;
         }
     }

@@ -7,6 +7,16 @@ use crate::usage::{derive_usage, fmt_cost, fmt_tokens, sparkline, SPARK_MINUTES}
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
+
+/// A line that owns its text (the side window keeps lines beyond the frame they were built in).
+fn own(l: Line<'_>) -> Line<'static> {
+    Line::from(
+        l.spans
+            .into_iter()
+            .map(|s| Span::styled(s.content.into_owned(), s.style))
+            .collect::<Vec<_>>(),
+    )
+}
 use ratatui::Frame;
 
 pub fn render_tokens(f: &mut Frame, area: Rect, app: &App) {
@@ -28,6 +38,7 @@ pub fn render_tokens(f: &mut Frame, area: Rect, app: &App) {
     let w = inner.width as usize;
     let r = derive_usage(&snap.agents, &snap.tasks, &app.usage_events, app.now);
 
+    let in_side = app.view != crate::app::View::Tokens;
     let mut lines: Vec<Line> = vec![];
     lines.push(Line::from(vec![
         Span::styled("Total ", t.dim()),
@@ -56,6 +67,70 @@ pub fn render_tokens(f: &mut Frame, area: Rect, app: &App) {
         ),
     ]));
     lines.push(Line::raw(""));
+
+    // a narrow window cannot hold the table: two short lines per agent instead
+    if w < 66 {
+        for row in &r.agents {
+            let n = |v: Option<u64>| v.map(fmt_tokens).unwrap_or_else(|| "—".into());
+            lines.push(Line::from(vec![
+                Span::styled(row.name.clone(), t.bold()),
+                Span::styled(
+                    format!("  {} {:>3.0}%", row.provider.as_str(), row.share * 100.0),
+                    t.dim(),
+                ),
+            ]));
+            let detail = if row.reported {
+                format!(
+                    "  in {} · out {} · total {}{}",
+                    n(row.input),
+                    n(row.output),
+                    n(row.total),
+                    row.rate_per_min
+                        .map(|r| format!(" · {}/min", fmt_tokens(r.round() as u64)))
+                        .unwrap_or_default()
+                )
+            } else {
+                "  no usage reported yet".to_string()
+            };
+            for part in wrap_text(&detail, w.max(10)) {
+                lines.push(Line::from(Span::styled(
+                    part,
+                    if row.reported { t.base() } else { t.dim() },
+                )));
+            }
+        }
+        if r.agents.is_empty() {
+            lines.push(Line::from(Span::styled("No agents yet.", t.dim())));
+        }
+        lines.push(Line::raw(""));
+        lines.push(Line::from(Span::styled("BY TASK", t.bold())));
+        for tk in r.tasks.iter().take(8) {
+            for part in wrap_text(
+                &format!("{} {} {}", tk.key, fmt_tokens(tk.tokens), tk.title),
+                w.max(10),
+            ) {
+                lines.push(Line::from(Span::styled(part, t.base())));
+            }
+        }
+        if r.tasks.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "  nothing attributed to a task yet",
+                t.dim(),
+            )));
+        }
+        lines.push(Line::raw(""));
+        for n in ["Figures are what the providers report, never estimated; they restart when a session is not resumed."] {
+            for part in wrap_text(n, w.max(10)) {
+                lines.push(Line::from(Span::styled(part, t.dim())));
+            }
+        }
+        if in_side {
+            super::agents::render_side_lines(f, inner, app, lines.into_iter().map(own).collect());
+        } else {
+            f.render_widget(Paragraph::new(lines), inner);
+        }
+        return;
+    }
 
     // columns by available width
     let show_model = w >= 108;
@@ -142,7 +217,11 @@ pub fn render_tokens(f: &mut Frame, area: Rect, app: &App) {
     // tasks that used the most tokens
     let used = lines.len();
     let notes_h = 4usize;
-    let room = (inner.height as usize).saturating_sub(used + notes_h + 2);
+    let room = if in_side {
+        9 // the window scrolls, so the list need not be cut to the height
+    } else {
+        (inner.height as usize).saturating_sub(used + notes_h + 2)
+    };
     if room >= 2 {
         lines.push(Line::raw(""));
         lines.push(Line::from(Span::styled(
@@ -186,7 +265,11 @@ pub fn render_tokens(f: &mut Frame, area: Rect, app: &App) {
         "TOK/MIN = tokens added in the last 5 minutes. Cost is Claude Code's client-side estimate; Codex reports tokens only.",
         "Provider quota or plan limits are not exposed by the providers, so none are shown.",
     ];
-    let height = inner.height as usize;
+    let height = if in_side {
+        usize::MAX / 4
+    } else {
+        inner.height as usize
+    };
     let mut shown = lines.len();
     if shown + 1 < height {
         lines.push(Line::raw(""));
@@ -200,5 +283,9 @@ pub fn render_tokens(f: &mut Frame, area: Rect, app: &App) {
             }
         }
     }
-    f.render_widget(Paragraph::new(lines), inner);
+    if in_side {
+        super::agents::render_side_lines(f, inner, app, lines.into_iter().map(own).collect());
+    } else {
+        f.render_widget(Paragraph::new(lines), inner);
+    }
 }
