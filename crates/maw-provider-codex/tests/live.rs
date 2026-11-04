@@ -45,6 +45,7 @@ fn cfg(cwd: PathBuf, mcp: Option<McpEndpoint>, permission: PermissionProfile) ->
             "You are a terse test agent inside MAW. Follow the user's instruction literally.".into(),
         env: Default::default(),
         resume_native_id: None,
+        extra_dirs: vec![],
         effort: None,
     }
 }
@@ -457,4 +458,51 @@ async fn live_denied_tool_call_never_reaches_the_server() {
         "a denied call must not execute"
     );
     session.shutdown().await.unwrap();
+}
+
+/// The folder a user allows (`maw workspace allow`) must be writable by Codex's sandbox, while a folder
+/// that was not allowed must not be, even when the agent asks for more (we deny every escalation).
+/// Needs `MAW_LIVE_EXTRA_DIR`: an empty folder outside the worktree, e.g. on the Windows drive.
+#[tokio::test]
+#[ignore = "live: needs an authenticated codex CLI and spends quota; set MAW_LIVE_CODEX=1 and MAW_LIVE_EXTRA_DIR"]
+async fn live_an_allowed_folder_is_writable_and_a_foreign_one_is_not() {
+    if !enabled() {
+        eprintln!("MAW_LIVE_CODEX!=1; skipping");
+        return;
+    }
+    let Some(extra) = std::env::var("MAW_LIVE_EXTRA_DIR").ok().map(PathBuf::from) else {
+        eprintln!("MAW_LIVE_EXTRA_DIR not set; skipping");
+        return;
+    };
+    let work = tempfile::tempdir().unwrap();
+    let target = extra.join("moved.txt");
+    let _ = std::fs::remove_file(&target);
+    let prompt = format!(
+        "Run exactly this shell command and nothing else, then say done: echo hello > '{}'",
+        target.display()
+    );
+    let mut outcomes = vec![];
+    for allowed in [false, true] {
+        let _ = std::fs::remove_file(&target);
+        let mut c = cfg(work.path().to_path_buf(), None, PermissionProfile::Balanced);
+        if allowed {
+            c.extra_dirs = vec![extra.clone()];
+        }
+        let p = provider();
+        let (s, mut rx) = p.start_session(c).await.expect("session");
+        let _ = run_turn_deciding(&mut rx, &s, &prompt, ApprovalDecision::Deny).await;
+        let made = target.exists();
+        eprintln!("[live] folder allowed={allowed}: file created = {made}");
+        outcomes.push(made);
+        s.shutdown().await.unwrap();
+    }
+    let _ = std::fs::remove_file(&target);
+    assert!(
+        outcomes[1],
+        "the allowed folder was not writable: {outcomes:?}"
+    );
+    assert!(
+        !outcomes[0],
+        "a folder that was not allowed was written: {outcomes:?}"
+    );
 }

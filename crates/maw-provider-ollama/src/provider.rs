@@ -23,6 +23,15 @@ pub struct OllamaProvider {
     speed: crate::session::SpeedCell,
 }
 
+/// 262144 -> "256K".
+fn fmt_ctx(c: u64) -> String {
+    if c >= 1024 {
+        format!("{}K", c / 1024)
+    } else {
+        c.to_string()
+    }
+}
+
 fn fmt_bytes(b: u64) -> String {
     format!("{:.1} GB", b as f64 / 1_073_741_824.0)
 }
@@ -189,9 +198,7 @@ impl OllamaProvider {
 const PREAMBLE: &str = "You are a coding agent running on a local model, working in a git worktree. \
 Use the tools to inspect and change files and to run commands; do not paste code for the user to apply. \
 Take small steps, read a file before editing it, and run the project's tests when you can. \
-Call the maw_* tools exactly as your role instructions say, with the arguments they require; \
-when your task is finished, report it with the maw tool for that, then stop. \
-If the user only asks a question or greets you, just answer in plain text without any tool.";
+Your role instructions below say how input reaches you and how to coordinate through the maw_* tools.";
 
 #[async_trait]
 impl AgentProvider for OllamaProvider {
@@ -371,13 +378,27 @@ impl AgentProvider for OllamaProvider {
             } else {
                 " · NO tool support: cannot run as an agent".into()
             };
+            // who makes it and what the model itself allows, as the server reports it
+            let maker = catalog::maker_of(name, info.family.as_deref().unwrap_or(""))
+                .map(|m| format!(" · by {m}"))
+                .unwrap_or_default();
+            let ctx = info
+                .context_length
+                .map(|c| format!(" · max context {}", fmt_ctx(c)))
+                .unwrap_or_default();
+            let efforts = api::efforts_for(name, &info);
+            let effort = if efforts.iter().all(|e| e == crate::api::NO_EFFORT) {
+                " · no effort levels".to_string()
+            } else {
+                format!(" · effort {}", efforts.join("/"))
+            };
             out.push(ModelChoice {
                 id: name.to_string(),
                 display_name: name.to_string(),
-                description: format!("{}{}", bits.join(" "), tail),
+                description: format!("{}{}{}{}{}", bits.join(" "), maker, tail, ctx, effort),
                 is_default: false,
                 source: "provider".into(),
-                reasoning_efforts: api::efforts_for(name, &info),
+                reasoning_efforts: efforts,
             });
         }
         Ok(out)
@@ -466,7 +487,8 @@ impl AgentProvider for OllamaProvider {
             None => None,
         };
         let tools = LocalTools::new(&cfg.cwd, cfg.permission, self.cfg.command_timeout)
-            .map_err(|e| ProviderError::Io(format!("workspace {}: {e}", cfg.cwd.display())))?;
+            .map_err(|e| ProviderError::Io(format!("workspace {}: {e}", cfg.cwd.display())))?
+            .with_extra_dirs(&cfg.extra_dirs);
         let system = format!(
             "{PREAMBLE}\n\nWorkspace: {}\n\n{}",
             tools.root().display(),

@@ -315,6 +315,8 @@ pub struct Supervisor {
     reminded: Mutex<HashSet<TaskId>>,
     review_dispatched: Mutex<HashMap<TaskId, u32>>,
     briefed: Mutex<HashSet<AgentId>>,
+    /// Folders outside the worktrees that executors may also write to (set from the configuration).
+    extra_dirs: RwLock<Vec<PathBuf>>,
     /// Folders for agent worktrees on the WSL and Windows sides; which one is used follows
     /// `OrchestratorConfig::worktree_location`. The reason is kept when a side is unavailable.
     worktree_bases: RwLock<WorktreeBases>,
@@ -348,6 +350,7 @@ impl Supervisor {
             shown: Mutex::new(HashSet::new()),
             refresh_seen: Mutex::new(None),
             worktree_bases: RwLock::new(WorktreeBases::default()),
+            extra_dirs: RwLock::new(Vec::new()),
             user_stopped: Mutex::new(HashSet::new()),
             reconnecting: Mutex::new(HashSet::new()),
             nudges: Mutex::new(HashMap::new()),
@@ -464,6 +467,14 @@ impl Supervisor {
                 )),
             ),
             None => (default, None), // not configured (tests, headless without bases)
+        }
+    }
+
+    /// The folders the user allowed agents to write to besides their worktree. The caller has
+    /// already normalised and checked them; applies the next time an agent connects.
+    pub fn set_extra_dirs(&self, dirs: Vec<PathBuf>) {
+        if let Ok(mut d) = self.extra_dirs.write() {
+            *d = dirs;
         }
     }
 
@@ -646,6 +657,14 @@ impl Supervisor {
             instructions: prompts::role_instructions(agent.role, &agent.name),
             env: HashMap::new(),
             resume_native_id: agent.native_session_id.clone(),
+            extra_dirs: if agent.role.is_executor() {
+                self.extra_dirs
+                    .read()
+                    .map(|d| d.clone())
+                    .unwrap_or_default()
+            } else {
+                vec![]
+            },
         };
         let (handle, rx) = match provider.start_session(cfg).await {
             Ok(x) => x,
@@ -2002,7 +2021,7 @@ impl Supervisor {
                 .map(|a| (a.id.clone(), a.name.clone()))
                 .collect();
             let name_of = |id: &AgentId| names.get(id).cloned().unwrap_or_else(|| id.0.clone());
-            let prompt = prompts::messages_prompt(agent.role, &msgs, &name_of);
+            let prompt = prompts::messages_prompt(&msgs, &name_of);
             for m in &msgs {
                 let _ = self.engine.mark_delivered(m);
             }

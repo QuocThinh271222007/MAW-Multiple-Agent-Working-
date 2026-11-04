@@ -82,6 +82,7 @@ async fn live_small_model_as_a_maw_worker() {
         instructions: prompts::role_instructions(Role::Worker, "worker1"),
         env: Default::default(),
         resume_native_id: None,
+        extra_dirs: vec![],
     };
     let (s, mut rx) = p.start_session(cfg).await.expect("session");
     s.send_input(AgentInput::text(prompt)).await.unwrap();

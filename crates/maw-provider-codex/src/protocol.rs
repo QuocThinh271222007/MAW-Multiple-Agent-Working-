@@ -78,6 +78,14 @@ pub fn thread_params(
     if let Some(s) = reasoning_summary.filter(|s| !s.is_empty()) {
         config.insert("model_reasoning_summary".into(), json!(s));
     }
+    // folders the user allowed besides the worktree: the sandbox may write there too. Not for the
+    // read-only profile, which writes nowhere.
+    if !cfg.extra_dirs.is_empty() && sandbox_mode(cfg.permission) == "workspace-write" {
+        config.insert(
+            "sandbox_workspace_write".into(),
+            json!({ "writable_roots": cfg.extra_dirs.iter().map(|d| d.to_string_lossy()).collect::<Vec<_>>() }),
+        );
+    }
     if !config.is_empty() {
         p["config"] = Value::Object(config);
     }
@@ -873,5 +881,46 @@ mod reasoning_tests {
         );
         // what the live probe showed for the tested models: nothing readable
         assert!(done(json!({"type":"reasoning","id":"r3","summary":[],"content":[]})).is_empty());
+    }
+
+    #[test]
+    fn allowed_folders_become_writable_roots_of_the_workspace_sandbox_only() {
+        let mk = |p: PermissionProfile, dirs: Vec<std::path::PathBuf>| SessionConfig {
+            agent_id: maw_core::ids::AgentId::from("agt_x"),
+            name: "c".into(),
+            role: maw_core::agent::Role::Worker,
+            cwd: std::path::PathBuf::from("/work/wt"),
+            model: None,
+            effort: None,
+            permission: p,
+            mcp: None,
+            instructions: String::new(),
+            env: Default::default(),
+            resume_native_id: None,
+            extra_dirs: dirs,
+        };
+        let dirs = vec![std::path::PathBuf::from("/mnt/c/Users/me/download")];
+        let v = thread_params(
+            &mk(PermissionProfile::Balanced, dirs.clone()),
+            false,
+            false,
+            None,
+        );
+        assert_eq!(
+            v["config"]["sandbox_workspace_write"]["writable_roots"],
+            json!(["/mnt/c/Users/me/download"])
+        );
+        assert_eq!(v["sandbox"], "workspace-write", "still not full access");
+        // read-only writes nowhere; no folders, no setting
+        assert!(
+            thread_params(&mk(PermissionProfile::Safe, dirs), false, false, None)
+                .get("config")
+                .is_none()
+        );
+        assert!(
+            thread_params(&mk(PermissionProfile::Balanced, vec![]), false, false, None)
+                .get("config")
+                .is_none()
+        );
     }
 }

@@ -73,8 +73,11 @@ enum Cmd {
     Refresh,
     /// Where agent worktrees live: project (next to the code), wsl (Linux disk, fast git) or windows
     Workspace {
-        /// project | wsl | windows (without it: show the current choice)
+        /// project | wsl | windows (without it: show the current choice); or `allow` / `deny` to
+        /// let agents also write to a folder outside their worktree (give the folder next)
         mode: Option<String>,
+        /// The folder for `allow` / `deny`, e.g. /mnt/c/Users/me/download or C:/Users/me/download
+        dir: Option<String>,
     },
     /// Continue an existing goal headlessly (recovers interrupted work conservatively)
     Resume {
@@ -391,7 +394,9 @@ async fn real_main(cli: Cli) -> Result<()> {
             Ok(())
         }
         Some(Cmd::Refresh) => cmd_refresh(&ctx, project_arg.as_deref()).await,
-        Some(Cmd::Workspace { mode }) => cmd_workspace(&ctx, project_arg.as_deref(), mode),
+        Some(Cmd::Workspace { mode, dir }) => {
+            cmd_workspace(&ctx, project_arg.as_deref(), mode, dir)
+        }
         Some(Cmd::Stop) => {
             let p = resolve_project(&ctx, project_arg.as_deref(), false)?;
             let eng = open_utility_engine(&ctx, &p)?;
@@ -1617,8 +1622,51 @@ async fn cmd_refresh(ctx: &Ctx, project_arg: Option<&str>) -> Result<()> {
 }
 
 /// `maw workspace [project|wsl|windows]`: show or change where agent worktrees are created.
-fn cmd_workspace(ctx: &Ctx, project_arg: Option<&str>, mode: Option<String>) -> Result<()> {
+fn cmd_workspace(
+    ctx: &Ctx,
+    project_arg: Option<&str>,
+    mode: Option<String>,
+    dir: Option<String>,
+) -> Result<()> {
     let p = resolve_project(ctx, project_arg, false)?;
+    // allow / deny: the folders agents may write to besides their worktree
+    if let Some(verb) = mode.as_deref().map(str::to_lowercase) {
+        if verb == "allow" || verb == "deny" {
+            let Some(raw) = dir else {
+                bail!("give the folder: maw workspace {verb} <folder>");
+            };
+            let norm = platform::normalize_user_path(&raw, ctx.os);
+            let mut cfg = ctx.cfg.clone();
+            if verb == "allow" {
+                let home = std::env::var_os("HOME").map(PathBuf::from);
+                let real =
+                    app::check_extra_dir(&norm, home.as_deref()).map_err(|e| anyhow::anyhow!(e))?;
+                let s = real.to_string_lossy().to_string();
+                if !cfg.orchestrator.extra_dirs.contains(&s) {
+                    cfg.orchestrator.extra_dirs.push(s.clone());
+                }
+                cfg.save(&ctx.dirs)?;
+                println!("Agents that do work (Workers, Specialists) may now also write to {s}.");
+                println!("It applies the next time each agent connects (restart MAW or /refresh after stopping the agent). Claude Code gets --add-dir, Codex gets it as a writable root of its sandbox, local models write there after you approve.");
+            } else {
+                let want = std::fs::canonicalize(&norm).unwrap_or(norm.clone());
+                let before = cfg.orchestrator.extra_dirs.len();
+                cfg.orchestrator.extra_dirs.retain(|d| {
+                    let d = platform::normalize_user_path(d, ctx.os);
+                    d != norm && std::fs::canonicalize(&d).map(|c| c != want).unwrap_or(true)
+                });
+                if cfg.orchestrator.extra_dirs.len() == before {
+                    bail!("{} is not in the list of allowed folders", norm.display());
+                }
+                cfg.save(&ctx.dirs)?;
+                println!(
+                    "{} is no longer allowed (applies the next time each agent connects).",
+                    norm.display()
+                );
+            }
+            return Ok(());
+        }
+    }
     let (wsl, windows) = app::worktree_bases(ctx, &p);
     let describe = |r: &Result<PathBuf, String>| match r {
         Ok(d) => d.display().to_string(),
@@ -1655,5 +1703,17 @@ fn cmd_workspace(ctx: &Ctx, project_arg: Option<&str>, mode: Option<String>) -> 
     println!("  wsl      {}", describe(&wsl));
     println!("  windows  {}", describe(&windows));
     println!("Saved choice: {shown} (set with `maw workspace <project|wsl|windows>`)");
+    let (allowed, refused) = app::allowed_extra_dirs(ctx);
+    if allowed.is_empty() && refused.is_empty() {
+        println!("Folders agents may also write to: none (add one with `maw workspace allow <folder>`; only you can).");
+    } else {
+        println!("Folders agents may also write to:");
+        for d in &allowed {
+            println!("  {}", d.display());
+        }
+        for why in &refused {
+            println!("  (ignored) {why}");
+        }
+    }
     Ok(())
 }

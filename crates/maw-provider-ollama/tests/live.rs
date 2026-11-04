@@ -32,6 +32,7 @@ async fn live_model_creates_a_file_with_its_tools() {
         instructions: "Be brief.".into(),
         env: Default::default(),
         resume_native_id: None,
+        extra_dirs: vec![],
     };
     let (s, mut rx) = p.start_session(cfg).await.expect("session");
     s.send_input(AgentInput::text(

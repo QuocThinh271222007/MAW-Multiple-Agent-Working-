@@ -153,6 +153,10 @@ pub fn build_args(cfg: &SessionConfig, session: &SessionArg) -> Vec<String> {
     // `=` form: these flags are variadic and would otherwise swallow following arguments.
     a.push(format!("--allowedTools={}", perms.allow.join(",")));
     a.push(format!("--disallowedTools={}", perms.deny.join(",")));
+    // folders the user allowed besides the working directory (`=` form: the flag is variadic)
+    for d in &cfg.extra_dirs {
+        a.push(format!("--add-dir={}", d.display()));
+    }
     if let Some(mcp) = &cfg.mcp {
         a.push("--strict-mcp-config".into());
         a.push(format!("--mcp-config={}", mcp_config_json(&mcp.url)));
@@ -213,6 +217,7 @@ mod tests {
             instructions: "be useful".into(),
             env: HashMap::new(),
             resume_native_id: None,
+            extra_dirs: vec![],
             effort: None,
         }
     }
@@ -330,5 +335,27 @@ mod tests {
         assert!(!build_args(&c, &SessionArg::New("s".into())).contains(&"--effort".to_string()));
         c.effort = Some("  ".into());
         assert!(!build_args(&c, &SessionArg::New("s".into())).contains(&"--effort".to_string()));
+    }
+
+    #[test]
+    fn folders_the_user_allowed_become_add_dir_and_nothing_else_does() {
+        let mut c = cfg(PermissionProfile::Balanced);
+        let none = build_args(
+            &c,
+            &SessionArg::New("11111111-1111-4111-8111-111111111111".into()),
+        );
+        assert!(none.iter().all(|a| !a.starts_with("--add-dir")), "{none:?}");
+        c.extra_dirs = vec![
+            PathBuf::from("/mnt/c/Users/me/download"),
+            PathBuf::from("/data/out"),
+        ];
+        let a = build_args(
+            &c,
+            &SessionArg::New("11111111-1111-4111-8111-111111111111".into()),
+        );
+        assert!(a.contains(&"--add-dir=/mnt/c/Users/me/download".to_string()));
+        assert!(a.contains(&"--add-dir=/data/out".to_string()));
+        // never a bypass flag
+        assert!(a.iter().all(|x| !x.contains("dangerously")));
     }
 }

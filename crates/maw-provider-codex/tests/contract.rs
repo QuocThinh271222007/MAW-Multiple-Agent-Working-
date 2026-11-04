@@ -58,6 +58,7 @@ fn session_cfg(fx: &Fx) -> SessionConfig {
         instructions: "You are a test worker.".into(),
         env,
         resume_native_id: None,
+        extra_dirs: vec![],
         effort: None,
     }
 }
@@ -510,6 +511,7 @@ async fn missing_binary_is_reported_cleanly() {
             instructions: String::new(),
             env: Default::default(),
             resume_native_id: None,
+            extra_dirs: vec![],
             effort: None,
         })
         .await

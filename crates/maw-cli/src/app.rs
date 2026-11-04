@@ -107,6 +107,82 @@ pub fn worktree_bases(
     (wsl, windows)
 }
 
+/// Whether `path` may be offered to agents as a place they can write besides their worktree. The
+/// check is on the real path (symlinks resolved). Disks, system folders, the home folder itself and
+/// credential folders are refused: the list is meant for a download or output folder, not for
+/// handing over the machine.
+pub fn check_extra_dir(path: &Path, home: Option<&Path>) -> Result<PathBuf, String> {
+    let real = std::fs::canonicalize(path)
+        .map_err(|e| format!("{} cannot be used: {e}", path.display()))?;
+    if !real.is_dir() {
+        return Err(format!("{} is not a folder", real.display()));
+    }
+    let comps: Vec<String> = real
+        .components()
+        .filter_map(|c| match c {
+            std::path::Component::Normal(x) => Some(x.to_string_lossy().to_string()),
+            _ => None,
+        })
+        .collect();
+    let first = comps.first().map(String::as_str).unwrap_or("");
+    let refuse = |why: &str| Err(format!("{} is refused: {why}", real.display()));
+    if comps.is_empty() {
+        return refuse("that is the whole disk");
+    }
+    if first == "mnt" && comps.len() <= 2 {
+        return refuse("that is a whole drive or the drives folder; pick a folder inside it");
+    }
+    if let Some(h) = home.and_then(|h| std::fs::canonicalize(h).ok()) {
+        if real == h || h.starts_with(&real) {
+            return refuse(
+                "that is your home folder (or a folder that contains it); pick a subfolder",
+            );
+        }
+    }
+    const SYSTEM: &[&str] = &[
+        "etc", "usr", "bin", "sbin", "lib", "lib32", "lib64", "boot", "dev", "proc", "sys", "root",
+        "var", "run", "home",
+    ];
+    if SYSTEM.contains(&first) && !(first == "home" && comps.len() >= 3) {
+        return refuse("that is a system folder");
+    }
+    if first == "mnt" && comps.len() >= 3 {
+        let top = comps[2].to_lowercase();
+        if [
+            "windows",
+            "program files",
+            "program files (x86)",
+            "programdata",
+            "$recycle.bin",
+        ]
+        .contains(&top.as_str())
+        {
+            return refuse("that is a Windows system folder");
+        }
+    }
+    if comps
+        .iter()
+        .any(|c| matches!(c.as_str(), ".ssh" | ".gnupg" | ".aws" | ".kube"))
+    {
+        return refuse("that holds credentials");
+    }
+    Ok(real)
+}
+
+/// The folders from `orchestrator.extra_dirs` that pass `check_extra_dir`, and why the others do not.
+pub fn allowed_extra_dirs(ctx: &Ctx) -> (Vec<PathBuf>, Vec<String>) {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let (mut ok, mut bad) = (vec![], vec![]);
+    for raw in &ctx.cfg.orchestrator.extra_dirs {
+        match check_extra_dir(&platform::normalize_user_path(raw, ctx.os), home.as_deref()) {
+            Ok(p) if !ok.contains(&p) => ok.push(p),
+            Ok(_) => {}
+            Err(e) => bad.push(e),
+        }
+    }
+    (ok, bad)
+}
+
 pub fn open_store(ctx: &Ctx, p: &ProjectRef) -> Result<Arc<Store>> {
     std::fs::create_dir_all(ctx.dirs.project_dir(&p.name))?;
     Ok(Arc::new(
@@ -173,6 +249,11 @@ pub async fn boot(
     let sup = Supervisor::new(engine.clone());
     let (wsl_base, windows_base) = worktree_bases(ctx, p);
     sup.set_worktree_bases(wsl_base, windows_base);
+    let (dirs, problems) = allowed_extra_dirs(ctx);
+    for why in problems {
+        tracing::warn!("ignoring an entry of orchestrator.extra_dirs: {why}");
+    }
+    sup.set_extra_dirs(dirs);
     match providers {
         Providers::Real => {
             let state = ctx.dirs.project_dir(&p.name).join("ollama-sessions");
@@ -243,4 +324,37 @@ pub fn read_runtime_info(ctx: &Ctx, p: &ProjectRef) -> Option<serde_json::Value>
 
 pub fn is_git_repo(path: &Path) -> bool {
     maw_orchestrator::workspace::is_git_repo(path)
+}
+
+#[cfg(test)]
+mod extra_dir_tests {
+    use super::*;
+
+    #[test]
+    fn only_a_real_output_folder_can_be_offered_to_agents() {
+        let home = tempfile::tempdir().unwrap();
+        let ok = home.path().join("download");
+        std::fs::create_dir(&ok).unwrap();
+        assert!(check_extra_dir(&ok, Some(home.path())).is_ok());
+        // refused: the disk, system folders, the home folder, credentials, plain files, missing paths
+        for bad in ["/", "/etc", "/usr/bin", "/proc", "/root"] {
+            let e = check_extra_dir(Path::new(bad), Some(home.path()));
+            assert!(e.is_err(), "{bad} should be refused");
+        }
+        assert!(
+            check_extra_dir(home.path(), Some(home.path())).is_err(),
+            "the home folder itself"
+        );
+        let ssh = home.path().join(".ssh");
+        std::fs::create_dir(&ssh).unwrap();
+        assert!(check_extra_dir(&ssh, Some(home.path()))
+            .unwrap_err()
+            .contains("credentials"));
+        let file = home.path().join("f.txt");
+        std::fs::write(&file, "x").unwrap();
+        assert!(check_extra_dir(&file, Some(home.path())).is_err());
+        assert!(check_extra_dir(&home.path().join("missing"), Some(home.path())).is_err());
+        // a folder that contains the home folder is as bad as the home folder
+        assert!(check_extra_dir(home.path().parent().unwrap(), Some(home.path())).is_err());
+    }
 }

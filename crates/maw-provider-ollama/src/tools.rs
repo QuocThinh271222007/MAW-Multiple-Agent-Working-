@@ -127,6 +127,9 @@ pub struct CommandResult {
 #[derive(Clone)]
 pub struct LocalTools {
     root: PathBuf,
+    /// Folders outside the workspace the user allowed (canonical). Reads and writes are possible
+    /// there; a write always asks first unless the profile is autonomous.
+    extra: Vec<PathBuf>,
     profile: PermissionProfile,
     command_timeout: Duration,
 }
@@ -238,9 +241,28 @@ impl LocalTools {
     ) -> std::io::Result<Self> {
         Ok(LocalTools {
             root: root.canonicalize()?,
+            extra: vec![],
             profile,
             command_timeout,
         })
+    }
+
+    /// Also allow the folders the user allowed (those that do not exist are ignored).
+    pub fn with_extra_dirs(mut self, dirs: &[PathBuf]) -> Self {
+        self.extra = dirs.iter().filter_map(|d| d.canonicalize().ok()).collect();
+        self
+    }
+
+    /// The allowed folder (workspace or extra) that contains `p`.
+    fn base_of(&self, p: &Path) -> Option<&Path> {
+        if p.starts_with(&self.root) {
+            Some(&self.root)
+        } else {
+            self.extra
+                .iter()
+                .find(|e| p.starts_with(e))
+                .map(|e| e.as_path())
+        }
     }
 
     pub fn root(&self) -> &Path {
@@ -286,8 +308,15 @@ impl LocalTools {
         let mut real = probe
             .canonicalize()
             .map_err(|e| format!("cannot resolve '{raw}': {e}"))?;
-        if !real.starts_with(&self.root) {
-            return Err(format!("'{raw}' is outside the workspace"));
+        if self.base_of(&real).is_none() {
+            return Err(format!(
+                "'{raw}' is outside the workspace{}",
+                if self.extra.is_empty() {
+                    String::new()
+                } else {
+                    " and the folders you allowed".to_string()
+                }
+            ));
         }
         for t in tail.into_iter().rev() {
             real.push(t);
@@ -304,7 +333,10 @@ impl LocalTools {
 
     fn writable(&self, raw: &str) -> Result<PathBuf, String> {
         let p = self.resolve(raw)?;
-        let rel = p.strip_prefix(&self.root).unwrap_or(&p);
+        let rel = self
+            .base_of(&p)
+            .and_then(|b| p.strip_prefix(b).ok())
+            .unwrap_or(&p);
         if rel.components().any(|c| c.as_os_str() == ".git") {
             return Err(
                 "the .git directory is managed by git and MAW; it cannot be written".into(),
@@ -331,6 +363,7 @@ impl LocalTools {
                     Ok(p) => p,
                     Err(e) => return Gate::Deny(e),
                 };
+                let outside = !abs.starts_with(&self.root);
                 match self.profile {
                     PermissionProfile::Safe => {
                         let rel = self.rel(&abs);
@@ -338,7 +371,17 @@ impl LocalTools {
                             kind: ApprovalKind::FileChange,
                             summary: format!("{name}: {rel}"),
                             paths: vec![rel],
-                            remember: "files".into(),
+                            remember: if outside { "files-outside" } else { "files" }.into(),
+                        }
+                    }
+                    // a folder outside the worktree is the user's own space: ask first
+                    PermissionProfile::Balanced if outside => {
+                        let shown = abs.to_string_lossy().to_string();
+                        Gate::Ask {
+                            kind: ApprovalKind::FileChange,
+                            summary: format!("{name} outside the worktree: {shown}"),
+                            paths: vec![shown],
+                            remember: "files-outside".into(),
                         }
                     }
                     _ => Gate::Allow,
@@ -1006,5 +1049,40 @@ mod tests {
             r.output
         );
         std::env::remove_var("MAW_MCP_TOKEN");
+    }
+
+    #[test]
+    fn a_folder_the_user_allowed_can_be_written_after_asking_and_nothing_else_outside() {
+        let (_d, t) = tools(PermissionProfile::Balanced);
+        let extra = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let target = extra.path().join("moved.txt");
+        // without the allowance the folder is out of reach
+        let w = json!({"path": target.to_string_lossy(), "content": "x"});
+        assert!(matches!(t.gate("write_file", &w), Gate::Deny(_)));
+        // with it, Balanced asks (it is outside the worktree) and the answer can be remembered
+        let t = t.with_extra_dirs(&[extra.path().to_path_buf()]);
+        match t.gate("write_file", &w) {
+            Gate::Ask {
+                remember, paths, ..
+            } => {
+                assert_eq!(remember, "files-outside");
+                assert!(paths[0].ends_with("moved.txt"));
+            }
+            o => panic!("{o:?}"),
+        }
+        t.run_file_tool("write_file", &w).unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "x");
+        // another folder, and .git inside an allowed folder, stay closed
+        let elsewhere = json!({"path": other.path().join("a").to_string_lossy(), "content": "x"});
+        assert!(matches!(t.gate("write_file", &elsewhere), Gate::Deny(_)));
+        std::fs::create_dir(extra.path().join(".git")).unwrap();
+        let git =
+            json!({"path": extra.path().join(".git/config").to_string_lossy(), "content": "x"});
+        assert!(matches!(t.gate("write_file", &git), Gate::Deny(_)));
+        // autonomous does not ask; the safe profile asks for everything
+        let (_e, auto) = tools(PermissionProfile::Autonomous);
+        let auto = auto.with_extra_dirs(&[extra.path().to_path_buf()]);
+        assert_eq!(auto.gate("write_file", &w), Gate::Allow);
     }
 }

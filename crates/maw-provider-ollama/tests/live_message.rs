@@ -55,7 +55,7 @@ async fn live_small_model_gets_a_user_message() {
         )
         .unwrap();
     let msgs = engine.undelivered_for(&agent.id).unwrap();
-    let prompt = prompts::messages_prompt(role, &msgs, &|_| "user".to_string());
+    let prompt = prompts::messages_prompt(&msgs, &|_| "user".to_string());
     eprintln!("=== prompt sent to the model:\n{prompt}\n===");
     let token = engine.mint_token(&agent.id);
     let server = maw_mcp::serve_http(engine.clone(), "127.0.0.1:0".parse().unwrap())
@@ -80,6 +80,7 @@ async fn live_small_model_gets_a_user_message() {
         instructions: prompts::role_instructions(role, "worker1"),
         env: Default::default(),
         resume_native_id: None,
+        extra_dirs: vec![],
     };
     let (s, mut rx) = p.start_session(cfg).await.expect("session");
     s.send_input(AgentInput::text(prompt)).await.unwrap();

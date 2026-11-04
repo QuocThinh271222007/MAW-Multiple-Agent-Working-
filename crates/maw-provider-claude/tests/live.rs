@@ -178,6 +178,7 @@ async fn real_claude_end_to_end() {
         instructions: "You are a terse test agent. Follow instructions literally.".into(),
         env: HashMap::new(),
         resume_native_id: None,
+        extra_dirs: vec![],
         effort: None,
     };
     let (session, mut rx) = provider.start_session(cfg).await.expect("start");

@@ -96,6 +96,10 @@ pub struct SessionConfig {
     pub env: HashMap<String, String>,
     /// Provider-native id to resume, if any.
     pub resume_native_id: Option<String>,
+    /// Folders OUTSIDE the worktree the user allowed this agent to change (absolute, checked by MAW
+    /// before they get here). Empty by default: an agent can only write in its own worktree. An agent
+    /// can never add to this list; only the user does (`maw workspace allow`).
+    pub extra_dirs: Vec<PathBuf>,
 }
 
 #[derive(Clone, Debug)]

@@ -227,3 +227,58 @@ Options if it still loops: a Leader on a model that does not think, for example
 `qwen3:4b-instruct-2507-q4_K_M` (2.5 GB, now in the download list) or a 7-8B instruct model, with the local
 model as Worker only. The instruct tag was found in the Ollama registry but has **not been tried** with
 MAW's Leader role here.
+
+## The download list: who makes each model, what it can do, and effort
+
+`/download model` lists models with sizes and parameter counts read from the Ollama registry, the maker
+from the library page, and the capabilities the library lists for the family (tools, thinking, vision,
+audio). The server is asked again after the download: a model without tool calling cannot run an agent.
+
+**Effort is only real where Ollama offers it.** Only `gpt-oss` has levels (low/medium/high). Every other
+model, thinking or not, shows "no effort levels" and the effort picker is not offered for it. A thinking
+model thinks as much as it wants, and switching thinking off is not reliable: measured on `qwen3:4b`, it
+writes its reasoning into the answer instead (1,645 tokens for "say hello"), and `/no_think` is ignored.
+The other thinking models in the list are untested for that.
+
+| model | size | maker | tools | thinking | note |
+|---|---|---|---|---|---|
+| qwen3.5:4b | 3.3 GB | Alibaba (Qwen) | yes | yes | vision, 256K |
+| qwen3:4b-instruct-2507-q4_K_M | 2.5 GB | Alibaba (Qwen) | yes | no | steadier as Leader |
+| qwen3:4b | 2.5 GB | Alibaba (Qwen) | yes | always | cannot be turned off |
+| gemma4:e2b | 4.6 GB | Google | yes | yes | 4.6B total, 2B effective |
+| granite4.2:3b | 2.2 GB | IBM | yes | yes | 128K |
+| ministral-3:3b | 3.0 GB | Mistral AI | yes | no | vision |
+| lfm3:1.7b | 1.1 GB | Liquid AI | yes | yes | tri-hybrid, for local agents |
+| bonsai-2:4b | 1.6 GB | Prism ML | yes | yes | 2-bit weights: small, lower quality |
+| nemotron-3.5-bolt:e4b | 7.9 GB | NVIDIA | yes | yes | over the default limit, does not fit 6 GB |
+| mimo-v2.6:9b | 6.6 GB | Xiaomi MiMo | yes | yes | 9B, over the default limit, does not fit 6 GB |
+
+The last two are shown at the end marked "OVER THE LIMIT" and are refused until `max_pull_gb` /
+`max_pull_params_b` under `[ollama]` are raised. Capabilities are per family as the library lists them
+(not checked per tag); installed models show what the server itself reports, plus the model's real
+maximum context and its effort levels.
+
+## One system prompt, not one per message
+
+The instructions are sent once, as the system prompt. Messages from you now reach the agent as your own
+words, with no header and no repeated instructions (before, every message carried "You have N new
+messages ... the user reads your plain-text reply ..." and, for the Leader, a paragraph on handing out
+work; they piled up in the history, used context and contradicted the system prompt). How input reaches
+an agent (your plain text, a TASK block, mail from another agent) is said once in the role instructions.
+
+## Letting an agent write outside its worktree
+
+An agent normally writes only inside its own worktree: that is the sandbox of Codex, the working
+directory of Claude Code, and the folder our own tools of a local model are confined to. Moving a file
+to a Windows folder was therefore refused (measured with Codex: it asks for permission, and without it
+the file is not created). Only **you** can open a folder:
+
+    maw workspace allow /mnt/c/Users/me/download     (or C:/Users/me/download)
+    maw workspace deny  /mnt/c/Users/me/download
+    maw workspace                                      (shows the list)
+
+Applies to Workers and Specialists, the next time they connect. Claude Code gets `--add-dir`, Codex gets
+it as a writable root of its workspace-write sandbox (still never full access), a local model's tools may
+write there after you approve each kind of write (autonomous: without asking). Disks, system folders,
+your home folder itself and credential folders (`.ssh`, `.aws`, ...) are refused. With Codex, the same
+file is created when the folder is allowed and not created when it is not (live test, two short turns).

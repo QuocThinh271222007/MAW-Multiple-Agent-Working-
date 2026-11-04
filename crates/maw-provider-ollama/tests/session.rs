@@ -131,6 +131,7 @@ fn cfg(
         instructions: "ROLE-INSTRUCTIONS".into(),
         env: Default::default(),
         resume_native_id: None,
+        extra_dirs: vec![],
     }
 }
 

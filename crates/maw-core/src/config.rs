@@ -31,6 +31,10 @@ pub struct OrchestratorConfig {
     /// For `windows`: the folder on the Windows side, e.g. `C:\Users\me\MAW` or `/mnt/c/Users/me/MAW`.
     /// Empty = a `MAW` folder in your Windows user profile.
     pub windows_worktree_dir: String,
+    /// Folders outside its worktree that Worker/Specialist agents may also write to, e.g. a Windows
+    /// folder to move results into (`/mnt/c/Users/me/download` or `C:\\Users\\me\\download`). Only the
+    /// user changes this list (`maw workspace allow <dir>`); applies the next time an agent connects.
+    pub extra_dirs: Vec<String>,
 }
 
 impl Default for OrchestratorConfig {
@@ -47,6 +51,7 @@ impl Default for OrchestratorConfig {
             verbose_event_retention: 20_000,
             worktree_location: "project".into(),
             windows_worktree_dir: String::new(),
+            extra_dirs: vec![],
         }
     }
 }

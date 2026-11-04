@@ -10,7 +10,8 @@ pub fn role_instructions(role: Role, agent_name: &str) -> String {
     let common = format!(
         "You are \"{agent_name}\", an agent in a MAW (Multiple Agent Working) team. Your identity and role are assigned by MAW and enforced server-side; \
 you coordinate ONLY through the `maw` MCP tools (maw_*). Do not paste other agents' work into prompts; read it with maw_task_get / maw_context_read. \
-{TRUST_NOTICE} Never claim a task is complete without evidence: completion is decided by verification, not by your say-so."
+{TRUST_NOTICE} Never claim a task is complete without evidence: completion is decided by verification, not by your say-so.\n\n\
+HOW INPUT REACHES YOU (this is said once, here): (1) Plain text is the user talking to you: answer it directly in a sentence or two, use tools only if it asks you to change or run something, and no acknowledgement is needed. (2) A block that starts with \"TASK T-n\" is assigned work from MAW: do it, then report with maw_task_submit_result (or maw_task_block if you cannot). (3) A line that starts with \"[TYPE from <agent>, id msg_...]\" is mail from another agent: act on it and acknowledge it with maw_message_ack using that id."
     );
     match role {
         Role::Leader => format!(
@@ -84,7 +85,9 @@ pub fn task_prompt(
             ));
         }
     }
-    s.push_str("\nWhen finished call maw_task_submit_result with evidence, or maw_task_block if you cannot proceed. Do not stop without doing one of these.");
+    s.push_str(
+        "\nReport with maw_task_submit_result (evidence), or maw_task_block if you cannot proceed.",
+    );
     s
 }
 
@@ -99,56 +102,35 @@ pub fn review_prompt(task: &Task, workspace: Option<&str>) -> String {
     )
 }
 
-pub fn messages_prompt(
-    role: Role,
-    messages: &[Message],
-    names: &dyn Fn(&AgentId) -> String,
-) -> String {
-    // Written for small models too: say who wrote it, what to do, and give the acknowledge call
-    // ready to copy (they mangle long ids and skip steps they have to infer).
-    let n = messages.len();
-    let mut s = format!(
-        "You have {n} new message{} to handle.\n",
-        if n == 1 { "" } else { "s" }
-    );
-    for (i, m) in messages.iter().enumerate() {
-        let from_user = m.sender_agent_id.as_str() == "user";
-        let who = if from_user {
-            "the USER (the person running MAW)".to_string()
-        } else {
-            format!("agent {}", names(&m.sender_agent_id))
-        };
-        s.push_str(&format!(
-            "\n=== MESSAGE {} of {n}: {} from {who} ===\n",
-            i + 1,
-            m.message_type
-        ));
-        if !m.subject.trim().is_empty() && !(from_user && m.subject == "Message from the user") {
-            s.push_str(&format!("Subject: {}\n", m.subject));
-        }
-        s.push_str(&format!("{}\n", m.content));
-        // The user reads your reply in the conversation; making a model also call a tool to
-        // "acknowledge" a chat line costs a whole extra round trip and small models get it wrong.
-        if !from_user {
-            s.push_str(&format!(
-                "When you have done what it asks, acknowledge it by calling maw_message_ack with {{\"message_id\": \"{}\"}}\n",
-                m.id
-            ));
-        }
-    }
-    if role == Role::Leader
-        && messages
-            .iter()
-            .any(|m| m.sender_agent_id.as_str() == "user")
-    {
-        s.push_str("\nIf the user asks you to hand work to other agents: (1) call maw_agent_list for their exact names; (2) if there is no active goal, create one with maw_goal_create (objective and success_criteria); (3) create each task with maw_task_create (title, description, acceptance_criteria, assignee = an exact name from the list). Use only names that maw_agent_list returned.\n");
-    }
-    s.push_str(if messages.iter().all(|m| m.sender_agent_id.as_str() == "user") {
-        "\nThe user reads your plain-text reply: answer questions and greetings directly in a sentence or two, without tools. Use your tools only if the message asks you to change or run something, then say briefly what you did. No acknowledgement call is needed."
-    } else {
-        "\nAct on each message with your tools; for messages from agents, acknowledge them afterwards as shown."
-    });
-    s
+/// What an agent receives for the messages waiting for it. The user's own words go through
+/// untouched (no header, no instructions: those live ONCE in the system prompt, see
+/// `role_instructions`, and repeating them in every message fills the context of a small model and
+/// contradicts what it was told at the start). Mail from another agent carries a short header with
+/// the id to acknowledge.
+pub fn messages_prompt(messages: &[Message], names: &dyn Fn(&AgentId) -> String) -> String {
+    messages
+        .iter()
+        .map(|m| {
+            if m.sender_agent_id.as_str() == "user" {
+                m.content.clone()
+            } else {
+                let subject = if m.subject.trim().is_empty() {
+                    String::new()
+                } else {
+                    format!("{}: ", m.subject.trim())
+                };
+                format!(
+                    "[{} from {}, id {}] {}{}",
+                    m.message_type,
+                    names(&m.sender_agent_id),
+                    m.id,
+                    subject,
+                    m.content
+                )
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 pub fn resume_briefing(role: Role) -> String {
@@ -180,15 +162,31 @@ mod tests {
     }
 
     #[test]
-    fn a_chat_line_from_the_user_needs_no_tool_call_but_agent_mail_shows_the_ack_call() {
-        let p = messages_prompt(Role::Worker, &[msg("user")], &|_| "user".into());
-        assert!(p.contains("say hello in one sentence") && p.contains("plain-text reply"));
-        assert!(!p.contains("maw_message_ack with"), "{p}");
-        let p = messages_prompt(Role::Worker, &[msg("agent_9")], &|_| "worker2".into());
-        assert!(p.contains("agent worker2"));
+    fn the_users_words_go_through_untouched_and_agent_mail_carries_its_id() {
+        let p = messages_prompt(&[msg("user")], &|_| "user".into());
+        assert_eq!(
+            p, "say hello in one sentence",
+            "no wrapper around the user's words"
+        );
+        let p = messages_prompt(&[msg("agent_9")], &|_| "worker2".into());
         assert!(
-            p.contains(r#"maw_message_ack with {"message_id": "msg_abc"}"#),
+            p.starts_with("[INSTRUCTION from worker2, id msg_abc]"),
             "{p}"
         );
+        assert!(p.contains("say hello in one sentence"));
+        // several at once are separated by a blank line, nothing else is added
+        let p = messages_prompt(&[msg("user"), msg("user")], &|_| "user".into());
+        assert_eq!(p, "say hello in one sentence\n\nsay hello in one sentence");
+    }
+
+    #[test]
+    fn how_input_reaches_an_agent_is_in_the_system_prompt_once() {
+        for role in [Role::Leader, Role::Worker, Role::Reviewer] {
+            let i = role_instructions(role, "a");
+            assert_eq!(i.matches("HOW INPUT REACHES YOU").count(), 1);
+            assert!(i.contains("maw_message_ack") && i.contains("TASK T-n"));
+        }
+        // and a user message is not the place to repeat it
+        assert!(!messages_prompt(&[msg("user")], &|_| "u".into()).contains("acknowledg"));
     }
 }
