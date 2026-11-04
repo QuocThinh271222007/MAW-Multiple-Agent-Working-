@@ -52,6 +52,18 @@ tried as a Worker on a trivial task. The Leader (planning, many tools, long cont
 roles were not tried with a local model and `maw agent add` warns about the Leader. Use a local model
 as a Worker and a hosted one as Leader; keep tasks small with explicit acceptance criteria.
 
+## Starting the server by itself, and messages
+
+* **After a reboot** Ollama is not running. MAW connects the agent, sees no server and starts it
+  (`ollama serve`, or the Windows app from WSL). Earlier the connect step treated "no server" as a
+  login problem and stopped before the start, so nothing was launched; a stopped server now counts as
+  "unknown, will be started" while `autostart` is on. Turn it off in `[ollama]` to keep the old strictness.
+* **Messages you type to an agent** reach a local model as a short brief: who wrote it, the text, and
+  the exact `maw_message_ack` call with the message id to copy. Measured once with `qwen3:4b` (create
+  a file, then acknowledge): with the new wording it wrote the file and acknowledged correctly on the
+  first try (102 s, 12k tokens). The old wording (a bare hex id and "act using the maw_* tools") did
+  not finish within 15 minutes in the one run I made. One run each, so an anecdote, not a statistic.
+
 ## Honest limits
 
 * **No OS sandbox.** Unlike Codex, nothing confines `run_command`. File tools are confined to the

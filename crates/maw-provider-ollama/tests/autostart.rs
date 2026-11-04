@@ -63,6 +63,31 @@ async fn an_agent_session_starts_the_server_when_nothing_answers() {
     assert!(p.detect().await.unwrap().version.as_deref() == Some("9.9.fake"));
 }
 
+/// After a reboot the server is down. The supervisor asks `auth_status` before it starts a
+/// session, and treats "not authenticated" as a stop sign, so a stopped server must NOT look like
+/// that while autostart is on - otherwise the session start (which launches the server) never runs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stopped_server_is_not_an_auth_failure_while_autostart_is_on() {
+    let on = OllamaProvider::new(OllamaConfig {
+        url: Some(format!("127.0.0.1:{}", free_port())),
+        ..Default::default()
+    });
+    let s = on.auth_status().await.unwrap();
+    assert!(
+        matches!(s, AuthStatus::Unknown { .. }) && !s.is_authenticated(),
+        "{s:?}"
+    );
+    let off = OllamaProvider::new(OllamaConfig {
+        url: Some(format!("127.0.0.1:{}", free_port())),
+        autostart: false,
+        ..Default::default()
+    });
+    assert!(matches!(
+        off.auth_status().await.unwrap(),
+        AuthStatus::NotAuthenticated { .. }
+    ));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn autostart_can_be_switched_off_and_a_missing_install_is_explained() {
     let p = OllamaProvider::new(OllamaConfig {

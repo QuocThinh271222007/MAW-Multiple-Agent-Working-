@@ -190,7 +190,8 @@ const PREAMBLE: &str = "You are a coding agent running on a local model, working
 Use the tools to inspect and change files and to run commands; do not paste code for the user to apply. \
 Take small steps, read a file before editing it, and run the project's tests when you can. \
 Call the maw_* tools exactly as your role instructions say, with the arguments they require; \
-when your task is finished, report it with the maw tool for that, then stop.";
+when your task is finished, report it with the maw tool for that, then stop. \
+If the user only asks a question or greets you, just answer in plain text without any tool.";
 
 #[async_trait]
 impl AgentProvider for OllamaProvider {
@@ -415,8 +416,15 @@ impl AgentProvider for OllamaProvider {
                 account: Some(b),
                 plan: None,
             },
+            // The supervisor stops at "not authenticated" before it ever starts a session, and the
+            // session start is what launches the server. With autostart on, a stopped server is
+            // therefore "unknown, will be started", not a login problem (e.g. after a reboot).
+            None if self.cfg.autostart => AuthStatus::Unknown {
+                reason: "Ollama is not running yet; MAW will start it".into(),
+            },
             None => AuthStatus::NotAuthenticated {
-                hint: "no Ollama server is reachable; start `ollama serve`".into(),
+                hint: "no Ollama server is reachable; start `ollama serve` or turn autostart on"
+                    .into(),
             },
         })
     }

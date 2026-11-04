@@ -1830,6 +1830,41 @@ fn download_picker_lists_suggestions_marks_installed_and_accepts_a_typed_name() 
 
 // ---- the message box in the agent view ---------------------------------------------------------
 
+/// T / L / P are letters in the message box, so the same switches are slash commands with an
+/// explicit on/off.
+#[test]
+fn transcript_filters_can_be_set_from_the_message_box_with_on_and_off() {
+    use crossterm::event::KeyCode;
+    let mut a = app();
+    a.selected_agent = 1;
+    a.goto(View::AgentDetail);
+    assert!(a.show_thinking && a.show_logs && a.show_protocol);
+
+    type_text(&mut a, "/thinking off");
+    // the menu still lists the command while the argument is being typed
+    assert!(render_text(&a, 120, 34).contains("/transcript thinking"));
+    press(&mut a, KeyCode::Enter);
+    assert!(!a.show_thinking && a.show_logs && a.show_protocol);
+    assert!(a.composer.value().is_empty());
+
+    type_text(&mut a, "/thinking on");
+    press(&mut a, KeyCode::Enter);
+    assert!(a.show_thinking);
+
+    type_text(&mut a, "/tool logs off");
+    press(&mut a, KeyCode::Enter);
+    assert!(!a.show_logs);
+    type_text(&mut a, "/protocol hide");
+    press(&mut a, KeyCode::Enter);
+    assert!(!a.show_protocol);
+
+    // without an argument it still toggles, as the T key does
+    type_text(&mut a, "/thinking");
+    press(&mut a, KeyCode::Enter);
+    assert!(!a.show_thinking);
+    assert_eq!(a.view, View::AgentDetail, "the box keeps working");
+}
+
 #[test]
 fn the_agent_view_has_a_message_box_that_sends_commands_and_runs_shell() {
     use crossterm::event::KeyCode;

@@ -100,19 +100,43 @@ pub fn review_prompt(task: &Task, workspace: Option<&str>) -> String {
 }
 
 pub fn messages_prompt(messages: &[Message], names: &dyn Fn(&AgentId) -> String) -> String {
-    let mut s = String::from("You have new messages from MAW:\n");
-    for m in messages {
+    // Written for small models too: say who wrote it, what to do, and give the acknowledge call
+    // ready to copy (they mangle long ids and skip steps they have to infer).
+    let n = messages.len();
+    let mut s = format!(
+        "You have {n} new message{} to handle.\n",
+        if n == 1 { "" } else { "s" }
+    );
+    for (i, m) in messages.iter().enumerate() {
+        let from_user = m.sender_agent_id.as_str() == "user";
+        let who = if from_user {
+            "the USER (the person running MAW)".to_string()
+        } else {
+            format!("agent {}", names(&m.sender_agent_id))
+        };
         s.push_str(&format!(
-            "\n--- {} from {} (id {}){} ---\n{}\n{}\n",
-            m.message_type,
-            names(&m.sender_agent_id),
-            m.id,
-            m.task_id.as_ref().map(|_| "").unwrap_or(""),
-            m.subject,
-            m.content
+            "\n=== MESSAGE {} of {n}: {} from {who} ===\n",
+            i + 1,
+            m.message_type
         ));
+        if !m.subject.trim().is_empty() && !(from_user && m.subject == "Message from the user") {
+            s.push_str(&format!("Subject: {}\n", m.subject));
+        }
+        s.push_str(&format!("{}\n", m.content));
+        // The user reads your reply in the conversation; making a model also call a tool to
+        // "acknowledge" a chat line costs a whole extra round trip and small models get it wrong.
+        if !from_user {
+            s.push_str(&format!(
+                "When you have done what it asks, acknowledge it by calling maw_message_ack with {{\"message_id\": \"{}\"}}\n",
+                m.id
+            ));
+        }
     }
-    s.push_str("\nAct on them using the maw_* tools (maw_message_ack the ones you handle).");
+    s.push_str(if messages.iter().all(|m| m.sender_agent_id.as_str() == "user") {
+        "\nThe user reads your plain-text reply: answer questions and greetings directly in a sentence or two, without tools. Use your tools only if the message asks you to change or run something, then say briefly what you did. No acknowledgement call is needed."
+    } else {
+        "\nAct on each message with your tools; for messages from agents, acknowledge them afterwards as shown."
+    });
     s
 }
 
@@ -120,5 +144,40 @@ pub fn resume_briefing(role: Role) -> String {
     match role {
         Role::Leader => "MAW was restarted. Re-orient: call maw_goal_get, maw_plan_get, maw_task_list and maw_message_inbox. Tasks that were RUNNING are BLOCKED pending your decision (their side effects are unknown): inspect them and release/reassign or cancel each one.".into(),
         _ => "MAW was restarted. Wait for new instructions; do not resume earlier work unless MAW assigns it to you again.".into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn msg(from: &str) -> Message {
+        Message {
+            id: MessageId::from("msg_abc"),
+            project_id: ProjectId::from("p"),
+            sender_agent_id: AgentId::from(from),
+            recipient_agent_id: AgentId::from("a"),
+            task_id: None,
+            message_type: MessageType::Instruction,
+            subject: "Message from the user".into(),
+            content: "say hello in one sentence".into(),
+            created_at: chrono::Utc::now(),
+            delivered_at: None,
+            acknowledged_at: None,
+            correlation_id: None,
+        }
+    }
+
+    #[test]
+    fn a_chat_line_from_the_user_needs_no_tool_call_but_agent_mail_shows_the_ack_call() {
+        let p = messages_prompt(&[msg("user")], &|_| "user".into());
+        assert!(p.contains("say hello in one sentence") && p.contains("plain-text reply"));
+        assert!(!p.contains("maw_message_ack with"), "{p}");
+        let p = messages_prompt(&[msg("agent_9")], &|_| "worker2".into());
+        assert!(p.contains("agent worker2"));
+        assert!(
+            p.contains(r#"maw_message_ack with {"message_id": "msg_abc"}"#),
+            "{p}"
+        );
     }
 }

@@ -352,17 +352,17 @@ pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         cmd: Cmd::ToggleThinking,
         name: "transcript thinking",
-        desc: "show/hide the agent's streamed reasoning (T)",
+        desc: "show/hide the agent's reasoning: type 'thinking on' or 'thinking off' (T)",
     },
     CommandSpec {
         cmd: Cmd::ToggleLogs,
         name: "transcript tool logs",
-        desc: "show/hide tool calls, commands, output and system lines (L)",
+        desc: "show/hide tool calls, commands, output, system lines: 'tool logs on|off' (L)",
     },
     CommandSpec {
         cmd: Cmd::ToggleProtocol,
         name: "transcript protocol",
-        desc: "show/hide MAW coordination traffic: message ack, inbox, progress... (P)",
+        desc: "show/hide MAW coordination traffic (ack, inbox, progress): 'protocol on|off' (P)",
     },
     CommandSpec {
         cmd: Cmd::ConversationOnly,
@@ -1644,10 +1644,47 @@ fn palette_key(app: &mut App, mut p: PaletteState, key: KeyEvent) -> Vec<Action>
 
 /// Entries of the `/` menu for the text in the message box (empty unless it starts with `/`).
 pub fn composer_menu(app: &App) -> Vec<&'static CommandSpec> {
-    match app.composer.value().strip_prefix('/') {
-        Some(q) => palette_matches(q.trim()),
-        None => vec![],
+    let v = app.composer.value();
+    if !v.starts_with('/') {
+        return vec![];
     }
+    palette_matches(slash_parts(v).0)
+}
+
+/// Split `/thinking off` into the command query and an explicit on/off. The last word counts as
+/// an argument as soon as it starts like one (`o`, `of`, `off`, `on`, `show`, `hide`), so the
+/// menu keeps listing the command while the argument is being typed.
+fn slash_parts(text: &str) -> (&str, Option<bool>) {
+    let body = text.strip_prefix('/').unwrap_or(text).trim();
+    if let Some((q, last)) = body.rsplit_once(char::is_whitespace) {
+        if !last.is_empty()
+            && ["on", "off", "show", "hide"]
+                .iter()
+                .any(|w| w.starts_with(last))
+        {
+            let state = match last {
+                "on" | "show" => Some(true),
+                "off" | "hide" => Some(false),
+                _ => None,
+            };
+            return (q.trim(), state);
+        }
+    }
+    (body, None)
+}
+
+/// `/thinking on|off`, `/tools on|off`, `/protocol on|off`: set a transcript filter explicitly.
+fn set_filter(app: &mut App, cmd: Cmd, on: bool) -> bool {
+    let (flag, label) = match cmd {
+        Cmd::ToggleThinking => (&mut app.show_thinking, "thinking"),
+        Cmd::ToggleLogs => (&mut app.show_logs, "tool logs"),
+        Cmd::ToggleProtocol => (&mut app.show_protocol, "MAW protocol lines"),
+        _ => return false,
+    };
+    *flag = on;
+    let msg = format!("{label} {}", if on { "shown" } else { "hidden" });
+    app.set_toast(msg, Level::Info);
+    true
 }
 
 /// Keys in the message box. `None` = not handled here (scrolling, Ctrl shortcuts, Esc to leave).
@@ -1697,8 +1734,14 @@ fn composer_submit(app: &mut App) -> Vec<Action> {
             return vec![];
         };
         let cmd = cmd.cmd;
+        let state = slash_parts(&text).1;
         app.composer.set("");
         app.composer_sel = 0;
+        if let Some(on) = state {
+            if set_filter(app, cmd, on) {
+                return vec![];
+            }
+        }
         return run_cmd(app, cmd);
     }
     if let Some(shell) = text.strip_prefix('!') {
