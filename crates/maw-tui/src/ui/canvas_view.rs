@@ -322,6 +322,15 @@ pub fn render_canvas(f: &mut Frame, area: Rect, app: &App) {
         btn("▲", Button::Up, &mut spans, &mut x, &mut buttons);
         btn("▼", Button::Down, &mut spans, &mut x, &mut buttons);
         btn("▶", Button::Right, &mut spans, &mut x, &mut buttons);
+        if !c.clean {
+            btn(
+                if c.map_hidden { "show map" } else { "hide map" },
+                Button::Map,
+                &mut spans,
+                &mut x,
+                &mut buttons,
+            );
+        }
         btn(
             if c.clean {
                 "show panels"
@@ -477,7 +486,8 @@ pub fn render_canvas(f: &mut Frame, area: Rect, app: &App) {
             ));
         }
         drop(hits);
-        if !c.clean {
+        c.map.set(None);
+        if !c.clean && !c.map_hidden {
             minimap(&mut p, &scene, app, canvas_area);
         }
     }
@@ -503,8 +513,16 @@ pub fn render_canvas(f: &mut Frame, area: Rect, app: &App) {
 /// A small map of the whole board in the corner, with the part on screen outlined.
 fn minimap(p: &mut Painter, scene: &Scene, app: &App, area: Rect) {
     let t = &app.theme;
-    let (mw, mh) = (24i32, 8i32);
-    if (area.width as i32) < mw + 30 || (area.height as i32) < mh + 6 || scene.nodes.len() < 2 {
+    // a full-size map on a roomy screen, a small one on a small screen, none when it would cover
+    // the board
+    let (mw, mh) = if area.width >= 54 && area.height >= 14 {
+        (24i32, 8i32)
+    } else if area.width >= 36 && area.height >= 9 {
+        (16, 6)
+    } else {
+        return;
+    };
+    if scene.nodes.is_empty() {
         return;
     }
     let Some((lo, hi)) = crate::canvas::bounds(scene) else {
@@ -533,6 +551,11 @@ fn minimap(p: &mut Painter, scene: &Scene, app: &App, area: Rect) {
     let whi = (hi.0.max(view_hi.0), hi.1.max(view_hi.1));
     let sx = (mw - 4) as f32 / (whi.0 - wlo.0).max(0.5);
     let sy = (mh - 4) as f32 / (whi.1 - wlo.1).max(0.5);
+    app.canvas.map.set(Some(crate::canvas::MapGeom {
+        rect: (area.x as i32 + x0, area.y as i32 + y0, mw as u16, mh as u16),
+        lo: wlo,
+        scale: (sx, sy),
+    }));
     let map = |g: (f32, f32)| {
         (
             x0 + 2 + ((g.0 - wlo.0) * sx) as i32,

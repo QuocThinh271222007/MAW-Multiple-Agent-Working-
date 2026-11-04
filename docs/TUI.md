@@ -340,6 +340,9 @@ The board fills the whole screen; the inspector floats over the bottom only whil
   back to check the change really took effect and says so in a notice; if it could not (for instance the
   helper does not share the console), the notice tells you to use Windows Terminal or untick QuickEdit in
   the cmd window's Properties. The keyboard works either way.
+* The map in the corner outlines what is on screen; click or drag on it to jump there. It shrinks on a
+  small screen instead of disappearing, and has its own switch (`M`, or the "hide map" button) apart from
+  `h` which hides the inspector and the map together.
 * `g` picks the selected node up; a click puts it down (or nudge it with the arrows, `Esc` cancels), so a node
   can be moved without dragging.
 

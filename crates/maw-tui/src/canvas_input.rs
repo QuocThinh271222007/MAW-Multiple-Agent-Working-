@@ -196,6 +196,9 @@ pub fn canvas_key(app: &mut App, key: &KeyEvent) -> Option<Vec<Action>> {
         KeyCode::Char('h') => {
             app.canvas.clean = !app.canvas.clean;
         }
+        KeyCode::Char('M') => {
+            app.canvas.map_hidden = !app.canvas.map_hidden;
+        }
         KeyCode::Char('g') => match (app.canvas.grabbed.take(), sel.clone()) {
             (Some(_), _) => {} // second press puts it down where it is
             (None, Some(k)) => {
@@ -309,6 +312,35 @@ pub fn canvas_mouse(app: &mut App, m: MouseEvent) -> Vec<Action> {
             return out;
         }
     }
+    // pointing at the map moves the view there; dragging on it keeps following the pointer
+    let on_map = |app: &App| -> Option<(f32, f32)> {
+        let g = app.canvas.map.get()?;
+        let r = g.rect;
+        let (c, rw) = (m.column as i32, m.row as i32);
+        let inside = c >= r.0 && c < r.0 + r.2 as i32 && rw >= r.1 && rw < r.1 + r.3 as i32;
+        (inside || app.canvas.drag == Some(Drag::Map)).then(|| {
+            (
+                g.lo.0 + (c - r.0 - 2) as f32 / g.scale.0.max(0.001),
+                g.lo.1 + (rw - r.1 - 2) as f32 / g.scale.1.max(0.001),
+            )
+        })
+    };
+    match m.kind {
+        MouseEventKind::Down(MouseButton::Left) => {
+            if let Some(g) = on_map(app) {
+                app.canvas.drag = Some(Drag::Map);
+                app.canvas.center_on(g);
+                return out;
+            }
+        }
+        MouseEventKind::Drag(MouseButton::Left) if app.canvas.drag == Some(Drag::Map) => {
+            if let Some(g) = on_map(app) {
+                app.canvas.center_on(g);
+            }
+            return out;
+        }
+        _ => {}
+    }
     // floating panels (the inspector) are not part of the board underneath
     let shielded = matches!(
         m.kind,
@@ -384,7 +416,7 @@ pub fn canvas_mouse(app: &mut App, m: MouseEvent) -> Vec<Action> {
                 app.canvas.origin = (origin.0 - dx / pw as f32, origin.1 - dy / ph as f32);
                 app.canvas.dirty = true;
             }
-            None => {}
+            Some(Drag::Map) | None => {}
         },
         MouseEventKind::Up(_) => {
             if app.canvas.drag.take().is_some() {
@@ -449,6 +481,7 @@ fn press(app: &mut App, b: Button) {
         Button::Right => app.canvas.pan_cells(12, 0),
         Button::Up => app.canvas.pan_cells(0, -6),
         Button::Down => app.canvas.pan_cells(0, 6),
+        Button::Map => app.canvas.map_hidden = !app.canvas.map_hidden,
         Button::Panels => app.canvas.clean = !app.canvas.clean,
     }
 }

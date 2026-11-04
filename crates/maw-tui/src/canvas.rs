@@ -742,6 +742,8 @@ pub enum Drag {
         origin: (f32, f32),
         from: (u16, u16),
     },
+    /// Pointing at the map: the view follows the pointer.
+    Map,
 }
 
 /// The buttons of the board's top bar (for terminals where only clicks are dependable).
@@ -754,7 +756,19 @@ pub enum Button {
     Right,
     Up,
     Down,
+    /// Show or hide the map in the corner.
+    Map,
+    /// Show or hide the inspector and the map together.
     Panels,
+}
+
+/// Where the map is on screen and how it maps the board, so a click on it can jump there.
+#[derive(Clone, Copy, Debug)]
+pub struct MapGeom {
+    pub rect: Rect4,
+    /// The board position at the map's inner top-left and the map cells per grid unit.
+    pub lo: (f32, f32),
+    pub scale: (f32, f32),
 }
 
 #[derive(Clone, Debug)]
@@ -768,6 +782,10 @@ pub struct CanvasState {
     pub drag: Option<Drag>,
     /// Only the board itself: no inspector and no map (`h`).
     pub clean: bool,
+    /// The map in the corner is switched off on its own (`M`).
+    pub map_hidden: bool,
+    /// Set by the renderer while the map is drawn.
+    pub map: std::cell::Cell<Option<MapGeom>>,
     /// A node picked up with `g`: the next click puts it down, the arrows nudge it.
     pub grabbed: Option<NodeKey>,
     /// Set by the renderer: floating panels that swallow mouse events (inspector, map).
@@ -793,6 +811,8 @@ impl Default for CanvasState {
             moved: HashMap::new(),
             drag: None,
             clean: false,
+            map_hidden: false,
+            map: std::cell::Cell::new(None),
             grabbed: None,
             shield: std::cell::RefCell::new(vec![]),
             buttons: std::cell::RefCell::new(vec![]),
@@ -866,6 +886,16 @@ impl CanvasState {
                 return;
             }
         }
+    }
+    /// Put the board position `g` in the middle of the view.
+    pub fn center_on(&mut self, g: (f32, f32)) {
+        let (_, _, w, h) = self.view.get();
+        let (pw, ph) = pitch(self.zoom);
+        self.origin = (
+            g.0 - (w as f32 / 2.0) / pw as f32,
+            g.1 - (h as f32 / 2.0) / ph as f32,
+        );
+        self.dirty = true;
     }
     /// Scroll just enough to bring a node fully into view.
     pub fn reveal(&mut self, at: (f32, f32)) {
