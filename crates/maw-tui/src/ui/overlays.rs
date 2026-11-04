@@ -113,7 +113,7 @@ pub const HELP: &[(&str, &str)] = &[
 
 pub fn render_help(f: &mut Frame, area: Rect, app: &App) {
     let t = &app.theme;
-    let r = centered(area, 90, (HELP.len() as u16 + 6).min(area.height));
+    let r = centered(area, 90, (HELP.len() as u16 + 9).min(area.height));
     f.render_widget(Clear, r);
     let block = panel(
         Line::from(Span::styled(" HELP · Esc to close ", t.bold())),
@@ -138,12 +138,20 @@ pub fn render_help(f: &mut Frame, area: Rect, app: &App) {
             app.mouse_seen
         )
     } else {
-        "none received (scroll once, reopen ?): the terminal may turn the wheel into ↑↓".to_string()
+        "none received. The terminal is not passing clicks to MAW (it may only turn the wheel into ↑↓). In cmd/conhost: right-click the title bar > Properties > Options > untick QuickEdit Mode, or use Windows Terminal. The keyboard does everything the mouse does.".to_string()
     };
-    lines.push(Line::from(vec![
-        Span::styled(format!("{:<24}", "Mouse status"), t.accent()),
-        Span::raw(truncate(&mouse, w.saturating_sub(24))),
-    ]));
+    for (i, row) in wrap_text(&mouse, w.saturating_sub(24).max(10))
+        .into_iter()
+        .enumerate()
+    {
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{:<24}", if i == 0 { "Mouse status" } else { "" }),
+                t.accent(),
+            ),
+            Span::raw(row),
+        ]));
+    }
     f.render_widget(Paragraph::new(lines), inner);
 }
 
