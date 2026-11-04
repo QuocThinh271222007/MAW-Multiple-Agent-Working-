@@ -334,6 +334,11 @@ The board fills the whole screen; the inspector floats over the bottom only whil
   do not report dragging. The bar also says `mouse: nothing received yet` until the terminal sends the first
   mouse event: if it stays that way after you click, the terminal is not passing the mouse to MAW (try
   Windows Terminal, or enable mouse reporting in the terminal) and the keyboard keeps working.
+* Under WSL, entering the board asks Windows to switch the console's QuickEdit (text selection) off so
+  clicks reach MAW, and switching it back on when the board is left or MAW quits. MAW reads the setting
+  back to check the change really took effect and says so in a notice; if it could not (for instance the
+  helper does not share the console), the notice tells you to use Windows Terminal or untick QuickEdit in
+  the cmd window's Properties. The keyboard works either way.
 * `g` picks the selected node up; a click puts it down (or nudge it with the arrows, `Esc` cancels), so a node
   can be moved without dragging.
 

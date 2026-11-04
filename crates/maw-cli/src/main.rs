@@ -891,6 +891,7 @@ async fn launch_tui(ctx: &Ctx, p: &ProjectRef, providers: Providers) -> Result<(
         monochrome: ctx.cfg.ui.monochrome || std::env::var_os("NO_COLOR").is_some(),
         mouse: ctx.cfg.ui.mouse,
         shutdown_on_quit: false,
+        on_board: Some(std::sync::Arc::new(platform::board_console)),
         ..Default::default()
     };
     let res = maw_tui::run(rt.engine.clone(), rt.sup.clone(), opts).await;
@@ -1009,6 +1010,7 @@ async fn cmd_demo(headless_mode: bool, fast: bool) -> Result<()> {
         monochrome: std::env::var_os("NO_COLOR").is_some(),
         mouse: true,
         shutdown_on_quit: false,
+        on_board: Some(std::sync::Arc::new(platform::board_console)),
         ..Default::default()
     };
     let res = maw_tui::run(rt.engine.clone(), rt.sup.clone(), opts).await;

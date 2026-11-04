@@ -226,3 +226,224 @@ mod tests {
         }
     }
 }
+
+// ---------------------------------------------------------------- console mouse (WSL under cmd)
+
+/// UTF-16LE + base64, the form `powershell -EncodedCommand` takes.
+fn encode_powershell(script: &str) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let bytes: Vec<u8> = script
+        .encode_utf16()
+        .flat_map(|u| u.to_le_bytes())
+        .collect();
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let n = (chunk[0] as u32) << 16
+            | (*chunk.get(1).unwrap_or(&0) as u32) << 8
+            | *chunk.get(2).unwrap_or(&0) as u32;
+        out.push(T[(n >> 18) as usize & 63] as char);
+        out.push(T[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 {
+            T[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            T[n as usize & 63] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+/// The PowerShell that sets the QuickEdit flag of the console MAW runs in (`quick_edit` true: on,
+/// false: off) and prints what it was (`was=1` / `was=0`) or why it could not (`noconsole` ...).
+fn quick_edit_script(quick_edit: bool) -> String {
+    quick_edit_script_for(if quick_edit { 1 } else { 0 })
+}
+
+/// `want`: 0 QuickEdit off, 1 on, 2 only report.
+fn quick_edit_script_for(want: u8) -> String {
+    format!(
+        r#"$ErrorActionPreference = 'Stop'
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public static class MawConsole {{
+  [DllImport("kernel32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
+  static extern IntPtr CreateFileW(string n, uint a, uint s, IntPtr p, uint d, uint f, IntPtr t);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool GetConsoleMode(IntPtr h, out uint m);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool SetConsoleMode(IntPtr h, uint m);
+  [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
+  public static string Run(int want) {{
+    IntPtr h = CreateFileW("CONIN$", 0xC0000000, 3, IntPtr.Zero, 3, 0, IntPtr.Zero);
+    if (h == new IntPtr(-1)) return "noconsole";
+    uint m;
+    if (!GetConsoleMode(h, out m)) {{ CloseHandle(h); return "nomode"; }}
+    bool was = (m & 0x40) != 0;
+    uint n = m;
+    if (want == 1) n = m | 0x80 | 0x40;
+    else if (want == 0) n = (m | 0x80) & ~0x40u;
+    if (n != m && !SetConsoleMode(h, n)) {{ CloseHandle(h); return "setfailed"; }}
+    CloseHandle(h);
+    return was ? "was=1" : "was=0";
+  }}
+}}
+"@
+[MawConsole]::Run({})
+"#,
+        want
+    )
+}
+
+/// QuickEdit state before MAW turned it off: -1 not touched, 0 it was off, 1 it was on.
+static QUICK_EDIT_WAS: std::sync::atomic::AtomicI8 = std::sync::atomic::AtomicI8::new(-1);
+
+/// Make the console deliver mouse clicks while the board is shown (`on`), and give it back as it was
+/// when the board is left. Under WSL started from `cmd`, the console's QuickEdit mode keeps clicks
+/// for itself (to select text) and MAW never sees them; this clears that flag for the console MAW
+/// runs in and restores it afterwards. Returns a note for the user when there is something to say.
+/// Elsewhere (Windows Terminal reports the mouse regardless, Linux, macOS) it does nothing.
+pub fn board_console(on: bool) -> Option<String> {
+    use std::sync::atomic::Ordering;
+    if detect_os() != Os::Wsl {
+        return None;
+    }
+    if !on && QUICK_EDIT_WAS.load(Ordering::SeqCst) != 1 {
+        return None; // nothing was changed, nothing to give back
+    }
+    let out = match run_powershell(&quick_edit_script(!on), std::time::Duration::from_secs(12)) {
+        Ok(o) => o,
+        Err(e) => {
+            return on.then(|| {
+                format!("board: could not reach the Windows console ({e}); use Windows Terminal or untick QuickEdit in the cmd window's Properties")
+            })
+        }
+    };
+    let out = out.trim();
+    if on {
+        match out {
+            "was=1" => {
+                // read it back from a separate process: the change only counts if it stuck, that is
+                // if the helper really shares the console MAW is shown in
+                let stuck = run_powershell(
+                    &quick_edit_script_for(2),
+                    std::time::Duration::from_secs(12),
+                )
+                .map(|o| o.trim() == "was=0")
+                .unwrap_or(false);
+                if stuck {
+                    QUICK_EDIT_WAS.store(1, Ordering::SeqCst);
+                    Some("board: console text selection (QuickEdit) switched off so clicks reach MAW; it comes back when you leave the board".into())
+                } else {
+                    Some("board: the Windows console could not be changed from here (the helper got a console of its own); use Windows Terminal or untick QuickEdit in the cmd window's Properties".into())
+                }
+            }
+            "was=0" => {
+                QUICK_EDIT_WAS.store(0, Ordering::SeqCst);
+                None
+            }
+            other => Some(format!(
+                "board: could not change the console mouse mode ({other}); use Windows Terminal or untick QuickEdit in the cmd window's Properties"
+            )),
+        }
+    } else {
+        QUICK_EDIT_WAS.store(-1, Ordering::SeqCst);
+        None
+    }
+}
+
+fn run_powershell(script: &str, limit: std::time::Duration) -> Result<String, String> {
+    use std::io::Read;
+    let mut child = Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-EncodedCommand",
+            &encode_powershell(script),
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("powershell.exe: {e}"))?;
+    let start = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let (mut o, mut e) = (String::new(), String::new());
+                if let Some(mut s) = child.stdout.take() {
+                    let _ = s.read_to_string(&mut o);
+                }
+                if let Some(mut s) = child.stderr.take() {
+                    let _ = s.read_to_string(&mut e);
+                }
+                return if status.success() {
+                    Ok(o)
+                } else {
+                    Err(e.lines().next().unwrap_or("failed").trim().to_string())
+                };
+            }
+            Ok(None) if start.elapsed() > limit => {
+                let _ = child.kill();
+                return Err("timed out".into());
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod console_tests {
+    use super::*;
+
+    #[test]
+    fn powershell_commands_are_utf16_base64() {
+        // "Hi" in UTF-16LE is 48 00 69 00 -> SABpAA==
+        assert_eq!(encode_powershell("Hi"), "SABpAA==");
+        assert_eq!(encode_powershell(""), "");
+        assert_eq!(encode_powershell("A"), "QQA=");
+    }
+
+    #[test]
+    fn the_script_asks_for_the_right_state() {
+        assert!(quick_edit_script(false).contains("Run(0)"));
+        assert!(quick_edit_script(true).contains("Run(1)"));
+        assert!(quick_edit_script(true).contains("CONIN$"));
+    }
+
+    /// Needs WSL with Windows interop. Run by hand: it compiles and runs the real script. With no
+    /// console attached (as under a test runner) the honest answer is `noconsole`.
+    #[test]
+    #[ignore = "needs WSL + powershell.exe"]
+    fn the_real_script_runs_under_powershell() {
+        let run = |want: u8| {
+            let out = run_powershell(
+                &quick_edit_script_for(want),
+                std::time::Duration::from_secs(30),
+            )
+            .expect("powershell ran");
+            let out = out.trim().to_string();
+            eprintln!("want={want}: {out}");
+            assert!(
+                ["noconsole", "nomode", "was=0", "was=1", "setfailed"].contains(&out.as_str()),
+                "{out}"
+            );
+            out
+        };
+        let before = run(2);
+        run(0);
+        let after_off = run(2); // does the change stay for the next process?
+        run(1);
+        let after_on = run(2);
+        eprintln!("before={before} after_off={after_off} after_on={after_on}");
+    }
+
+    #[test]
+    fn nothing_happens_outside_wsl_or_when_there_is_nothing_to_restore() {
+        // restoring something that was never changed does not touch the console
+        assert_eq!(board_console(false), None);
+    }
+}

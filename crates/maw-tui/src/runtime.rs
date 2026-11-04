@@ -42,6 +42,10 @@ pub struct TuiOptions {
     pub shutdown_on_quit: bool,
     /// Extra hook invoked after the UI loop ends and the terminal is restored.
     pub on_quit: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// Called with `true` when the board is shown and `false` when it is left or MAW quits, so the
+    /// host can make the console pass mouse clicks on (and give it back). The returned text, if
+    /// any, is shown as a notice. Runs on its own thread, one call at a time, in order.
+    pub on_board: Option<Arc<dyn Fn(bool) -> Option<String> + Send + Sync>>,
 }
 
 impl Default for TuiOptions {
@@ -52,6 +56,7 @@ impl Default for TuiOptions {
             max_fps: 15,
             shutdown_on_quit: true,
             on_quit: None,
+            on_board: None,
         }
     }
 }
@@ -788,6 +793,68 @@ async fn pull_reporting(
     res
 }
 
+// ------------------------------------------------------------------ console switch for the board
+
+/// Runs the host's `on_board` hook on one thread so the calls cannot overtake each other, and gives
+/// the console back when dropped (the thread finishes what is queued before the process goes on).
+struct BoardSwitch {
+    tx: Option<std::sync::mpsc::Sender<bool>>,
+    worker: Option<std::thread::JoinHandle<()>>,
+    shown: std::cell::Cell<bool>,
+}
+
+impl BoardSwitch {
+    fn start(
+        hook: Option<Arc<dyn Fn(bool) -> Option<String> + Send + Sync>>,
+        notes: mpsc::Sender<UiMsg>,
+    ) -> BoardSwitch {
+        let Some(hook) = hook else {
+            return BoardSwitch {
+                tx: None,
+                worker: None,
+                shown: std::cell::Cell::new(false),
+            };
+        };
+        let (tx, rx) = std::sync::mpsc::channel::<bool>();
+        let worker = std::thread::spawn(move || {
+            while let Ok(on) = rx.recv() {
+                if let Some(note) = hook(on) {
+                    let _ = notes.blocking_send(UiMsg::Toast(note, Level::Info));
+                }
+            }
+        });
+        BoardSwitch {
+            tx: Some(tx),
+            worker: Some(worker),
+            shown: std::cell::Cell::new(false),
+        }
+    }
+
+    /// Tell the hook when the board appears or goes away (only on a change).
+    fn show(&self, board: bool) {
+        if board != self.shown.get() {
+            self.shown.set(board);
+            if let Some(tx) = &self.tx {
+                let _ = tx.send(board);
+            }
+        }
+    }
+}
+
+impl Drop for BoardSwitch {
+    fn drop(&mut self) {
+        if self.shown.get() {
+            if let Some(tx) = &self.tx {
+                let _ = tx.send(false);
+            }
+        }
+        self.tx = None; // the worker ends after the queued calls
+        if let Some(w) = self.worker.take() {
+            let _ = w.join();
+        }
+    }
+}
+
 // ------------------------------------------------------------------ main loop
 
 /// Run the TUI until the user quits. Owns only the terminal; all state comes from `engine`
@@ -832,6 +899,7 @@ async fn event_loop(engine: &Arc<Engine>, sup: &Arc<Supervisor>, opts: &TuiOptio
     let mut clock = tokio::time::interval(Duration::from_millis(500));
     clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let (msg_tx, mut msg_rx) = mpsc::channel::<UiMsg>(64);
+    let board_switch = BoardSwitch::start(opts.on_board.clone(), msg_tx.clone());
     app.pull_suggestions = sup.pull_suggestions(ProviderKind::Ollama);
     // Model catalogs for every real provider (not only those already in use) so the Add-agent
     // dialog can offer pick-lists on a fresh project. Codex answers live; failures are ignored.
@@ -876,6 +944,7 @@ async fn event_loop(engine: &Arc<Engine>, sup: &Arc<Supervisor>, opts: &TuiOptio
             last_draw = Instant::now();
             need_draw = false;
         }
+        board_switch.show(app.view == View::Canvas);
         if app.quit {
             break;
         }
