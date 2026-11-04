@@ -674,6 +674,8 @@ fn hint_bar_scrolls_too_and_wide_terminals_need_no_scrolling() {
 fn bang_opens_the_shell_dialog_and_submits_a_run_action() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     let mut a = app();
+    // a terminal too short for the command line of the main screen: `!` opens the dialog
+    a.size = (80, 12);
     let key = |c| KeyEvent::new(c, KeyModifiers::NONE);
     handle_key(&mut a, key(KeyCode::Char('!')));
     assert!(matches!(&a.overlay, Overlay::Dialog(d) if d.kind == maw_tui::app::DialogKind::Shell));

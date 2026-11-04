@@ -38,6 +38,10 @@ pub const HELP: &[(&str, &str)] = &[
         "Command palette (in agent detail '/' searches the transcript)",
     ),
     (
+        "Main screen: type",
+        "The command line at the bottom is ready when MAW opens: /command (type / for the list, Tab completes), !shell command, or plain text to message the selected agent. Tab gives the keys to the one-key hotkeys; / or ! brings the line back",
+    ),
+    (
         "b  or  /board",
         "The board: an unbounded node graph of objective, plan, tasks, agents, conversations and messages. Click or arrows select, Enter or double click opens, drag moves a node or pans, + - zoom, 0 fits all, n task, P plan, G objective",
     ),

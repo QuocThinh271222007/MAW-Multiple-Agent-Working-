@@ -1077,6 +1077,9 @@ pub struct App {
     pub composer: TextInput,
     /// `true`: keys go to the message box; `false` (Tab): browse keys (copy, search, filters).
     pub composer_focus: bool,
+    /// The command line on the main screen takes the keys (Tab leaves it for the one-key hotkeys,
+    /// `/` or `!` comes back). Off in a new `App`, switched on by the runtime and by `goto`.
+    pub cmdline_focus: bool,
     /// Highlighted entry of the `/` command menu above the message box.
     pub composer_sel: usize,
     /// Horizontal scroll offsets of the title bar and the hint bar (mouse wheel over the bar).
@@ -1145,6 +1148,7 @@ impl App {
             perf_window: 1,
             composer: TextInput::new(),
             composer_focus: true,
+            cmdline_focus: false,
             composer_sel: 0,
             header_scroll: 0,
             footer_scroll: 0,
@@ -1292,6 +1296,9 @@ impl App {
             if v == View::AgentDetail {
                 self.composer_focus = true;
             }
+            if v == View::Dashboard {
+                self.cmdline_focus = true;
+            }
             if v == View::Canvas && !self.canvas.framed {
                 let scene = crate::canvas::build_scene(self);
                 let (w, h) = (self.size.0, self.size.1.saturating_sub(2 + 6));
@@ -1301,6 +1308,29 @@ impl App {
         }
         self.detail_scroll = 0;
         self.detail_dirty = true;
+    }
+
+    /// Whether the line at the bottom (the message box of an agent, or the command line of the main
+    /// screen) is the one receiving keys.
+    pub fn typing(&self) -> bool {
+        match self.view {
+            View::AgentDetail => self.composer_focus,
+            View::Dashboard => self.cmdline_focus && self.has_cmdline(),
+            _ => false,
+        }
+    }
+
+    fn set_typing(&mut self, on: bool) {
+        match self.view {
+            View::AgentDetail => self.composer_focus = on,
+            View::Dashboard => self.cmdline_focus = on,
+            _ => {}
+        }
+    }
+
+    /// The main screen has a command line when there is room for it.
+    pub fn has_cmdline(&self) -> bool {
+        self.size.1 >= 16
     }
 
     pub fn is_text_mode(&self) -> bool {
@@ -2052,7 +2082,7 @@ fn composer_key(app: &mut App, key: &KeyEvent) -> Option<Vec<Action>> {
                     }
                 }
             }
-            app.composer_focus = false;
+            app.set_typing(false);
             Some(vec![])
         }
         KeyCode::Esc if !app.composer.value().is_empty() => {
@@ -2063,6 +2093,11 @@ fn composer_key(app: &mut App, key: &KeyEvent) -> Option<Vec<Action>> {
         KeyCode::Esc if app.side.is_some() => {
             app.side = None;
             app.side_scroll = 0;
+            Some(vec![])
+        }
+        // on the main screen an empty line + Esc gives the keys back to the hotkeys
+        KeyCode::Esc if app.view == View::Dashboard => {
+            app.set_typing(false);
             Some(vec![])
         }
         KeyCode::Up if !menu.is_empty() => {
@@ -2229,6 +2264,20 @@ fn normal_key(app: &mut App, key: KeyEvent) -> Vec<Action> {
             (app.header_scroll + STEP).min(app.header_max.get())
         };
         return vec![];
+    }
+
+    // the command line of the main screen
+    if app.view == View::Dashboard && app.has_cmdline() && app.search.is_none() {
+        if app.cmdline_focus {
+            if let Some(actions) = composer_key(app, &key) {
+                return actions;
+            }
+        } else if let KeyCode::Char(c @ ('/' | '!')) = key.code {
+            app.cmdline_focus = true;
+            app.composer.set(&c.to_string());
+            app.composer_sel = 0;
+            return vec![];
+        }
     }
 
     // the board has its own keys; the rest (views, help, quit ...) are the global ones
@@ -2769,7 +2818,8 @@ mod tests {
     #[test]
     fn command_palette_filters_and_runs() {
         let mut a = app();
-        handle_key(&mut a, ch('/'));
+        // ':' (or Ctrl+P) opens the palette; '/' types into the command line of the main screen
+        handle_key(&mut a, ch(':'));
         assert!(matches!(a.overlay, Overlay::Palette(_)));
         type_str(&mut a, "sch pau");
         if let Overlay::Palette(p) = &a.overlay {

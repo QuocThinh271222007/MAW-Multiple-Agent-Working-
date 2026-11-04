@@ -178,6 +178,7 @@ fn scrolled(text: &str, offset: usize, width: usize, max_cell: &std::cell::Cell<
 
 fn footer_hint(app: &App) -> &'static str {
     match app.view {
+        View::Dashboard if app.typing() => "type a command: /board · /task new · /goal set · /performance · !git status · Tab = hotkeys · Ctrl+C quit",
         View::Dashboard => "Tab panel · 1-9 agent · Enter open · G goal · a add · $ tokens · % performance · M model · ! shell · / cmds · ? help · q quit",
         View::Agents => "←→ select · Enter detail · C connect · D disconnect · i interrupt · m message · M model/effort · ! shell · ? help",
         View::AgentDetail => "type to message · /command · !shell · Tab browse (y copy · / search · n/N · T L P) · PgUp/PgDn scroll · Esc back",

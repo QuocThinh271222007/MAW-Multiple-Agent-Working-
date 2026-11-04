@@ -294,3 +294,20 @@ canvas shows the selected node in full and the keys that apply to it.
 
 The mouse needs a terminal that reports it. In cmd the wheel arrives as arrow keys, so selection and
 `+` / `-` / Shift+arrows are the way there.
+
+## Command line on the main screen
+
+The bottom of the main screen (Dashboard) is a command line, ready for typing as soon as MAW opens:
+
+* `/command` runs any command (`/board`, `/task new`, `/goal set`, `/performance`, `/workspace wsl`, ...).
+  Typing `/` lists them above the line, filtered as you type; `Up`/`Down` choose, `Tab` types out the
+  highlighted one, `Enter` runs it.
+* `!command` runs a shell command in the project folder; the result opens in a scrollable panel.
+* Plain text is a message for the agent shown at the right of the line's bottom border ("selected
+  agent"; `1`-`9` or the arrows in hotkey mode choose it).
+
+While the line has the keys, letters are text. `Tab` (on an empty line or after a finished command) or
+`Esc` on an empty line gives the keys back to the one-key hotkeys (`d s t g f b o l $ % c`, `1`-`9`, `q`,
+`a`, `G` ...); `/` or `!` in hotkey mode returns to the line with that character already typed. `:` and
+`Ctrl+P` still open the command palette as a list. On a terminal shorter than 16 rows there is no
+command line and everything works as before (`/` and `!` fall back to the palette and the shell dialog).

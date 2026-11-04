@@ -71,6 +71,14 @@ pub fn render_events_panel(f: &mut Frame, area: Rect, app: &App, focused: bool) 
 }
 
 pub fn render_dashboard(f: &mut Frame, area: Rect, app: &App) {
+    // the command line takes the bottom of the main screen when there is room
+    let (area, cmd) = if app.has_cmdline() && area.height >= 14 {
+        let parts = Layout::vertical([Constraint::Min(8), Constraint::Length(3)]).split(area);
+        (parts[0], Some(parts[1]))
+    } else {
+        (area, None)
+    };
+    let body = area;
     let h = area.height;
     let w = area.width;
     let goal_h: u16 = if h >= 26 {
@@ -116,6 +124,10 @@ pub fn render_dashboard(f: &mut Frame, area: Rect, app: &App) {
     }
     if ev_h > 0 && parts[2].height > 0 {
         render_events_panel(f, parts[2], app, app.panel == Panel::Events);
+    }
+    if let Some(c) = cmd {
+        super::agents::render_cmdline(f, c, app);
+        super::agents::render_composer_menu(f, body, app);
     }
 }
 

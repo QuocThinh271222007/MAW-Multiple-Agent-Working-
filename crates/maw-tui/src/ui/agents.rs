@@ -792,7 +792,7 @@ fn turn_status(app: &App, a: &Agent) -> (String, bool) {
 /// The message box: always ready for typing, `/` opens the command menu above it.
 fn render_composer(f: &mut Frame, area: Rect, app: &App, agent: &maw_core::Agent) {
     let t = &app.theme;
-    let focus = app.composer_focus && !app.is_text_mode();
+    let focus = app.typing() && !app.is_text_mode();
     let title = if focus {
         format!(
             " message {} · Enter send · /command · !shell · Tab browse · Esc back ",
@@ -832,10 +832,61 @@ fn render_composer(f: &mut Frame, area: Rect, app: &App, agent: &maw_core::Agent
     }
 }
 
+/// The command line of the main screen: type `/command`, `!shell command`, or plain text for the
+/// selected agent.
+pub fn render_cmdline(f: &mut Frame, area: Rect, app: &App) {
+    let t = &app.theme;
+    let focus = app.typing() && !app.is_text_mode();
+    let target = app
+        .selected_agent()
+        .map(|a| a.name.clone())
+        .unwrap_or_else(|| "no agent".into());
+    let title = if focus {
+        " command · Enter run · /board /task new /goal set ... · !shell · text = message to the selected agent · Tab hotkeys "
+            .to_string()
+    } else {
+        " hotkeys on · / or ! types a command · Tab for the panels ".to_string()
+    };
+    let status = format!(" selected agent: {target} ");
+    let block = panel(Line::from(Span::styled(title, t.bold())), focus, t).title_bottom(
+        Line::from(Span::styled(
+            truncate(&status, (area.width as usize).saturating_sub(4)),
+            t.dim(),
+        ))
+        .right_aligned(),
+    );
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    if inner.width < 4 || inner.height == 0 {
+        return;
+    }
+    let text = app.composer.value();
+    let (vis, col) = app.composer.view((inner.width as usize).saturating_sub(3));
+    let line = if text.is_empty() {
+        Line::from(vec![
+            Span::styled("› ", t.accent()),
+            Span::styled(
+                if focus {
+                    "type / for the list of commands, or !command to run a shell command"
+                } else {
+                    "press / to type a command"
+                },
+                t.dim(),
+            ),
+        ])
+    } else {
+        Line::from(vec![Span::styled("› ", t.accent()), Span::raw(vis)])
+    };
+    f.render_widget(Paragraph::new(line), inner);
+    if focus {
+        f.set_cursor_position((inner.x + 2 + col as u16, inner.y));
+    }
+}
+
 /// The `/` command menu, drawn over the bottom of the transcript just above the message box.
 pub fn render_composer_menu(f: &mut Frame, transcript: Rect, app: &App) {
     let t = &app.theme;
-    if !app.composer_focus || app.is_text_mode() {
+    if !app.typing() || app.is_text_mode() {
         return;
     }
     let menu = crate::app::composer_menu(app);

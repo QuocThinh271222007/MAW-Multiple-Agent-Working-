@@ -792,6 +792,8 @@ async fn event_loop(engine: &Arc<Engine>, sup: &Arc<Supervisor>, opts: &TuiOptio
     if let Ok(sz) = terminal.size() {
         app.size = (sz.width, sz.height);
     }
+    // the main screen starts with the command line ready (Tab gives the keys to the hotkeys)
+    app.cmdline_focus = true;
     // the board's layout from the last run (positions the user chose, zoom and place)
     if let Ok(Some(saved)) = engine
         .store()
