@@ -309,6 +309,8 @@ pub struct Supervisor {
     reminded: Mutex<HashSet<TaskId>>,
     review_dispatched: Mutex<HashMap<TaskId, u32>>,
     briefed: Mutex<HashSet<AgentId>>,
+    /// Messages already written to the conversation (typed by the user), so delivery does not repeat them.
+    shown: Mutex<HashSet<MessageId>>,
     user_stopped: Mutex<HashSet<AgentId>>,
     reconnecting: Mutex<HashSet<AgentId>>,
     /// goal -> (nudges sent, when the last one was sent)
@@ -332,6 +334,7 @@ impl Supervisor {
             reminded: Mutex::new(HashSet::new()),
             review_dispatched: Mutex::new(HashMap::new()),
             briefed: Mutex::new(HashSet::new()),
+            shown: Mutex::new(HashSet::new()),
             user_stopped: Mutex::new(HashSet::new()),
             reconnecting: Mutex::new(HashSet::new()),
             nudges: Mutex::new(HashMap::new()),
@@ -1234,7 +1237,7 @@ impl Supervisor {
         interrupt_now: bool,
     ) -> CoreResult<()> {
         let a = self.engine.resolve_agent(agent)?;
-        self.engine.send_message(
+        let m = self.engine.send_message(
             &Actor::User,
             &a.id.0,
             MessageType::Instruction,
@@ -1243,6 +1246,13 @@ impl Supervisor {
             None,
             None,
         )?;
+        // Show it at once: it may wait a while for the agent to finish its current turn.
+        if let Ok(mut s) = self.shown.lock() {
+            s.insert(m.id.clone());
+        }
+        self.transcripts
+            .push(&a.id, LineKind::User, text.to_string());
+        self.bump();
         if interrupt_now && a.state.is_busy() {
             let _ = self.interrupt_agent(&a.id).await;
         }
@@ -1838,13 +1848,47 @@ impl Supervisor {
             for m in &msgs {
                 let _ = self.engine.mark_delivered(m);
             }
-            self.send_turn(&aid, prompt).await;
+            // The conversation shows the messages themselves, not MAW's wrapper around them.
+            // The user's own messages were shown when they were typed.
+            for m in &msgs {
+                let already = self
+                    .shown
+                    .lock()
+                    .map(|mut s| s.remove(&m.id))
+                    .unwrap_or(false);
+                if !already {
+                    let from = name_of(&m.sender_agent_id);
+                    let body = if m.subject.trim().is_empty() {
+                        m.content.clone()
+                    } else {
+                        format!("{}: {}", m.subject, m.content)
+                    };
+                    self.transcripts.push(
+                        &aid,
+                        LineKind::User,
+                        format!("[{from}] {}", body.chars().take(1500).collect::<String>()),
+                    );
+                }
+            }
+            self.send_turn_with(&aid, prompt, None).await;
         }
         Ok(())
     }
 
     /// Start a turn on an agent session. Returns false if nothing was started.
     async fn send_turn(&self, id: &AgentId, text: String) -> bool {
+        let headline = text
+            .lines()
+            .next()
+            .unwrap_or("")
+            .chars()
+            .take(200)
+            .collect();
+        self.send_turn_with(id, text, Some(headline)).await
+    }
+
+    /// `shown`: the line to put in the conversation for this prompt (`None`: the caller already did).
+    async fn send_turn_with(&self, id: &AgentId, text: String, shown: Option<String>) -> bool {
         let live = match self.sessions.lock().await.get(id).cloned() {
             Some(l) => l,
             None => return false,
@@ -1852,16 +1896,9 @@ impl Supervisor {
         if live.turn_active.swap(true, Ordering::SeqCst) {
             return false; // a turn is already active; never stack turns
         }
-        self.transcripts.push(
-            id,
-            LineKind::User,
-            text.lines()
-                .next()
-                .unwrap_or("")
-                .chars()
-                .take(200)
-                .collect::<String>(),
-        );
+        if let Some(line) = shown {
+            self.transcripts.push(id, LineKind::User, line);
+        }
         self.set_state(id, AgentState::Thinking, None);
         let res =
             tokio::time::timeout(SEND_TIMEOUT, live.handle.send_input(AgentInput::text(text)))

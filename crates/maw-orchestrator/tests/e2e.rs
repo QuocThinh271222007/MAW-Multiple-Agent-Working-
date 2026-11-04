@@ -732,3 +732,60 @@ async fn removing_a_live_agent_stops_its_session_and_protects_a_running_task() {
     );
     sup.shutdown().await;
 }
+
+/// What the user typed must be what the conversation shows - at once, and not MAW's wrapper
+/// ("You have 1 new message to handle.") around it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_message_to_an_agent_shows_the_users_own_words_in_its_conversation() {
+    let repo = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    init_repo(repo.path());
+    let store = Arc::new(Store::open(data.path().join("maw.db")).unwrap());
+    let engine = Engine::open(store, "demo", &repo.path().to_string_lossy(), fast_cfg()).unwrap();
+    add_team(&engine);
+    let sup = Supervisor::new(engine.clone());
+    sup.register_provider(MockProvider::new(engine.clone(), MockScript::default()));
+    sup.connect_all().await;
+    let runner = tokio::spawn(sup.clone().run());
+    let worker = engine.resolve_agent("codex-backend").unwrap();
+
+    sup.message_agent("codex-backend", "please say hello in one sentence", false)
+        .await
+        .unwrap();
+    // shown immediately, before the agent has had a chance to take it
+    let lines = sup.transcript(&worker.id);
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.kind == LineKind::User && l.text == "please say hello in one sentence"),
+        "{lines:?}"
+    );
+    // and still exactly once after it was delivered to the agent
+    let delivered = wait_for(Duration::from_secs(20), || {
+        engine
+            .inbox(
+                &Actor::Agent {
+                    id: worker.id.clone(),
+                    role: Role::Worker,
+                },
+                false,
+                10,
+            )
+            .map(|m| m.iter().any(|m| m.delivered_at.is_some()))
+            .unwrap_or(false)
+    })
+    .await;
+    assert!(delivered, "the message was delivered");
+    let lines = sup.transcript(&worker.id);
+    let mine = lines
+        .iter()
+        .filter(|l| l.kind == LineKind::User && l.text.contains("say hello"))
+        .count();
+    assert_eq!(mine, 1, "{lines:?}");
+    assert!(
+        !lines.iter().any(|l| l.text.starts_with("You have")),
+        "MAW's wrapper is not shown as if the user had said it: {lines:?}"
+    );
+    sup.shutdown().await;
+    runner.abort();
+}
