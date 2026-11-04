@@ -564,6 +564,19 @@ impl Engine {
             a.state = to;
             if let Some(e) = error {
                 a.last_error = Some(maw_core::redact::redact(&e));
+            } else if from != to
+                && !matches!(
+                    to,
+                    AgentState::Failed
+                        | AgentState::AuthRequired
+                        | AgentState::RateLimited
+                        | AgentState::Disconnected
+                )
+            {
+                // A new attempt or a healthy state: the previous failure is history (the event
+                // log and the transcript keep it). Otherwise a working agent keeps showing the
+                // error it had before it was started.
+                a.last_error = None;
             }
             a.last_heartbeat = Some(Utc::now());
             db.update_agent(&a)?;

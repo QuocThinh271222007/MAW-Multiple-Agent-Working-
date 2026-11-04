@@ -537,6 +537,46 @@ fn handoff_moves_ownership_only_on_accept() {
 }
 
 #[test]
+fn an_old_failure_is_not_shown_on_an_agent_that_works_again() {
+    let f = setup();
+    let Actor::Agent { id, .. } = &f.w1 else {
+        panic!("agent actor")
+    };
+    let get = || f.engine.get_agent(id).unwrap();
+    f.engine
+        .set_agent_state(id, AgentState::Connecting, None)
+        .unwrap();
+    f.engine
+        .set_agent_state(
+            id,
+            AgentState::Failed,
+            Some("no Ollama server is reachable".into()),
+        )
+        .unwrap();
+    assert!(
+        get().last_error.is_some(),
+        "a failure is shown while it lasts"
+    );
+    // reconnecting starts a new attempt: the old message goes
+    f.engine
+        .set_agent_state(id, AgentState::Connecting, None)
+        .unwrap();
+    assert_eq!(get().last_error, None);
+    f.engine
+        .set_agent_state(id, AgentState::Idle, None)
+        .unwrap();
+    assert_eq!(get().last_error, None, "a healthy agent shows no error");
+    // a new failure sets a new message, and going down keeps the cause visible
+    f.engine
+        .set_agent_state(id, AgentState::Failed, Some("boom".into()))
+        .unwrap();
+    f.engine
+        .set_agent_state(id, AgentState::Disconnected, None)
+        .unwrap();
+    assert_eq!(get().last_error.as_deref(), Some("boom"));
+}
+
+#[test]
 fn the_leader_can_create_a_goal_only_when_none_is_active() {
     let f = setup(); // the user's goal "build auth" is active
                      // a Leader can never replace an objective the user set
