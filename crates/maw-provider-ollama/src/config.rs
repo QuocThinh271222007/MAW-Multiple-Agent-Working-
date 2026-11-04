@@ -27,6 +27,9 @@ pub struct OllamaConfig {
     pub max_pull_params_b: f64,
     /// Largest download in bytes (checked against what the server reports while pulling).
     pub max_pull_bytes: u64,
+    /// Where downloaded models are stored, for a server MAW starts (`OLLAMA_MODELS`). `None` = the
+    /// server's own standard folder. A server that was already running keeps its own folder.
+    pub models_dir: Option<std::path::PathBuf>,
     /// Where conversations are kept so an agent can resume after MAW restarts. `None` = not kept.
     pub state_dir: Option<std::path::PathBuf>,
 }
@@ -45,6 +48,7 @@ impl Default for OllamaConfig {
             binary: None,
             max_pull_params_b: 8.0,
             max_pull_bytes: 6_500_000_000,
+            models_dir: None,
             state_dir: None,
         }
     }

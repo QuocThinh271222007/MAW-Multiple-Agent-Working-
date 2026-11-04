@@ -19,6 +19,12 @@ pub fn ollama(
 ) -> Arc<dyn AgentProvider> {
     maw_provider_ollama::OllamaProvider::arc(maw_provider_ollama::OllamaConfig {
         state_dir,
+        models_dir: c
+            .models_dir
+            .as_deref()
+            .map(str::trim)
+            .filter(|d| !d.is_empty())
+            .map(|d| crate::platform::normalize_user_path(d, crate::platform::detect_os())),
         url: c.url.clone().filter(|u| !u.trim().is_empty()),
         num_ctx: c.num_ctx,
         num_ctx_leader: c.num_ctx_leader,

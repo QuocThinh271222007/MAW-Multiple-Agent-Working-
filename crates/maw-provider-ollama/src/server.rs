@@ -81,23 +81,41 @@ pub fn find_binary(configured: Option<&str>) -> Option<OllamaBinary> {
 
 /// Start `ollama serve` detached: it outlives MAW (like the Ollama desktop app does) and keeps
 /// no handle to MAW's terminal. `host` is the `OLLAMA_HOST` value to bind, when one is needed.
-pub fn spawn_serve(bin: &OllamaBinary, host: Option<&str>) -> std::io::Result<()> {
+pub fn spawn_serve(
+    bin: &OllamaBinary,
+    host: Option<&str>,
+    models_dir: Option<&Path>,
+) -> std::io::Result<()> {
     let mut cmd = Command::new(&bin.path);
     cmd.arg("serve")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .kill_on_drop(false);
+    // WSL only hands environment variables to Windows programs if they are listed in WSLENV; the
+    // `/p` flag turns a WSL path into the Windows path on the way over
+    let mut hand_over: Vec<&str> = vec![];
     if let Some(h) = host {
         cmd.env("OLLAMA_HOST", h);
-        if bin.windows_from_wsl {
-            // WSL only hands environment variables to Windows programs if they are listed here
-            let wslenv = match std::env::var("WSLENV") {
-                Ok(v) if !v.is_empty() => format!("{v}:OLLAMA_HOST"),
-                _ => "OLLAMA_HOST".to_string(),
-            };
-            cmd.env("WSLENV", wslenv);
-        }
+        hand_over.push("OLLAMA_HOST");
+    }
+    if let Some(dir) = models_dir {
+        // where downloaded models are kept; created here so the first download cannot fail on it
+        std::fs::create_dir_all(dir)?;
+        cmd.env("OLLAMA_MODELS", dir);
+        hand_over.push(if bin.windows_from_wsl {
+            "OLLAMA_MODELS/p"
+        } else {
+            "OLLAMA_MODELS"
+        });
+    }
+    if bin.windows_from_wsl && !hand_over.is_empty() {
+        let add = hand_over.join(":");
+        let wslenv = match std::env::var("WSLENV") {
+            Ok(v) if !v.is_empty() => format!("{v}:{add}"),
+            _ => add,
+        };
+        cmd.env("WSLENV", wslenv);
     }
     #[cfg(unix)]
     cmd.process_group(0);

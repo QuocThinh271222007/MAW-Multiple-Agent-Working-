@@ -20,6 +20,8 @@ pub struct OllamaProvider {
     http: reqwest::Client,
     resolved: Mutex<Option<String>>,
     start_lock: tokio::sync::Mutex<()>,
+    /// MAW started the server it talks to (so `models_dir` took effect).
+    started_here: std::sync::atomic::AtomicBool,
     speed: crate::session::SpeedCell,
 }
 
@@ -47,6 +49,7 @@ impl OllamaProvider {
             http,
             resolved: Mutex::new(None),
             start_lock: tokio::sync::Mutex::new(()),
+            started_here: std::sync::atomic::AtomicBool::new(false),
             speed: Default::default(),
         }
     }
@@ -95,10 +98,12 @@ impl OllamaProvider {
             )
         })?;
         let host = self.serve_host(&bin);
+        self.started_here
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         tracing::info!(binary = %bin.path.display(), host = ?host, "starting ollama serve");
-        server::spawn_serve(&bin, host.as_deref()).map_err(|e| {
-            ProviderError::Io(format!("could not start {}: {e}", bin.path.display()))
-        })?;
+        server::spawn_serve(&bin, host.as_deref(), self.cfg.models_dir.as_deref()).map_err(
+            |e| ProviderError::Io(format!("could not start {}: {e}", bin.path.display())),
+        )?;
         let deadline = std::time::Instant::now() + Duration::from_secs(45);
         while std::time::Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(500)).await;
@@ -323,6 +328,13 @@ impl AgentProvider for OllamaProvider {
         let info = self.show(&base, &name).await.unwrap_or_default();
         let size = layers.values().map(|l| l.0).sum::<u64>();
         let mut s = format!("{name} downloaded ({:.1} GB)", size as f64 / 1e9);
+        match (&self.cfg.models_dir, self.started_here.load(std::sync::atomic::Ordering::Relaxed)) {
+            (Some(d), true) => s.push_str(&format!(" into {}", d.display())),
+            (Some(_), false) => s.push_str(
+                " (the server was already running, so it kept its own models folder; ollama.models_dir applies to a server MAW starts)",
+            ),
+            (None, _) => {}
+        }
         if info.has("tools") {
             s.push_str(" — supports tools");
             if info.has("thinking") {

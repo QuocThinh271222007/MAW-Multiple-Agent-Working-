@@ -19,7 +19,8 @@ class H(http.server.BaseHTTPRequestHandler):
 http.server.HTTPServer((host, int(port)), H).serve_forever()
 "#;
     let script = format!(
-        "#!/bin/sh\nif [ \"$1\" = serve ]; then echo started >> '{}/started'; exec python3 -c '{}'; fi\n",
+        "#!/bin/sh\nif [ \"$1\" = serve ]; then echo started >> '{}/started'; echo \"$OLLAMA_MODELS\" >> '{}/models'; exec python3 -c '{}'; fi\n",
+        dir.display(),
         dir.display(),
         py.replace('\'', "'\\''")
     );
@@ -108,4 +109,23 @@ async fn autostart_can_be_switched_off_and_a_missing_install_is_explained() {
     });
     let e = p.ensure_server().await.unwrap_err();
     assert!(e.to_string().contains("not installed"), "{e}");
+}
+
+/// Where downloaded models are kept: a server MAW starts is told, and the folder exists before the
+/// first download.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_server_mawstarts_is_told_where_to_keep_downloaded_models() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = fake_binary(dir.path());
+    let models = dir.path().join("my-models").join("ollama");
+    let p = OllamaProvider::new(OllamaConfig {
+        url: Some(format!("127.0.0.1:{}", free_port())),
+        binary: Some(bin),
+        models_dir: Some(models.clone()),
+        ..Default::default()
+    });
+    p.ensure_server().await.unwrap();
+    let said = std::fs::read_to_string(dir.path().join("models")).unwrap();
+    assert_eq!(said.trim(), models.to_string_lossy());
+    assert!(models.is_dir(), "created before the first download");
 }

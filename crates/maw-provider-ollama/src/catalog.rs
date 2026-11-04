@@ -201,6 +201,67 @@ pub const SUGGESTED: &[Suggested] = &[
     },
 ];
 
+/// Models from Hugging Face, pulled through Ollama (`hf.co/<repo>:<quant>`). Every repo here was
+/// checked on the Hugging Face API: it exists, is not gated, and has a Q4_K_M file of the size shown.
+/// Whether the model can call tools depends on the chat template inside the file, so that is only
+/// known once it is downloaded and the server is asked.
+pub const HUGGING_FACE: &[Suggested] = &[
+    Suggested {
+        name: "hf.co/unsloth/Qwen3-4B-Instruct-2507-GGUF:Q4_K_M",
+        gb: 2.5,
+        params: "4B",
+        maker: "Alibaba (Qwen), packaged by Unsloth",
+        caps: "checked after download",
+        note: "Hugging Face; the most downloaded GGUF of the non-thinking 4B",
+        large: false,
+    },
+    Suggested {
+        name: "hf.co/unsloth/Qwen3-1.7B-GGUF:Q4_K_M",
+        gb: 1.1,
+        params: "1.7B",
+        maker: "Alibaba (Qwen), packaged by Unsloth",
+        caps: "checked after download",
+        note: "Hugging Face; tiny",
+        large: false,
+    },
+    Suggested {
+        name: "hf.co/bartowski/Qwen2.5-Coder-7B-Instruct-GGUF:Q4_K_M",
+        gb: 4.7,
+        params: "7B",
+        maker: "Alibaba (Qwen), packaged by bartowski",
+        caps: "checked after download",
+        note: "Hugging Face; code model",
+        large: false,
+    },
+    Suggested {
+        name: "hf.co/bartowski/Llama-3.2-3B-Instruct-GGUF:Q4_K_M",
+        gb: 2.0,
+        params: "3B",
+        maker: "Meta, packaged by bartowski",
+        caps: "checked after download",
+        note: "Hugging Face",
+        large: false,
+    },
+    Suggested {
+        name: "hf.co/unsloth/gemma-3-4b-it-GGUF:Q4_K_M",
+        gb: 2.5,
+        params: "4B",
+        maker: "Google, packaged by Unsloth",
+        caps: "checked after download",
+        note: "Hugging Face; Gemma 3",
+        large: false,
+    },
+    Suggested {
+        name: "hf.co/bartowski/Mistral-7B-Instruct-v0.3-GGUF:Q4_K_M",
+        gb: 4.4,
+        params: "7B",
+        maker: "Mistral AI, packaged by bartowski",
+        caps: "checked after download",
+        note: "Hugging Face",
+        large: false,
+    },
+];
+
 /// Who makes a model, from its name (a fine-tune's publisher) or else from its architecture family.
 /// `None` when it is not known: nothing is guessed.
 pub fn maker_of(name: &str, family: &str) -> Option<&'static str> {
@@ -236,6 +297,7 @@ pub fn maker_of(name: &str, family: &str) -> Option<&'static str> {
 pub fn suggestions() -> Vec<ModelChoice> {
     SUGGESTED
         .iter()
+        .chain(HUGGING_FACE.iter())
         .map(|s| ModelChoice {
             id: s.name.to_string(),
             display_name: s.name.to_string(),
@@ -253,6 +315,30 @@ pub fn suggestions() -> Vec<ModelChoice> {
             reasoning_efforts: vec![],
         })
         .collect()
+}
+
+/// Parameter count in billions from the REPOSITORY part of a Hugging Face name, where the tag is a
+/// quantisation (`hf.co/unsloth/Qwen3-4B-Instruct-2507-GGUF:Q4_K_M` -> 4.0).
+pub fn params_from_repo(name: &str) -> Option<f64> {
+    let repo = name.split(':').next()?.rsplit('/').next()?;
+    let bytes = repo.as_bytes();
+    for (i, &c) in bytes.iter().enumerate() {
+        if !(c == b'B' || c == b'b') {
+            continue;
+        }
+        let after_ok = i + 1 == bytes.len() || matches!(bytes[i + 1], b'-' | b'_' | b'.');
+        let mut s = i;
+        while s > 0 && (bytes[s - 1].is_ascii_digit() || bytes[s - 1] == b'.') {
+            s -= 1;
+        }
+        let before_ok = s == 0 || matches!(bytes[s - 1], b'-' | b'_' | b'.');
+        if after_ok && before_ok && s < i {
+            if let Ok(v) = repo[s..i].parse::<f64>() {
+                return Some(v);
+            }
+        }
+    }
+    None
 }
 
 /// Parameter count in billions read from the tag (`qwen3:8b` → 8.0, `x:1.7b-q4` → 1.7).
@@ -299,7 +385,13 @@ pub fn check_pull_name(name: &str, max_params_b: f64) -> Result<String, String> 
             "'{n}' is not a valid model name (letters, digits and . _ : / - only)"
         ));
     }
-    if let Some(p) = params_billions(n) {
+    let size = params_billions(n).or_else(|| {
+        // a Hugging Face name carries the size in the repository, not in the tag
+        n.starts_with("hf.co/")
+            .then(|| params_from_repo(n))
+            .flatten()
+    });
+    if let Some(p) = size {
         if p > max_params_b {
             return Err(format!(
                 "'{n}' has about {p}B parameters; downloads are limited to {max_params_b}B so they fit your VRAM (change `max_pull_params_b` under [ollama] to allow more)"
@@ -348,7 +440,7 @@ mod tests {
             assert_eq!(ok, !s.large, "{} ({} GB, large={})", s.name, s.gb, s.large);
             assert!(!s.maker.is_empty() && !s.params.is_empty() && !s.caps.is_empty());
         }
-        assert_eq!(suggestions().len(), SUGGESTED.len());
+        assert_eq!(suggestions().len(), SUGGESTED.len() + HUGGING_FACE.len());
         // the models that were asked for are all there
         for want in [
             "qwen3.5:4b",
@@ -364,6 +456,39 @@ mod tests {
         }
         // no model other than gpt-oss is offered effort levels
         assert!(suggestions().iter().all(|m| m.reasoning_efforts.is_empty()));
+    }
+
+    #[test]
+    fn hugging_face_names_are_checked_like_the_others() {
+        assert_eq!(
+            params_from_repo("hf.co/unsloth/Qwen3-4B-Instruct-2507-GGUF:Q4_K_M"),
+            Some(4.0)
+        );
+        assert_eq!(
+            params_from_repo("hf.co/bartowski/Llama-3.2-3B-Instruct-GGUF:Q4_K_M"),
+            Some(3.0)
+        );
+        assert_eq!(
+            params_from_repo("hf.co/unsloth/Qwen3-1.7B-GGUF:Q4_K_M"),
+            Some(1.7)
+        );
+        assert_eq!(params_from_repo("hf.co/x/NoSizeHere-GGUF:Q4_K_M"), None);
+        for s in HUGGING_FACE {
+            assert!(
+                s.name.starts_with("hf.co/") && s.name.contains(':'),
+                "{}",
+                s.name
+            );
+            assert!(check_pull_name(s.name, 8.0).is_ok(), "{}", s.name);
+            assert!(s.gb <= 6.5);
+        }
+        // a big repo is refused up front, before anything is downloaded
+        assert!(
+            check_pull_name("hf.co/someone/Llama-3.1-70B-Instruct-GGUF:Q4_K_M", 8.0)
+                .unwrap_err()
+                .contains("70")
+        );
+        assert_eq!(suggestions().len(), SUGGESTED.len() + HUGGING_FACE.len());
     }
 
     #[test]

@@ -44,6 +44,9 @@ pub struct OllamaSection {
     pub max_pull_params_b: f64,
     /// Largest download in GB.
     pub max_pull_gb: f64,
+    /// Folder for downloaded models (empty = Ollama's standard folder, e.g. C:/Users/<you>/.ollama/models
+    /// for the Windows app). Applies when MAW starts Ollama for you.
+    pub models_dir: Option<String>,
 }
 
 impl Default for OllamaSection {
@@ -60,6 +63,7 @@ impl Default for OllamaSection {
             path: None,
             max_pull_params_b: d.max_pull_params_b,
             max_pull_gb: d.max_pull_bytes as f64 / 1e9,
+            models_dir: None,
         }
     }
 }
