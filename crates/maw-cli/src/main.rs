@@ -69,6 +69,13 @@ enum Cmd {
     Status,
     /// Ask a running `maw run`/`maw resume` to stop gracefully
     Stop,
+    /// Re-check providers and local models, and ask a running MAW to reconnect agents that are down
+    Refresh,
+    /// Where agent worktrees live: project (next to the code), wsl (Linux disk, fast git) or windows
+    Workspace {
+        /// project | wsl | windows (without it: show the current choice)
+        mode: Option<String>,
+    },
     /// Continue an existing goal headlessly (recovers interrupted work conservatively)
     Resume {
         #[arg(long)]
@@ -383,6 +390,8 @@ async fn real_main(cli: Cli) -> Result<()> {
             }
             Ok(())
         }
+        Some(Cmd::Refresh) => cmd_refresh(&ctx, project_arg.as_deref()).await,
+        Some(Cmd::Workspace { mode }) => cmd_workspace(&ctx, project_arg.as_deref(), mode),
         Some(Cmd::Stop) => {
             let p = resolve_project(&ctx, project_arg.as_deref(), false)?;
             let eng = open_utility_engine(&ctx, &p)?;
@@ -1524,5 +1533,127 @@ fn cmd_usage(ctx: &Ctx, project: Option<&str>, json: bool) -> Result<()> {
         }
     }
     println!("\nNote: totals are each provider's cumulative figure for its current session. Codex reports tokens only; provider plan/quota limits are not exposed.");
+    Ok(())
+}
+
+/// `maw refresh`: look at the environment again (providers, the Ollama server and its models, the
+/// agents of this project) and, when a MAW is running for the project, ask it to reconnect the
+/// agents that are down. Nothing is started from here; starting is the running MAW's job.
+async fn cmd_refresh(ctx: &Ctx, project_arg: Option<&str>) -> Result<()> {
+    let p = resolve_project(ctx, project_arg, false)?;
+    println!("Providers:");
+    for (name, prov) in [
+        ("claude", providers::claude(ctx.cfg.claude.path.clone())),
+        ("codex", providers::codex(ctx.cfg.codex.path.clone())),
+        ("ollama", providers::ollama(&ctx.cfg.ollama, None)),
+    ] {
+        match tokio::time::timeout(Duration::from_secs(15), prov.detect()).await {
+            Ok(Ok(i)) if i.installed => println!(
+                "  {name:<7} ready{}",
+                i.version
+                    .map(|v| format!(" (version {v})"))
+                    .unwrap_or_default()
+            ),
+            Ok(Ok(i)) => println!(
+                "  {name:<7} not available{}",
+                i.notes
+                    .first()
+                    .map(|n| format!(": {n}"))
+                    .unwrap_or_default()
+            ),
+            Ok(Err(e)) => println!("  {name:<7} error: {e}"),
+            Err(_) => println!("  {name:<7} did not answer in time"),
+        }
+    }
+    let local = providers::ollama(&ctx.cfg.ollama, None);
+    match tokio::time::timeout(Duration::from_secs(15), local.list_models()).await {
+        Ok(Ok(models)) if !models.is_empty() => println!(
+            "Local models: {}",
+            models
+                .iter()
+                .map(|m| m.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Ok(Ok(_)) => println!("Local models: none installed (maw models pull)"),
+        _ => println!("Local models: server not reachable"),
+    }
+
+    if !ctx.dirs.db_path(&p.name).exists() {
+        println!(
+            "{} is not a MAW project yet (maw init), so there are no agents to refresh.",
+            p.path.display()
+        );
+        return Ok(());
+    }
+    let eng = open_utility_engine(ctx, &p)?;
+    println!("Agents of '{}':", p.name);
+    for a in eng.list_agents().map_err(|e| anyhow::anyhow!("{e}"))? {
+        println!(
+            "  {:<14} {:<7} {:<18}{}",
+            a.name,
+            a.provider,
+            a.state,
+            a.last_error.map(|e| format!(" ! {e}")).unwrap_or_default()
+        );
+    }
+    match app::read_runtime_info(ctx, &p) {
+        Some(_) => {
+            anyhow_core(eng.store().write(|db| {
+                db.kv_set(
+                    eng.project_id(),
+                    "refresh_request",
+                    &chrono::Utc::now().to_rfc3339(),
+                )
+            }))?;
+            println!("Asked the running MAW to reconnect agents that are down (it starts the local model server if it has to; agents you stopped yourself stay stopped).");
+        }
+        None => println!(
+            "No MAW is running for '{}': agents connect when you open it.",
+            p.name
+        ),
+    }
+    Ok(())
+}
+
+/// `maw workspace [project|wsl|windows]`: show or change where agent worktrees are created.
+fn cmd_workspace(ctx: &Ctx, project_arg: Option<&str>, mode: Option<String>) -> Result<()> {
+    let p = resolve_project(ctx, project_arg, false)?;
+    let (wsl, windows) = app::worktree_bases(ctx, &p);
+    let describe = |r: &Result<PathBuf, String>| match r {
+        Ok(d) => d.display().to_string(),
+        Err(why) => format!("not available: {why}"),
+    };
+    if let Some(m) = mode {
+        let m = m.trim().to_lowercase();
+        let ok = match m.as_str() {
+            "project" => Ok(()),
+            "wsl" => wsl.as_ref().map(|_| ()).map_err(|e| e.clone()),
+            "windows" => windows.as_ref().map(|_| ()).map_err(|e| e.clone()),
+            other => bail!("unknown location '{other}': use project, wsl or windows"),
+        };
+        if let Err(why) = ok {
+            bail!("cannot use '{m}': {why}");
+        }
+        let mut cfg = ctx.cfg.clone();
+        cfg.orchestrator.worktree_location = m.clone();
+        cfg.save(&ctx.dirs)?;
+        println!("Worktrees of new work now go to: {m}");
+        println!("Agents that already have a worktree move it the next time they connect with no work in flight (their changes are committed on their own branch first). A running MAW needs a restart, or /workspace {m} in its message box.");
+    }
+    let current = ctx.cfg.orchestrator.worktree_location.clone();
+    let shown = if current.is_empty() {
+        "project".to_string()
+    } else {
+        current
+    };
+    println!("Project '{}' ({})", p.name, p.path.display());
+    println!(
+        "  project  {}",
+        p.path.join(".maw").join("worktrees").display()
+    );
+    println!("  wsl      {}", describe(&wsl));
+    println!("  windows  {}", describe(&windows));
+    println!("Saved choice: {shown} (set with `maw workspace <project|wsl|windows>`)");
     Ok(())
 }

@@ -576,8 +576,16 @@ impl Engine {
                     no_file_changes_expected: a.no_file_changes_expected,
                     idempotency_key: a.idempotency_key,
                 };
-                let t = self.create_task(actor, nt)?;
-                one_task(&t)
+                let (t, existed) = self.create_task_dedup(actor, nt)?;
+                let mut v = one_task(&t)?;
+                if existed {
+                    v["already_existed"] = json!(true);
+                    v["note"] = json!(format!(
+                        "{} already exists with this title and assignee, so no new task was created. Do not create it again.",
+                        t.key
+                    ));
+                }
+                Ok(v)
             }
             "maw_task_list" => {
                 let a: TaskListArgs = parse(args)?;

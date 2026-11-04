@@ -50,7 +50,7 @@ async fn live_small_model_gets_a_user_message() {
         )
         .unwrap();
     let msgs = engine.undelivered_for(&agent.id).unwrap();
-    let prompt = prompts::messages_prompt(&msgs, &|_| "user".to_string());
+    let prompt = prompts::messages_prompt(Role::Worker, &msgs, &|_| "user".to_string());
     eprintln!("=== prompt sent to the model:\n{prompt}\n===");
     let token = engine.mint_token(&agent.id);
     let server = maw_mcp::serve_http(engine.clone(), "127.0.0.1:0".parse().unwrap())

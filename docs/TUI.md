@@ -203,3 +203,25 @@ A panel with no source shows "no data", never a zero. Charts turn yellow at 85% 
 * `Alt+←` / `Alt+→` scroll the title bar. Some terminals (cmd) turn the mouse wheel into arrow keys and
   never report the pointer position, so the wheel cannot tell the bar from the body there; `?` shows how
   many mouse events MAW has received (0 = the terminal is not passing the mouse on).
+
+## Added: working line, side windows, /refresh
+
+* **Working line.** The bottom border of the message box shows what the open agent is doing:
+  `◐ working 00:42 · ↓ 3.2k tokens · /interrupt to stop` while it works, and
+  `● idle · last turn 00:42 · 3.2k tokens · session 14.2k tokens` afterwards. Tokens are only what the
+  provider reports (a provider that reports none shows no figure); the turn count starts when this
+  screen first sees the agent busy, so a turn already running when you open MAW is counted from its
+  start event when that is still in the event log.
+* **Side windows** (the one-key views, usable while typing): `/performance` (CPU, RAM, GPU, VRAM and
+  generation-speed charts; `/performance 1m|5m|30m` picks the window), `/tokens`, `/status` (state,
+  model, effort, permission, session, workspace, tokens, project, goal). They sit to the right of the
+  conversation when the terminal is wide (about 100 columns or more) and cover it otherwise; the message
+  box keeps working. The same command again, or `Esc` (after the typed text), closes them. Outside the
+  agent view `/performance` and `/tokens` open the full view.
+* `/refresh` reloads the model lists and reconnects agents that are down (same as `maw refresh`).
+
+## Added: /workspace
+
+`/workspace project|wsl|windows` in the message box changes where new agent worktrees are created while
+MAW runs (see `maw workspace` in the README for the meaning of each). Without an argument it reports the
+current choice. Not saved to the configuration file; `maw workspace <mode>` is.

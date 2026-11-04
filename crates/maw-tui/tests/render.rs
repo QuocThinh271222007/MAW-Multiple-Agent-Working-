@@ -2015,3 +2015,168 @@ fn the_top_bar_shows_every_view_key_first_including_the_performance_key() {
         "full names when they fit: {bar}"
     );
 }
+
+/// The bottom border of the message box says what the agent is doing, for how long and with how
+/// many provider-reported tokens, and keeps the last turn's figures once it is idle again.
+#[test]
+fn the_message_box_shows_the_turn_clock_and_tokens() {
+    use maw_core::AgentState;
+    let mut a = app();
+    a.selected_agent = 1;
+    a.goto(View::AgentDetail);
+    let mut snap = a.snap.clone().unwrap();
+    let id = snap.agents[1].id.clone();
+    a.now = chrono::Utc::now();
+    // the fixture's agent is already busy: let it finish first, then start a clean turn
+    snap.agents[1].state = AgentState::Idle;
+    a.apply_snapshot(snap.clone());
+    {
+        let ag = &mut snap.agents[1];
+        ag.state = AgentState::Working;
+        ag.usage.reported_by_provider = true;
+        ag.usage.total_tokens = Some(10_000);
+    }
+    a.apply_snapshot(snap.clone());
+    // 12 s later the provider has reported 2,300 more tokens
+    a.now += chrono::Duration::seconds(12);
+    snap.agents[1].usage.total_tokens = Some(12_300);
+    a.apply_snapshot(snap.clone());
+    let t = render_text(&a, 120, 34);
+    assert!(
+        t.contains("working 00:12") && t.contains("↓ 2.3k tokens") && t.contains("/interrupt"),
+        "{t}"
+    );
+
+    // idle again: the last turn is kept next to the session total
+    a.now += chrono::Duration::seconds(3);
+    snap.agents[1].state = AgentState::Idle;
+    a.apply_snapshot(snap.clone());
+    let t = render_text(&a, 120, 34);
+    assert!(
+        t.contains("idle")
+            && t.contains("last turn 00:15")
+            && t.contains("2.3k tokens")
+            && t.contains("session 12.3k"),
+        "{t}"
+    );
+    assert!(a.turn_marks[&id].started.is_none());
+
+    // a provider that reports nothing gets no invented figures
+    snap.agents[1].usage.reported_by_provider = false;
+    snap.agents[1].state = AgentState::Thinking;
+    a.apply_snapshot(snap);
+    let t = render_text(&a, 120, 34);
+    assert!(t.contains("thinking") && !t.contains("tokens ·"), "{t}");
+}
+
+/// `/performance`, `/status` and `/tokens` open a window beside the conversation without leaving
+/// the agent view or the message box (the `%` and `$` keys are only letters while typing).
+#[test]
+fn slash_commands_open_side_windows_beside_the_conversation() {
+    use crossterm::event::KeyCode;
+    use maw_tui::app::SidePanel;
+    let mut a = app();
+    a.selected_agent = 1;
+    a.goto(View::AgentDetail);
+
+    type_text(&mut a, "/performance");
+    assert!(
+        render_text(&a, 160, 36).contains("/performance"),
+        "listed in the menu"
+    );
+    press(&mut a, KeyCode::Enter);
+    assert_eq!(a.side, Some(SidePanel::Perf));
+    assert_eq!(a.view, View::AgentDetail, "still in the agent view");
+    let wide = render_text(&a, 160, 36);
+    assert!(
+        wide.contains("PERFORMANCE")
+            && wide.contains("Transcript")
+            && wide.contains("message codex-backend"),
+        "chart window, conversation and message box on one screen: {wide}"
+    );
+    // a narrow terminal has no room beside: the window covers the conversation, the box stays
+    let narrow = render_text(&a, 100, 30);
+    assert!(
+        narrow.contains("PERFORMANCE") && narrow.contains("message codex-backend"),
+        "{narrow}"
+    );
+
+    // the message box keeps working while it is open
+    type_text(&mut a, "hello");
+    assert_eq!(a.composer.value(), "hello");
+    press(&mut a, KeyCode::Esc); // first Esc clears the text
+    assert_eq!(a.side, Some(SidePanel::Perf));
+    press(&mut a, KeyCode::Esc); // the next closes the window
+    assert_eq!((a.side, a.view), (None, View::AgentDetail));
+
+    // a window length can be given
+    type_text(&mut a, "/performance 30m");
+    press(&mut a, KeyCode::Enter);
+    assert_eq!((a.side, a.perf_window), (Some(SidePanel::Perf), 2));
+    assert!(render_text(&a, 160, 36).contains("last 30m"));
+
+    // the same command again closes it (toggle); status and tokens replace one another
+    type_text(&mut a, "/performance");
+    press(&mut a, KeyCode::Enter);
+    assert_eq!(a.side, None);
+    type_text(&mut a, "/status");
+    press(&mut a, KeyCode::Enter);
+    let t = render_text(&a, 160, 36);
+    assert!(
+        t.contains("STATUS")
+            && t.contains("permission")
+            && t.contains("provider")
+            && t.contains("scheduler"),
+        "{t}"
+    );
+    type_text(&mut a, "/tokens");
+    press(&mut a, KeyCode::Enter);
+    assert_eq!(a.side, Some(SidePanel::Tokens));
+    assert!(render_text(&a, 160, 36).contains("Transcript"));
+
+    // outside the agent view the same commands open the full view
+    press(&mut a, KeyCode::Esc);
+    press(&mut a, KeyCode::Esc);
+    assert_ne!(a.view, View::AgentDetail);
+    let mut b = app();
+    b.overlay = Overlay::Palette(Default::default());
+    for c in "performance".chars() {
+        press(&mut b, KeyCode::Char(c));
+    }
+    press(&mut b, KeyCode::Enter);
+    assert_eq!(b.view, View::Perf);
+}
+
+/// `/workspace wsl|windows|project` switches where worktrees go while MAW runs; without an
+/// argument it only reports the current choice.
+#[test]
+fn workspace_command_switches_the_worktree_location() {
+    use crossterm::event::KeyCode;
+    use maw_tui::app::Action;
+    let mut a = app();
+    a.selected_agent = 1;
+    a.goto(View::AgentDetail);
+    assert_eq!(a.config.worktree_location, "project");
+
+    type_text(&mut a, "/workspace wsl");
+    assert!(
+        render_text(&a, 140, 34).contains("/workspace"),
+        "listed in the menu"
+    );
+    match press(&mut a, KeyCode::Enter).as_slice() {
+        [Action::SetConfig(c)] => assert_eq!(c.worktree_location, "wsl"),
+        o => panic!("{o:?}"),
+    }
+    assert_eq!(a.config.worktree_location, "wsl");
+
+    type_text(&mut a, "/workspace windows");
+    match press(&mut a, KeyCode::Enter).as_slice() {
+        [Action::SetConfig(c)] => assert_eq!(c.worktree_location, "windows"),
+        o => panic!("{o:?}"),
+    }
+    // no argument: nothing changes, the current choice is reported
+    type_text(&mut a, "/workspace");
+    assert!(press(&mut a, KeyCode::Enter).is_empty());
+    assert_eq!(a.config.worktree_location, "windows");
+    assert_eq!(a.view, View::AgentDetail);
+}

@@ -463,7 +463,7 @@ impl Engine {
             }
             db.close_undelivered_for(id)?;
             db.expire_agent_approvals(id)?;
-            let worktree = a.workspace.clone().filter(|w| w.contains(".maw/worktrees"));
+            let worktree = a.workspace.clone().filter(|w| w.contains("/worktrees/"));
             emit.push(
                 EventKind::AgentRemoved,
                 Some(id),

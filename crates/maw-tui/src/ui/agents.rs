@@ -1,7 +1,7 @@
 //! Agent grid cards and the full-screen agent detail (transcript) view.
 
 use super::widgets::*;
-use crate::app::App;
+use crate::app::{App, SidePanel};
 use maw_core::{Agent, AgentState, EventKind, Role, TaskStatus};
 use maw_orchestrator::{LineKind, TranscriptLine};
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -369,6 +369,18 @@ pub fn render_agent_detail(f: &mut Frame, area: Rect, app: &App) {
         Constraint::Length(composer_h),
     ])
     .split(area);
+    // a window opened with /performance, /tokens or /status sits to the right of the
+    // conversation when there is room, and covers it otherwise
+    let side_w = (parts[1].width * 45 / 100).clamp(44, 72);
+    let beside = app.side.is_some() && parts[1].width >= side_w + 56;
+    let tr = if beside {
+        Rect {
+            width: parts[1].width - side_w,
+            ..parts[1]
+        }
+    } else {
+        parts[1]
+    };
     if composer_h > 0 {
         render_composer(f, parts[3], app, a);
     }
@@ -485,7 +497,7 @@ pub fn render_agent_detail(f: &mut Frame, area: Rect, app: &App) {
         .as_ref()
         .and_then(|s| matches.get(s.current))
         .copied();
-    let h = parts[1].height.saturating_sub(2) as usize;
+    let h = tr.height.saturating_sub(2) as usize;
     let total = lines.len();
     let scroll = clamp_scroll(app.detail_scroll, total, h);
     let end = total - scroll;
@@ -504,14 +516,14 @@ pub fn render_agent_detail(f: &mut Frame, area: Rect, app: &App) {
     );
     let block = panel(
         Line::from(Span::styled(
-            truncate(&hint, parts[1].width.saturating_sub(4) as usize),
+            truncate(&hint, tr.width.saturating_sub(4) as usize),
             t.dim(),
         )),
         false,
         t,
     );
-    let tin = block.inner(parts[1]);
-    f.render_widget(block, parts[1]);
+    let tin = block.inner(tr);
+    f.render_widget(block, tr);
     let query = app
         .search
         .as_ref()
@@ -561,7 +573,117 @@ pub fn render_agent_detail(f: &mut Frame, area: Rect, app: &App) {
             f.set_cursor_position((r.x + 1 + col as u16, r.y));
         }
     }
+    if let Some(panel) = app.side {
+        let r = if beside {
+            Rect {
+                x: parts[1].x + tr.width,
+                width: side_w,
+                ..parts[1]
+            }
+        } else {
+            parts[1]
+        };
+        f.render_widget(Clear, r);
+        match panel {
+            SidePanel::Perf => super::perf_view::render_perf(f, r, app),
+            SidePanel::Tokens => super::usage_view::render_tokens(f, r, app),
+            SidePanel::Status => render_status(f, r, app, a),
+        }
+    }
     render_composer_menu(f, parts[1], app);
+}
+
+/// `/status`: the facts about the open agent in one place, like Claude Code's `/status`.
+fn render_status(f: &mut Frame, area: Rect, app: &App, a: &Agent) {
+    let t = &app.theme;
+    let block = panel(
+        Line::from(Span::styled(
+            format!(" STATUS · {} · Esc closes ", a.name),
+            t.bold(),
+        )),
+        true,
+        t,
+    );
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let w = (inner.width as usize).saturating_sub(12);
+    let row = |k: &str, v: String| {
+        Line::from(vec![
+            Span::styled(format!("{k:<11}"), t.dim()),
+            Span::raw(truncate(&v, w)),
+        ])
+    };
+    let none = || "—".to_string();
+    let (turn, _) = turn_status(app, a);
+    let u = &a.usage;
+    let tok = |x: Option<u64>| {
+        x.map(crate::usage::fmt_tokens)
+            .unwrap_or_else(|| "?".into())
+    };
+    let (project, paused, goal) = app
+        .snap
+        .as_ref()
+        .map(|s| {
+            (
+                s.project.name.clone(),
+                s.paused,
+                s.goal
+                    .as_ref()
+                    .map(|g| format!("{} ({})", truncate(&g.text, 40), g.status.as_str()))
+                    .unwrap_or_else(|| "no goal".into()),
+            )
+        })
+        .unwrap_or_default();
+    let mut lines = vec![
+        row("agent", format!("{} [{}]", a.name, role_tag(a.role))),
+        row("provider", a.provider.to_string()),
+        row("model", a.model.clone().unwrap_or_else(|| "default".into())),
+        row(
+            "effort",
+            a.effort.clone().unwrap_or_else(|| "default".into()),
+        ),
+        row("permission", a.permission.as_str().to_string()),
+        row(
+            "state",
+            format!(
+                "{}{}",
+                a.state,
+                state_age(app, a)
+                    .map(|s| format!(" for {}", fmt_elapsed(s)))
+                    .unwrap_or_default()
+            ),
+        ),
+        row("turn", turn.trim().to_string()),
+        row("task", task_label(app, a)),
+        row(
+            "tokens",
+            if u.reported_by_provider {
+                format!(
+                    "in {} · out {} · total {}",
+                    tok(u.input_tokens),
+                    tok(u.output_tokens),
+                    tok(u.total_tokens)
+                )
+            } else {
+                "not reported by this provider".into()
+            },
+        ),
+        row("session", a.native_session_id.clone().unwrap_or_else(none)),
+        row("workspace", a.workspace.clone().unwrap_or_else(none)),
+        row(
+            "last error",
+            a.last_error.clone().unwrap_or_else(|| "none".into()),
+        ),
+        Line::from(""),
+        row("project", project),
+        row("goal", goal),
+        row(
+            "scheduler",
+            if paused { "paused" } else { "running" }.into(),
+        ),
+    ];
+    lines.truncate(inner.height as usize);
+    f.render_widget(Paragraph::new(lines), inner);
 }
 
 pub fn task_status_counts(app: &App) -> Vec<(TaskStatus, usize)> {
@@ -569,6 +691,58 @@ pub fn task_status_counts(app: &App) -> Vec<(TaskStatus, usize)> {
         .iter()
         .map(|s| (*s, app.tasks().iter().filter(|t| t.status == *s).count()))
         .collect()
+}
+
+/// The line on the message box's bottom border: what the agent is doing, for how long and with how
+/// many tokens (as the provider reports them; never estimated). `true` while it is working.
+fn turn_status(app: &App, a: &Agent) -> (String, bool) {
+    use crate::usage::fmt_tokens;
+    let total = a
+        .usage
+        .total_tokens
+        .unwrap_or(a.usage.input_tokens.unwrap_or(0) + a.usage.output_tokens.unwrap_or(0));
+    let reported = a.usage.reported_by_provider;
+    let mark = app.turn_marks.get(&a.id);
+    if a.state.is_busy() {
+        let secs = mark
+            .and_then(|m| m.started)
+            .map(|s| (app.now - s).num_seconds().max(0))
+            .unwrap_or(0);
+        let spin = ["◐", "◓", "◑", "◒"][(secs as usize) % 4];
+        let what = match a.state {
+            AgentState::WaitingApproval => "waiting for approval",
+            AgentState::WaitingDependency => "waiting",
+            AgentState::Working => "working",
+            _ => "thinking",
+        };
+        let tokens = if reported {
+            format!(
+                " · ↓ {} tokens",
+                fmt_tokens(mark.map(|m| m.tokens).unwrap_or(0))
+            )
+        } else {
+            String::new()
+        };
+        return (
+            format!(
+                " {spin} {what} {}{tokens} · /interrupt to stop ",
+                fmt_elapsed(secs)
+            ),
+            true,
+        );
+    }
+    let mut s = format!(" ● {}", a.state.as_str().to_lowercase());
+    if let Some((secs, tokens)) = mark.and_then(|m| m.last) {
+        s.push_str(&format!(" · last turn {}", fmt_elapsed(secs)));
+        if reported {
+            s.push_str(&format!(" · {} tokens", fmt_tokens(tokens)));
+        }
+    }
+    if reported && total > 0 {
+        s.push_str(&format!(" · session {} tokens", fmt_tokens(total)));
+    }
+    s.push(' ');
+    (s, false)
 }
 
 /// The message box: always ready for typing, `/` opens the command menu above it.
@@ -584,7 +758,15 @@ fn render_composer(f: &mut Frame, area: Rect, app: &App, agent: &maw_core::Agent
         " browse: ↑↓ scroll · y copy · / search · T L P filters · Tab or Enter: message "
             .to_string()
     };
-    let block = panel(Line::from(Span::styled(title, t.bold())), focus, t);
+    let (status, busy) = turn_status(app, agent);
+    let status_style = if busy { t.warn() } else { t.dim() };
+    let block = panel(Line::from(Span::styled(title, t.bold())), focus, t).title_bottom(
+        Line::from(Span::styled(
+            truncate(&status, (area.width as usize).saturating_sub(4)),
+            status_style,
+        ))
+        .right_aligned(),
+    );
     let inner = block.inner(area);
     f.render_widget(block, area);
     if inner.width < 4 || inner.height == 0 {

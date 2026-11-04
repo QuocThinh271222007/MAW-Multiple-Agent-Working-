@@ -143,6 +143,26 @@ pub fn wsl_to_windows_path(p: &str) -> Option<String> {
 }
 
 /// Normalise a user supplied path (translating Windows paths inside WSL).
+/// The Windows user's profile folder as WSL sees it (`/mnt/c/Users/me`), asked from `cmd.exe`.
+pub fn windows_home() -> Option<PathBuf> {
+    let out = std::process::Command::new("cmd.exe")
+        .args(["/C", "echo %USERPROFILE%"])
+        .current_dir("/mnt/c") // cmd.exe refuses a Linux working directory
+        .output()
+        .ok()?;
+    parse_cmd_path(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// A Windows path printed by `cmd.exe` (`C:\Users\me`), as a WSL path. An unexpanded
+/// `%USERPROFILE%` (no Windows side) is not a path.
+pub fn parse_cmd_path(output: &str) -> Option<PathBuf> {
+    let t = output.trim();
+    if t.is_empty() || t.contains('%') {
+        return None;
+    }
+    windows_to_wsl_path(t).map(PathBuf::from)
+}
+
 pub fn normalize_user_path(p: &str, os: Os) -> PathBuf {
     if os == Os::Wsl {
         if let Some(w) = windows_to_wsl_path(p) {
@@ -160,6 +180,17 @@ pub fn is_windows_mount(p: &Path, os: Os) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_windows_profile_folder_is_read_from_cmd_output() {
+        assert_eq!(
+            parse_cmd_path("C:\\Users\\Thinh\r\n"),
+            Some(PathBuf::from("/mnt/c/Users/Thinh"))
+        );
+        // cmd.exe leaves the variable as is when it does not exist; empty output is nothing
+        assert_eq!(parse_cmd_path("%USERPROFILE%\r\n"), None);
+        assert_eq!(parse_cmd_path(""), None);
+    }
 
     #[test]
     fn path_translation() {

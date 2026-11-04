@@ -789,3 +789,142 @@ async fn a_message_to_an_agent_shows_the_users_own_words_in_its_conversation() {
     sup.shutdown().await;
     runner.abort();
 }
+
+/// `maw refresh` leaves a request in the database; a running MAW reconnects the agents that are
+/// down. A request left over from an earlier run is not acted on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_refresh_request_reconnects_agents_that_are_down() {
+    let repo = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    init_repo(repo.path());
+    let store = Arc::new(Store::open(data.path().join("maw.db")).unwrap());
+    let engine = Engine::open(store, "demo", &repo.path().to_string_lossy(), fast_cfg()).unwrap();
+    add_team(&engine);
+    let write_request = |v: &str| {
+        engine
+            .store()
+            .write(|db| db.kv_set(engine.project_id(), "refresh_request", v))
+            .unwrap()
+    };
+    write_request("left over from an earlier run");
+    let sup = Supervisor::new(engine.clone());
+    sup.register_provider(MockProvider::new(engine.clone(), MockScript::default()));
+    let worker = engine.resolve_agent("codex-backend").unwrap();
+    let runner = tokio::spawn(sup.clone().run());
+
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert!(
+        !sup.is_live(&worker.id).await,
+        "an old request is not a request"
+    );
+
+    write_request("now");
+    let mut up = false;
+    for _ in 0..100 {
+        if sup.is_live(&worker.id).await {
+            up = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(up, "the new request reconnected the agent");
+
+    // the same request is handled once: stopping the agent by hand keeps it stopped
+    sup.disconnect_agent(&worker.id, true).await;
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert!(!sup.is_live(&worker.id).await);
+    sup.shutdown().await;
+    runner.abort();
+}
+
+/// The configured location decides where a worker's worktree is made, and an idle worker's worktree
+/// follows when the location is changed and the agent reconnects.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_worktree_location_can_be_switched_and_an_idle_agent_follows() {
+    let repo = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let wsl_side = tempfile::tempdir().unwrap();
+    let win_side = tempfile::tempdir().unwrap();
+    init_repo(repo.path());
+    let store = Arc::new(Store::open(data.path().join("maw.db")).unwrap());
+    let engine = Engine::open(store, "demo", &repo.path().to_string_lossy(), fast_cfg()).unwrap();
+    add_team(&engine);
+    let sup = Supervisor::new(engine.clone());
+    sup.register_provider(MockProvider::new(engine.clone(), MockScript::default()));
+    sup.set_worktree_bases(
+        Ok(wsl_side.path().join("worktrees")),
+        Ok(win_side.path().join("worktrees")),
+    );
+    let worker = engine.resolve_agent("codex-backend").unwrap();
+    let path_of = |engine: &Engine| {
+        engine
+            .snapshot()
+            .unwrap()
+            .workspaces
+            .into_iter()
+            .find(|w| w.agent_id.as_ref() == Some(&worker.id) && w.kind == "worktree")
+            .map(|w| w.path)
+            .unwrap_or_default()
+    };
+
+    let mut c = engine.config();
+    c.worktree_location = "wsl".into();
+    engine.set_config(c.clone());
+    sup.connect_agent(&worker.id).await.unwrap();
+    assert!(
+        path_of(&engine).starts_with(&wsl_side.path().to_string_lossy().to_string()),
+        "{}",
+        path_of(&engine)
+    );
+    assert!(
+        !repo.path().join(".maw").exists(),
+        "nothing next to the project"
+    );
+
+    // switch to the Windows side; the idle agent moves when it reconnects
+    c.worktree_location = "windows".into();
+    engine.set_config(c.clone());
+    sup.disconnect_agent(&worker.id, false).await;
+    sup.connect_agent(&worker.id).await.unwrap();
+    let now = path_of(&engine);
+    assert!(
+        now.starts_with(&win_side.path().to_string_lossy().to_string()),
+        "{now}"
+    );
+    assert!(
+        std::fs::read_dir(wsl_side.path().join("worktrees"))
+            .map(|d| d.count())
+            .unwrap_or(0)
+            == 0,
+        "the old folder was removed"
+    );
+
+    sup.shutdown().await;
+}
+
+/// A side that is not available (say, no Windows drive) is reported in the agent's conversation and
+/// the project folder is used instead of failing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unavailable_worktree_location_falls_back_to_the_project_folder_and_says_so() {
+    let repo = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    init_repo(repo.path());
+    let store = Arc::new(Store::open(data.path().join("maw.db")).unwrap());
+    let engine = Engine::open(store, "demo", &repo.path().to_string_lossy(), fast_cfg()).unwrap();
+    add_team(&engine);
+    let sup = Supervisor::new(engine.clone());
+    sup.register_provider(MockProvider::new(engine.clone(), MockScript::default()));
+    sup.set_worktree_bases(Err("no WSL".into()), Err("no Windows drive here".into()));
+    let mut c = engine.config();
+    c.worktree_location = "windows".into();
+    engine.set_config(c);
+    let worker = engine.resolve_agent("codex-backend").unwrap();
+    sup.connect_agent(&worker.id).await.unwrap();
+    let said = sup
+        .transcript(&worker.id)
+        .iter()
+        .any(|l| l.text.contains("not available") && l.text.contains("no Windows drive here"));
+    assert!(said, "{:?}", sup.transcript(&worker.id));
+    assert!(repo.path().join(".maw").join("worktrees").exists());
+    sup.shutdown().await;
+}

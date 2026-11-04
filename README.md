@@ -158,3 +158,26 @@ See ROADMAP “Known issues”. Highlights: Linux/WSL2 only; Codex's App Server 
 Live-provider tests are opt-in (`MAW_LIVE_CODEX=1`, `MAW_LIVE_CLAUDE=1`, `-- --ignored`) because they spend real quota.
 
 License: MIT.
+
+### `maw refresh`
+
+Re-checks the providers, the local Ollama server and its models and the agents of the project, and,
+when a MAW is running for it, asks that process to reconnect the agents that are down (it starts the
+local model server if it has to). Agents you stopped yourself stay stopped. In the TUI: `/refresh`.
+
+### Where agents work: Windows disk or WSL disk
+
+`maw workspace` shows where each agent's git worktree is created and `maw workspace project|wsl|windows`
+changes it:
+
+* `project` (default): next to the code, in `.maw/worktrees` of the project.
+* `wsl`: on the Linux disk of WSL (`~/.local/share/maw/projects/<name>/worktrees`). Git is much faster
+  there than on `/mnt/c`, but Windows Explorer does not show the folders conveniently.
+* `windows`: on a Windows drive, in `orchestrator.windows_worktree_dir` (default: a `MAW` folder in your
+  Windows profile, found through `cmd.exe`). Visible in Explorer.
+
+New worktrees go to the chosen place at once. An agent that already has a worktree moves it the next time
+it connects while it has no work in flight (its leftover changes are committed on its own branch first, so
+nothing is lost). In the TUI the same switch is `/workspace project|wsl|windows` (for that session; use
+the command above to make it permanent). Claude Code and Codex sessions are tied to a folder, so after a
+move they may start a fresh conversation (MAW says so).

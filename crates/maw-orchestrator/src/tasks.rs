@@ -107,8 +107,27 @@ impl Engine {
         let a = db
             .list_agents(&self.project.id)?
             .into_iter()
-            .find(|a| a.id.0 == r || a.name.eq_ignore_ascii_case(r))
-            .ok_or_else(|| CoreError::not_found("agent", r))?;
+            .find(|a| a.id.0 == r || a.name.eq_ignore_ascii_case(r));
+        let Some(a) = a else {
+            // name the agents that do exist: a small model otherwise keeps inventing "worker1"
+            let names: Vec<String> = db
+                .list_agents(&self.project.id)?
+                .into_iter()
+                .filter(|a| a.role.is_executor())
+                .map(|a| a.name)
+                .collect();
+            return Err(CoreError::not_found(
+                "agent",
+                format!(
+                    "{r} (agents that can take tasks: {})",
+                    if names.is_empty() {
+                        "none yet".to_string()
+                    } else {
+                        names.join(", ")
+                    }
+                ),
+            ));
+        };
         if !a.role.is_executor() {
             return Err(CoreError::InvalidInput(format!(
                 "agent '{}' has role {} and cannot own implementation tasks",
@@ -213,6 +232,75 @@ impl Engine {
 
     // ------------------------------------------------------------------ create / update / assign
 
+    /// Like `create_task`, but a Leader that asks again for a task that is already open (same title
+    /// in the current goal, same assignee when one is given) gets that task back instead of a twin.
+    /// Small models retry and repeat themselves; two identical open tasks only waste a worker.
+    /// The flag says the task already existed.
+    pub fn create_task_dedup(&self, actor: &Actor, nt: NewTask) -> CoreResult<(Task, bool)> {
+        if actor.is_leader() {
+            if let Some(t) = self.read(|db| self.find_open_duplicate(db, &nt))? {
+                return Ok((t, true));
+            }
+        }
+        self.create_task(actor, nt).map(|t| (t, false))
+    }
+
+    fn find_open_duplicate(&self, db: &Db, nt: &NewTask) -> CoreResult<Option<Task>> {
+        let Some(goal) = db
+            .current_goal(&self.project.id)?
+            .filter(|g| matches!(g.status, GoalStatus::Active | GoalStatus::Verifying))
+        else {
+            return Ok(None);
+        };
+        let want = nt.title.trim().to_lowercase();
+        if want.is_empty() {
+            return Ok(None);
+        }
+        for t in db.list_tasks(&self.project.id)? {
+            if t.goal_id != goal.id
+                || t.status.is_terminal()
+                || t.status == TaskStatus::Failed
+                || t.title.trim().to_lowercase() != want
+            {
+                continue;
+            }
+            let same_owner = match (&nt.assignee, &t.owner_agent_id) {
+                (None, _) => true,
+                (Some(a), Some(o)) => o.0 == *a || Self::agent_name(db, o).eq_ignore_ascii_case(a),
+                (Some(_), None) => false,
+            };
+            if same_owner {
+                return Ok(Some(t));
+            }
+        }
+        Ok(None)
+    }
+
+    /// When a worker names the wrong task (a small model reuses the key of its previous task), tell
+    /// it which one it is actually running.
+    fn running_hint(&self, db: &Db, actor: &Actor, wrong: &Task) -> String {
+        let Some(me) = actor.agent_id() else {
+            return String::new();
+        };
+        match db.list_tasks(&self.project.id) {
+            Ok(all) => all
+                .into_iter()
+                .find(|t| {
+                    t.owner_agent_id.as_ref() == Some(&me)
+                        && t.status == TaskStatus::Running
+                        && t.id != wrong.id
+                })
+                .map(|t| {
+                    format!(
+                        ". Your RUNNING task is {}: call again with task=\"{}\"",
+                        t.key, t.key
+                    )
+                })
+                .unwrap_or_default(),
+            Err(_) => String::new(),
+        }
+    }
+
     pub fn create_task(&self, actor: &Actor, nt: NewTask) -> CoreResult<Task> {
         if !actor.is_leader() {
             return Err(CoreError::Forbidden(
@@ -241,7 +329,7 @@ impl Engine {
             let goal = db
                 .current_goal(&self.project.id)?
                 .filter(|g| matches!(g.status, GoalStatus::Active | GoalStatus::Verifying))
-                .ok_or_else(|| CoreError::Precondition("no active goal; create a goal first".into()))?;
+                .ok_or_else(|| CoreError::Precondition("no active goal; create one first (a Leader can call maw_goal_create with an objective and success_criteria), then create the task again".into()))?;
             if db.count_goal_tasks(&goal.id)? >= cfg.max_tasks_per_goal {
                 return Err(CoreError::LimitExceeded(format!("goal already has {} tasks (max {})", cfg.max_tasks_per_goal, cfg.max_tasks_per_goal)));
             }
@@ -692,7 +780,7 @@ impl Engine {
             let mut t = self.task_ref(db, r)?;
             self.require_owner(actor, &t)?;
             if !matches!(t.status, TaskStatus::Running | TaskStatus::Assigned | TaskStatus::Ready) {
-                return Err(CoreError::Precondition(format!("{} is {}; only active tasks can be blocked", t.key, t.status)));
+                return Err(CoreError::Precondition(format!("{} is {}; only active tasks can be blocked{}", t.key, t.status, self.running_hint(db, actor, &t))));
             }
             t.blocked_reason = Some(match needs {
                 Some(n) => format!("{reason} (needs: {n})"),
@@ -781,6 +869,47 @@ impl Engine {
         Ok(())
     }
 
+    /// Record the files MAW itself saw changed in the worker's worktree when it submitted. This is
+    /// an observation, not the worker's claim: a model that forgets `changed_files` (small ones do)
+    /// would otherwise leave the Leader unable to verify a task that really changed files. It proves
+    /// that something changed, not that it is right; the Leader still decides. Returns whether
+    /// evidence was added (not when the task is finished or already has passing file changes).
+    pub fn record_observed_changes(&self, r: &str, files: &[String]) -> CoreResult<bool> {
+        if files.is_empty() {
+            return Ok(false);
+        }
+        self.tx(|db, emit| {
+            let mut t = self.task_ref(db, r)?;
+            if t.status.is_terminal()
+                || t.evidence
+                    .iter()
+                    .any(|e| e.kind == EvidenceKind::FileChanges && e.passed)
+            {
+                return Ok(false);
+            }
+            let shown: Vec<&str> = files.iter().take(20).map(String::as_str).collect();
+            let more = files.len().saturating_sub(shown.len());
+            let summary = format!(
+                "MAW saw {} file(s) changed in the worker's worktree: {}{}",
+                files.len(),
+                shown.join(", "),
+                if more > 0 {
+                    format!(" (+{more} more)")
+                } else {
+                    String::new()
+                }
+            );
+            let e = EvidenceInput {
+                kind: EvidenceKind::FileChanges,
+                summary,
+                passed: true,
+                detail: json!({ "files": files, "observed_by": "orchestrator" }),
+            };
+            self.add_evidence_tx(db, emit, &mut t, &Actor::System, &e)?;
+            Ok(true)
+        })
+    }
+
     pub fn add_evidence(&self, actor: &Actor, r: &str, e: EvidenceInput) -> CoreResult<Task> {
         self.tx(|db, emit| {
             let mut t = self.task_ref(db, r)?;
@@ -859,7 +988,7 @@ impl Engine {
                 _ => return Err(CoreError::Forbidden(format!("only the owner of {} can submit its result", t.key))),
             }
             if t.status != TaskStatus::Running {
-                return Err(CoreError::Precondition(format!("{} is {}; only RUNNING tasks can be submitted", t.key, t.status)));
+                return Err(CoreError::Precondition(format!("{} is {}; only RUNNING tasks can be submitted{}", t.key, t.status, self.running_hint(db, actor, &t))));
             }
             if !changed_files.is_empty() {
                 self.add_evidence_tx(

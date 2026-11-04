@@ -167,3 +167,33 @@ RAM; the view shows the split so you can tell why it is slow.
   transcript says so. Long histories are still trimmed to the context window as before.
 * **Not saved:** a line still streaming when the process is killed (a normal quit and a finished turn
   write it); approvals that were pending.
+
+## Two local agents talking to each other
+
+A Leader on a small model works, but three things went wrong in a real project and were fixed:
+
+* The Leader invented worker names (`worker1`) because it never listed the agents. The Leader
+  instructions and the brief that accompanies a user's message now tell it to call `maw_agent_list`
+  first, and an unknown assignee is rejected with the names that exist.
+* `maw_task_create` failed with "no active goal" and the model did not know what to do. The message now
+  says that a Leader can create the goal with `maw_goal_create`.
+* Some models write the tool call as text (`tool_call {"name": ...}`) instead of using the tool
+  interface, so nothing ran. MAW now reads such a call, but only when it names a real tool.
+
+### Measured: user -> Leader -> worker -> verified goal, both local
+
+One run through the real supervisor (`tests/live_team.rs`, Leader `qwen3:4b`, worker `qwen3:1.7b`, a git
+repo in a temp folder). The user asked the Leader to give the worker `tester` a task: create `hello.txt`.
+
+| | before the fixes above | after |
+|---|---|---|
+| Goal created by the Leader | yes (after 170 s of thinking) | yes (105-160 s) |
+| Tasks | T-1 and a duplicate T-2 | one task |
+| Worker | did T-1; got T-2 and kept reporting T-1 | did T-1, submitted on the second try (forgot the `task` argument once) |
+| Leader's verification | T-1 verified at 495 s; T-2 BLOCKED, goal could not finish | blocked once without file evidence (an earlier run), then, with MAW recording the files it saw changed, verified and completed the goal at about 415 s |
+
+One run each, so an anecdote. It shows the cycle can complete with two 1.7B-4B models on a trivial task;
+it does not show they cope with real multi-file work. Three further changes came from these runs:
+duplicate open tasks are returned instead of created twice, a worker who names its old task is told
+which one is running, and MAW records the files it observed changed in the worker's worktree as
+`file_changes` evidence when the worker did not list them.

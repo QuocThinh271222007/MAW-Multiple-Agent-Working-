@@ -166,8 +166,13 @@ pub fn render_perf(f: &mut Frame, area: Rect, app: &App) {
     let block = panel(
         Line::from(Span::styled(
             format!(
-                " PERFORMANCE · last {} · w changes the window ",
-                window_label(win)
+                " PERFORMANCE · last {} · {} ",
+                window_label(win),
+                if app.view == crate::app::View::Perf {
+                    "w changes the window"
+                } else {
+                    "/performance 1m|5m|30m changes the window · Esc closes"
+                }
             ),
             t.bold(),
         )),

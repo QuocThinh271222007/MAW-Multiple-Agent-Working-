@@ -147,6 +147,8 @@ pub enum Action {
         force: bool,
     },
     ConnectAll,
+    /// Reload model lists and reconnect agents that are down.
+    Refresh,
     DisconnectAgent(AgentId),
     InterruptAgent(AgentId),
     MessageAgent {
@@ -194,6 +196,28 @@ pub enum Action {
     Copy(String),
 }
 
+/// A small window shown beside the conversation in the agent view (`/performance`, `/tokens`,
+/// `/status`), so the message box keeps working. Esc closes it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SidePanel {
+    Perf,
+    Tokens,
+    Status,
+}
+
+/// One agent's turn clock: filled in while it works, summarised in `last` when it stops.
+#[derive(Clone, Debug, Default)]
+pub struct TurnMark {
+    /// When the running turn began (`None` while the agent is not busy).
+    pub started: Option<DateTime<Utc>>,
+    /// The agent's total token count when this screen first saw the turn.
+    pub base_tokens: u64,
+    /// Tokens reported during the running turn.
+    pub tokens: u64,
+    /// The turn that just ended: (seconds, tokens).
+    pub last: Option<(i64, u64)>,
+}
+
 // ---------------------------------------------------------------- commands (palette)
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -208,6 +232,10 @@ pub enum Cmd {
     ViewConfig,
     ViewTokens,
     ViewPerf,
+    PanelPerf,
+    PanelTokens,
+    PanelStatus,
+    Workspace,
     ToggleThinking,
     ToggleLogs,
     ToggleProtocol,
@@ -220,6 +248,7 @@ pub enum Cmd {
     AgentLogin,
     AgentRemove,
     ConnectAll,
+    Refresh,
     DisconnectAgent,
     InterruptAgent,
     MessageAgent,
@@ -249,6 +278,26 @@ pub struct CommandSpec {
 }
 
 pub const COMMANDS: &[CommandSpec] = &[
+    CommandSpec {
+        cmd: Cmd::PanelPerf,
+        name: "performance",
+        desc: "CPU / RAM / GPU / VRAM / speed charts in a window beside the conversation; add 1m, 5m or 30m (%)",
+    },
+    CommandSpec {
+        cmd: Cmd::Workspace,
+        name: "workspace",
+        desc: "where agent worktrees are created: /workspace project | wsl | windows (without an argument: show)",
+    },
+    CommandSpec {
+        cmd: Cmd::PanelStatus,
+        name: "status",
+        desc: "this agent: state, model, effort, permission, session, workspace, tokens",
+    },
+    CommandSpec {
+        cmd: Cmd::PanelTokens,
+        name: "tokens",
+        desc: "token usage per agent and task in a window beside the conversation ($)",
+    },
     CommandSpec {
         cmd: Cmd::ViewDashboard,
         name: "view dashboard",
@@ -328,6 +377,11 @@ pub const COMMANDS: &[CommandSpec] = &[
         cmd: Cmd::AgentLogin,
         name: "agent login",
         desc: "log the selected agent's provider in (official login, then connect)",
+    },
+    CommandSpec {
+        cmd: Cmd::Refresh,
+        name: "refresh",
+        desc: "reload the model lists and reconnect agents that are down (same as `maw refresh`)",
     },
     CommandSpec {
         cmd: Cmd::ConnectAll,
@@ -892,6 +946,10 @@ pub struct App {
     /// Horizontal scroll offsets of the title bar and the hint bar (mouse wheel over the bar).
     pub header_scroll: usize,
     pub footer_scroll: usize,
+    /// The window open beside the conversation, if any.
+    pub side: Option<SidePanel>,
+    /// Per agent: the running turn's clock and token count (see `track_turns`).
+    pub turn_marks: HashMap<AgentId, TurnMark>,
     /// Mouse events received so far. Zero after using the wheel means the terminal does not pass
     /// the mouse on (it may turn the wheel into arrow keys), which `?` explains.
     pub mouse_seen: u64,
@@ -948,6 +1006,8 @@ impl App {
             header_scroll: 0,
             footer_scroll: 0,
             mouse_seen: 0,
+            turn_marks: HashMap::new(),
+            side: None,
             header_max: Cell::new(0),
             footer_max: Cell::new(0),
             now: Utc::now(),
@@ -957,8 +1017,49 @@ impl App {
         }
     }
 
+    /// Follow each agent's turns from the snapshots: when a turn began and how many tokens the
+    /// provider has reported since. Shown on the message box like Claude Code's "working" line.
+    fn track_turns(&mut self) {
+        let Some(snap) = self.snap.as_ref() else {
+            return;
+        };
+        let now = self.now;
+        for a in &snap.agents {
+            let total = a
+                .usage
+                .total_tokens
+                .unwrap_or(a.usage.input_tokens.unwrap_or(0) + a.usage.output_tokens.unwrap_or(0));
+            let mark = self.turn_marks.entry(a.id.clone()).or_default();
+            if a.state.is_busy() {
+                if mark.started.is_none() {
+                    // the event log knows when the turn really began (this screen may be newer)
+                    let began = snap
+                        .recent_events
+                        .iter()
+                        .rev()
+                        .find(|e| {
+                            e.event_type == EventKind::AgentTurnStarted
+                                && e.agent_id.as_ref() == Some(&a.id)
+                        })
+                        .map(|e| e.timestamp)
+                        .filter(|t| now - *t < chrono::Duration::hours(6));
+                    mark.started = Some(began.unwrap_or(now));
+                    mark.base_tokens = total;
+                }
+                mark.tokens = total.saturating_sub(mark.base_tokens);
+            } else if let Some(s) = mark.started.take() {
+                mark.last = Some((
+                    (now - s).num_seconds().max(0),
+                    total.saturating_sub(mark.base_tokens),
+                ));
+                mark.tokens = 0;
+            }
+        }
+    }
+
     pub fn apply_snapshot(&mut self, snap: Snapshot) {
         self.snap = Some(snap);
+        self.track_turns();
         let na = self.agents().len();
         self.selected_agent = self.selected_agent.min(na.saturating_sub(1));
         let nt = self.snap.as_ref().map(|s| s.tasks.len()).unwrap_or(0);
@@ -1190,6 +1291,13 @@ pub fn run_cmd(app: &mut App, cmd: Cmd) -> Vec<Action> {
         Cmd::ViewConfig => app.goto(View::Config),
         Cmd::ViewTokens => app.goto(View::Tokens),
         Cmd::ViewPerf => app.goto(View::Perf),
+        Cmd::Workspace => app.set_toast(
+            "worktrees: type /workspace project | wsl | windows in the message box (without an argument it shows the current one)",
+            Level::Info,
+        ),
+        Cmd::PanelPerf => open_panel(app, SidePanel::Perf, true),
+        Cmd::PanelTokens => open_panel(app, SidePanel::Tokens, true),
+        Cmd::PanelStatus => open_panel(app, SidePanel::Status, true),
         Cmd::ToggleThinking => {
             app.show_thinking = !app.show_thinking;
             let msg = format!(
@@ -1261,6 +1369,7 @@ pub fn run_cmd(app: &mut App, cmd: Cmd) -> Vec<Action> {
             }
         }
         Cmd::ConnectAll => return vec![Action::ConnectAll],
+        Cmd::Refresh => return vec![Action::Refresh],
         Cmd::DisconnectAgent => {
             if let Some(a) = need_agent(app) {
                 return vec![Action::DisconnectAgent(a.id)];
@@ -1659,23 +1768,49 @@ pub fn composer_menu(app: &App) -> Vec<&'static CommandSpec> {
 /// Split `/thinking off` into the command query and an explicit on/off. The last word counts as
 /// an argument as soon as it starts like one (`o`, `of`, `off`, `on`, `show`, `hide`), so the
 /// menu keeps listing the command while the argument is being typed.
-fn slash_parts(text: &str) -> (&str, Option<bool>) {
+fn slash_parts(text: &str) -> (&str, &str) {
     let body = text.strip_prefix('/').unwrap_or(text).trim();
     if let Some((q, last)) = body.rsplit_once(char::is_whitespace) {
-        if !last.is_empty()
-            && ["on", "off", "show", "hide"]
-                .iter()
-                .any(|w| w.starts_with(last))
-        {
-            let state = match last {
-                "on" | "show" => Some(true),
-                "off" | "hide" => Some(false),
-                _ => None,
-            };
-            return (q.trim(), state);
+        let known = SLASH_ARGS.iter().any(|w| {
+            // a complete word, or at least two letters of one (one letter is more likely a search)
+            *w == last || (last.chars().count() >= 2 && w.starts_with(last))
+        });
+        if known {
+            return (q.trim(), last);
         }
     }
-    (body, None)
+    (body, "")
+}
+
+/// Words that count as an argument at the end of a slash command.
+const SLASH_ARGS: &[&str] = &[
+    "on", "off", "show", "hide", "1m", "5m", "30m", "project", "wsl", "windows",
+];
+
+/// The chart windows of `/performance 1m|5m|30m`, in the order of `perf_view::WINDOWS`.
+const WINDOW_ARGS: [&str; 3] = ["1m", "5m", "30m"];
+
+/// Open (or with `toggle`, close when already open) a side panel in the agent view. Outside the
+/// agent view the matching full view opens instead.
+fn open_panel(app: &mut App, panel: SidePanel, toggle: bool) {
+    if app.view != View::AgentDetail {
+        match panel {
+            SidePanel::Perf => app.goto(View::Perf),
+            SidePanel::Tokens => app.goto(View::Tokens),
+            SidePanel::Status => {
+                if app.selected_agent().is_some() {
+                    app.goto(View::AgentDetail);
+                    app.side = Some(panel);
+                }
+            }
+        }
+        return;
+    }
+    app.side = if toggle && app.side == Some(panel) {
+        None
+    } else {
+        Some(panel)
+    };
 }
 
 /// `/thinking on|off`, `/tools on|off`, `/protocol on|off`: set a transcript filter explicitly.
@@ -1703,6 +1838,10 @@ fn composer_key(app: &mut App, key: &KeyEvent) -> Option<Vec<Action>> {
         KeyCode::Esc if !app.composer.value().is_empty() => {
             app.composer.set("");
             app.composer_sel = 0;
+            Some(vec![])
+        }
+        KeyCode::Esc if app.side.is_some() => {
+            app.side = None;
             Some(vec![])
         }
         KeyCode::Up if !menu.is_empty() => {
@@ -1739,11 +1878,47 @@ fn composer_submit(app: &mut App) -> Vec<Action> {
             return vec![];
         };
         let cmd = cmd.cmd;
-        let state = slash_parts(&text).1;
+        let arg = slash_parts(&text).1.to_string();
         app.composer.set("");
         app.composer_sel = 0;
-        if let Some(on) = state {
+        let flag = match arg.as_str() {
+            "on" | "show" => Some(true),
+            "off" | "hide" => Some(false),
+            _ => None,
+        };
+        if let Some(on) = flag {
             if set_filter(app, cmd, on) {
+                return vec![];
+            }
+        }
+        if cmd == Cmd::Workspace {
+            let mut c = app.config.clone();
+            if ["project", "wsl", "windows"].contains(&arg.as_str()) {
+                c.worktree_location = arg.clone();
+                app.config = c.clone();
+                app.set_toast(
+                    format!(
+                        "worktrees now go to: {arg} (new worktrees at once; existing ones move when their agent next connects with no work in flight; saved for this session only: `maw workspace {arg}` makes it permanent)"
+                    ),
+                    Level::Ok,
+                );
+                return vec![Action::SetConfig(c)];
+            }
+            let now = if c.worktree_location.is_empty() {
+                "project"
+            } else {
+                c.worktree_location.as_str()
+            };
+            app.set_toast(
+                format!("worktrees go to: {now}. Change with /workspace project | wsl | windows"),
+                Level::Info,
+            );
+            return vec![];
+        }
+        if cmd == Cmd::PanelPerf {
+            if let Some(i) = WINDOW_ARGS.iter().position(|w| *w == arg) {
+                app.perf_window = i;
+                open_panel(app, SidePanel::Perf, false);
                 return vec![];
             }
         }
@@ -1880,7 +2055,9 @@ fn normal_key(app: &mut App, key: KeyEvent) -> Vec<Action> {
         KeyCode::Char('P') if in_agent_view => return run_cmd(app, Cmd::ToggleProtocol),
         KeyCode::Char('q') => return run_cmd(app, Cmd::Quit),
         KeyCode::Esc => {
-            if app.search.is_some() {
+            if app.side.is_some() {
+                app.side = None;
+            } else if app.search.is_some() {
                 app.search = None;
             } else if app.view == View::AgentDetail {
                 let back = if app.prev_view == View::AgentDetail {

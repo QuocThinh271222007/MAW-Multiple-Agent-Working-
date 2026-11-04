@@ -1125,3 +1125,150 @@ fn usage_reports_become_increments_attributed_to_the_current_task() {
         (Some(15), true)
     );
 }
+
+#[test]
+fn asking_again_for_an_open_task_returns_it_instead_of_a_twin() {
+    let f = setup();
+    let first = call(
+        &f,
+        &f.leader,
+        "maw_task_create",
+        json!({ "title": "Create hello.txt", "assignee": "w1" }),
+    )
+    .unwrap();
+    let key = first["task"].as_str().unwrap().to_string();
+    assert!(first.get("already_existed").is_none());
+
+    // the same request again (a small model repeating itself), also with other letter case
+    let again = call(
+        &f,
+        &f.leader,
+        "maw_task_create",
+        json!({ "title": "  create HELLO.txt ", "assignee": "w1" }),
+    )
+    .unwrap();
+    assert_eq!(again["task"], key.as_str());
+    assert_eq!(again["already_existed"], true);
+    assert_eq!(
+        f.engine.list_tasks().unwrap().len(),
+        1,
+        "no twin was created"
+    );
+
+    // another worker, or a task that is finished or canceled, is a different matter
+    let other = call(
+        &f,
+        &f.leader,
+        "maw_task_create",
+        json!({ "title": "Create hello.txt", "assignee": "w2" }),
+    )
+    .unwrap();
+    assert_ne!(other["task"], key.as_str());
+    call(
+        &f,
+        &f.leader,
+        "maw_task_update",
+        json!({ "task": key, "cancel": true }),
+    )
+    .unwrap();
+    let after_cancel = call(
+        &f,
+        &f.leader,
+        "maw_task_create",
+        json!({ "title": "Create hello.txt", "assignee": "w1" }),
+    )
+    .unwrap();
+    assert!(after_cancel.get("already_existed").is_none());
+    assert_eq!(f.engine.list_tasks().unwrap().len(), 3);
+}
+
+#[test]
+fn a_worker_who_names_its_old_task_is_told_which_one_it_is_running() {
+    let f = setup();
+    for t in ["First", "Second"] {
+        call(
+            &f,
+            &f.leader,
+            "maw_task_create",
+            json!({ "title": t, "assignee": "w1" }),
+        )
+        .unwrap();
+    }
+    f.engine
+        .assign_task(&f.leader, "T-1", &f.w1.id().0)
+        .unwrap();
+    f.engine.start_task("T-1").unwrap();
+    // T-2 is w1's but not running: submitting it names T-1 as the running one
+    let e = call(
+        &f,
+        &f.w1,
+        "maw_task_submit_result",
+        json!({ "task": "T-2", "summary": "s" }),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        e.contains("Your RUNNING task is T-1") && e.contains("task=\"T-1\""),
+        "{e}"
+    );
+}
+
+#[test]
+fn files_maw_saw_change_become_evidence_when_the_worker_forgot_to_list_them() {
+    let f = setup();
+    call(
+        &f,
+        &f.leader,
+        "maw_task_create",
+        json!({ "title": "Make a.txt", "assignee": "w1" }),
+    )
+    .unwrap();
+    make_running(&f, "T-1", &f.w1);
+    // a summary only: no changed_files, no evidence
+    call(
+        &f,
+        &f.w1,
+        "maw_task_submit_result",
+        json!({ "task": "T-1", "summary": "made a.txt" }),
+    )
+    .unwrap();
+    // the worker's word alone is not evidence of a file change
+    let e = call(
+        &f,
+        &f.leader,
+        "maw_task_verify",
+        json!({ "task": "T-1", "pass": true, "notes": "ok" }),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(e.contains("file_changes"), "{e}");
+    // nothing observed, nothing recorded
+    assert!(!f.engine.record_observed_changes("T-1", &[]).unwrap());
+    // what MAW saw in the worktree is recorded once, as the orchestrator's observation
+    assert!(f
+        .engine
+        .record_observed_changes("T-1", &["a.txt".to_string()])
+        .unwrap());
+    assert!(
+        !f.engine
+            .record_observed_changes("T-1", &["a.txt".to_string()])
+            .unwrap(),
+        "only once"
+    );
+    let t = f.engine.get_task("T-1").unwrap();
+    let ev = t
+        .evidence
+        .iter()
+        .find(|e| e.kind == EvidenceKind::FileChanges)
+        .unwrap();
+    assert_eq!(ev.recorded_by.as_str(), "orchestrator");
+    assert!(ev.summary.contains("a.txt"));
+    call(
+        &f,
+        &f.leader,
+        "maw_task_verify",
+        json!({ "task": "T-1", "pass": true, "notes": "ok" }),
+    )
+    .unwrap();
+    assert_eq!(f.engine.get_task("T-1").unwrap().status, TaskStatus::Done);
+}

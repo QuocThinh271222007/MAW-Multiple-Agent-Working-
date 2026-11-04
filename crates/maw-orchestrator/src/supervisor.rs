@@ -290,6 +290,12 @@ impl Transcripts {
     }
 }
 
+#[derive(Clone, Default)]
+struct WorktreeBases {
+    wsl: Option<Result<PathBuf, String>>,
+    windows: Option<Result<PathBuf, String>>,
+}
+
 struct Live {
     handle: SessionHandle,
     turn_active: AtomicBool,
@@ -309,6 +315,11 @@ pub struct Supervisor {
     reminded: Mutex<HashSet<TaskId>>,
     review_dispatched: Mutex<HashMap<TaskId, u32>>,
     briefed: Mutex<HashSet<AgentId>>,
+    /// Folders for agent worktrees on the WSL and Windows sides; which one is used follows
+    /// `OrchestratorConfig::worktree_location`. The reason is kept when a side is unavailable.
+    worktree_bases: RwLock<WorktreeBases>,
+    /// The last `refresh_request` value seen in the database (set by `maw refresh`).
+    refresh_seen: Mutex<Option<String>>,
     /// Messages already written to the conversation (typed by the user), so delivery does not repeat them.
     shown: Mutex<HashSet<MessageId>>,
     user_stopped: Mutex<HashSet<AgentId>>,
@@ -335,6 +346,8 @@ impl Supervisor {
             review_dispatched: Mutex::new(HashMap::new()),
             briefed: Mutex::new(HashSet::new()),
             shown: Mutex::new(HashSet::new()),
+            refresh_seen: Mutex::new(None),
+            worktree_bases: RwLock::new(WorktreeBases::default()),
             user_stopped: Mutex::new(HashSet::new()),
             reconnecting: Mutex::new(HashSet::new()),
             nudges: Mutex::new(HashMap::new()),
@@ -410,6 +423,54 @@ impl Supervisor {
         PathBuf::from(&self.engine.project().path)
     }
 
+    /// Tell the supervisor which folders agent worktrees can live in. Each side is a folder or the
+    /// reason it is unavailable. Which one is used follows `worktree_location` in the configuration,
+    /// which can be changed while running; existing worktrees move the next time their agent
+    /// connects with no work in flight.
+    pub fn set_worktree_bases(
+        &self,
+        wsl: Result<PathBuf, String>,
+        windows: Result<PathBuf, String>,
+    ) {
+        if let Ok(mut b) = self.worktree_bases.write() {
+            *b = WorktreeBases {
+                wsl: Some(wsl),
+                windows: Some(windows),
+            };
+        }
+    }
+
+    /// The folder worktrees go to now, and a note when the chosen place is not available.
+    fn worktree_base_and_note(&self) -> (PathBuf, Option<String>) {
+        let default = ws::default_base(&self.project_root());
+        let loc = self.engine.config().worktree_location;
+        let bases = self
+            .worktree_bases
+            .read()
+            .ok()
+            .map(|b| b.clone())
+            .unwrap_or_default();
+        let chosen = match loc.as_str() {
+            "wsl" => bases.wsl,
+            "windows" => bases.windows,
+            _ => return (default, None),
+        };
+        match chosen {
+            Some(Ok(p)) => (p, None),
+            Some(Err(why)) => (
+                default,
+                Some(format!(
+                    "worktree location '{loc}' is not available ({why}); using the project folder"
+                )),
+            ),
+            None => (default, None), // not configured (tests, headless without bases)
+        }
+    }
+
+    fn worktree_base(&self) -> PathBuf {
+        self.worktree_base_and_note().0
+    }
+
     fn set_state(&self, id: &AgentId, st: AgentState, err: Option<String>) {
         if let Err(e) = self.engine.set_agent_state(id, st, err) {
             tracing::debug!(agent = %id, ?st, "state change rejected: {e}");
@@ -425,6 +486,62 @@ impl Supervisor {
 
     pub async fn is_live(&self, id: &AgentId) -> bool {
         self.sessions.lock().await.contains_key(id)
+    }
+
+    /// Try again with every agent that is not running: failed or disconnected ones, and local ones
+    /// whose server was not up yet (the provider starts it). Agents the user stopped on purpose
+    /// stay stopped. Returns `(agent, state before, state after)` for the agents that were not live.
+    pub async fn refresh(self: &Arc<Self>) -> Vec<(String, AgentState, AgentState)> {
+        let before: Vec<Agent> = self.engine.list_agents().unwrap_or_default();
+        let mut idle_before = vec![];
+        for a in &before {
+            if !self.is_live(&a.id).await {
+                idle_before.push((a.id.clone(), a.name.clone(), a.state));
+            }
+        }
+        self.connect_all().await;
+        self.bump();
+        idle_before
+            .into_iter()
+            .map(|(id, name, was)| {
+                let now = self.engine.get_agent(&id).map(|a| a.state).unwrap_or(was);
+                (name, was, now)
+            })
+            .collect()
+    }
+
+    /// `maw refresh` in another terminal leaves a request in the database; act on a new one.
+    fn poll_refresh_request(self: &Arc<Self>) {
+        let current = self
+            .engine
+            .read(|db| db.kv_get(self.engine.project_id(), "refresh_request"))
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        let fresh = match self.refresh_seen.lock() {
+            Ok(mut seen) => match seen.as_ref() {
+                None => {
+                    *seen = Some(current); // what an earlier run left is not a request
+                    false
+                }
+                Some(prev) if *prev == current => false,
+                Some(_) => {
+                    *seen = Some(current.clone());
+                    !current.is_empty()
+                }
+            },
+            Err(_) => false,
+        };
+        if fresh {
+            let me = self.clone();
+            tokio::spawn(async move {
+                let report = me.refresh().await;
+                tracing::info!(
+                    agents = report.len(),
+                    "refresh requested by `maw refresh` done"
+                );
+            });
+        }
     }
 
     pub async fn connect_all(self: &Arc<Self>) {
@@ -596,7 +713,31 @@ impl Supervisor {
         }
         let name = agent.name.clone();
         let r = root.clone();
-        let res = tokio::task::spawn_blocking(move || ws::ensure_worktree(&r, &name)).await;
+        let (base_dir, base_note) = self.worktree_base_and_note();
+        if let Some(n) = base_note {
+            self.transcripts.push(&agent.id, LineKind::System, n);
+        }
+        // an agent with work in flight keeps the folder it is using; others may be moved
+        let busy = self
+            .engine
+            .list_tasks()
+            .unwrap_or_default()
+            .iter()
+            .any(|t| {
+                t.owner_agent_id.as_ref() == Some(&agent.id)
+                    && matches!(
+                        t.status,
+                        TaskStatus::Assigned
+                            | TaskStatus::Running
+                            | TaskStatus::Verifying
+                            | TaskStatus::InReview
+                            | TaskStatus::Blocked
+                    )
+            });
+        let res = tokio::task::spawn_blocking(move || {
+            ws::ensure_worktree_in(&r, &name, &base_dir, !busy)
+        })
+        .await;
         match res {
             Ok(Ok(info)) => {
                 let w = Workspace {
@@ -1308,7 +1449,10 @@ impl Supervisor {
                 _ = self.cancel.cancelled() => break,
                 _ = wake.notified() => {}
                 // finished transcript lines reach the database at most once per tick
-                _ = tick.tick() => self.transcripts.commit(),
+                _ = tick.tick() => {
+                    self.transcripts.commit();
+                    self.poll_refresh_request();
+                }
             }
             if let Err(e) = self.scheduler_pass().await {
                 tracing::warn!("scheduler pass failed: {e}");
@@ -1391,12 +1535,26 @@ impl Supervisor {
         })
         .await;
         if let Ok((committed, files)) = res {
-            let mut w2 = w.clone();
+            // Work from the workspace as it is NOW: the git steps above take a while, and the
+            // integration step may have finished in the meantime. Writing back the older copy with
+            // "pending" would undo an integration that really happened, unless this submission
+            // added a new commit that has not been merged.
+            let mut w2 = self
+                .engine
+                .snapshot()
+                .ok()
+                .and_then(|s| s.workspaces.into_iter().find(|x| x.id == w.id))
+                .unwrap_or_else(|| w.clone());
             w2.changed_files = files.clone();
-            w2.integration_status = "pending".into();
+            if committed || w2.integration_status != "integrated" {
+                w2.integration_status = "pending".into();
+            }
             w2.task_id = Some(task.id.clone());
             w2.updated_at = Utc::now();
             let _ = self.engine.attach_workspace(&task.key, &w2);
+            if let Err(e) = self.engine.record_observed_changes(&task.key, &files) {
+                tracing::warn!(task = %task.key, "could not record the observed changes: {e}");
+            }
             if committed {
                 self.engine.emit_custom(
                     EventKind::WorkspaceUpdated,
@@ -1844,7 +2002,7 @@ impl Supervisor {
                 .map(|a| (a.id.clone(), a.name.clone()))
                 .collect();
             let name_of = |id: &AgentId| names.get(id).cloned().unwrap_or_else(|| id.0.clone());
-            let prompt = prompts::messages_prompt(&msgs, &name_of);
+            let prompt = prompts::messages_prompt(agent.role, &msgs, &name_of);
             for m in &msgs {
                 let _ = self.engine.mark_delivered(m);
             }
@@ -1950,7 +2108,8 @@ impl Supervisor {
             }
             let r = root.clone();
             let b = branch.clone();
-            let outcome = tokio::task::spawn_blocking(move || ws::integrate(&r, &b))
+            let base_dir = self.worktree_base();
+            let outcome = tokio::task::spawn_blocking(move || ws::integrate_in(&r, &b, &base_dir))
                 .await
                 .map_err(|e| CoreError::Internal(e.to_string()))?;
             let outcome = outcome.map_err(CoreError::Precondition)?;
@@ -1977,10 +2136,7 @@ impl Supervisor {
     }
 
     pub fn integration_path(&self) -> PathBuf {
-        self.project_root()
-            .join(".maw")
-            .join("worktrees")
-            .join("_integration")
+        self.worktree_base().join("_integration")
     }
 
     // ------------------------------------------------------------------ shutdown

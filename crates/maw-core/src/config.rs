@@ -23,6 +23,14 @@ pub struct OrchestratorConfig {
     pub tick_ms: u64,
     /// Retention: keep at most this many verbose events.
     pub verbose_event_retention: i64,
+    /// Where agent worktrees are created: `project` (next to the project, `.maw/worktrees`),
+    /// `wsl` (on the Linux filesystem of WSL: fast git) or `windows` (on a Windows drive: visible
+    /// in Explorer). Applies to new worktrees; existing ones move when their agent next connects
+    /// with no work in flight.
+    pub worktree_location: String,
+    /// For `windows`: the folder on the Windows side, e.g. `C:\Users\me\MAW` or `/mnt/c/Users/me/MAW`.
+    /// Empty = a `MAW` folder in your Windows user profile.
+    pub windows_worktree_dir: String,
 }
 
 impl Default for OrchestratorConfig {
@@ -37,6 +45,8 @@ impl Default for OrchestratorConfig {
             leader_wake_debounce_ms: 1500,
             tick_ms: 1000,
             verbose_event_retention: 20_000,
+            worktree_location: "project".into(),
+            windows_worktree_dir: String::new(),
         }
     }
 }

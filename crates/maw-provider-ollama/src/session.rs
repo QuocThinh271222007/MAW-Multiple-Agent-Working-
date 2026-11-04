@@ -468,6 +468,22 @@ async fn step(sh: &Arc<Shared>, cancel: &CancellationToken) -> Result<Step, Stri
         })
         .await;
     }
+    // a model that wrote its tool call as text still gets it run (known tools only)
+    if calls.is_empty() && !content.trim().is_empty() {
+        let known = |n: &str| {
+            sh.tool_defs
+                .iter()
+                .any(|d| d["function"]["name"].as_str() == Some(n))
+        };
+        let parsed = api::text_tool_calls(&content, &known);
+        if !parsed.is_empty() {
+            tracing::info!(
+                calls = parsed.len(),
+                "ran tool calls the model wrote as text"
+            );
+            calls = parsed;
+        }
+    }
     let mut assistant = json!({"role":"assistant","content":content});
     if !calls.is_empty() {
         assistant["tool_calls"] = Value::Array(

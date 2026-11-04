@@ -217,7 +217,8 @@ fn apply_refresh(app: &mut App, sup: &Arc<Supervisor>, engine: &Engine, d: Refre
     app.task_detail = d.detail;
     app.usage_events = d.usage;
     // performance sampling starts when it is wanted: the view is open, or a local agent exists
-    if app.view == View::Perf
+    let wants_perf = app.view == View::Perf || app.side == Some(crate::app::SidePanel::Perf);
+    if wants_perf
         || app
             .agents()
             .iter()
@@ -225,7 +226,7 @@ fn apply_refresh(app: &mut App, sup: &Arc<Supervisor>, engine: &Engine, d: Refre
     {
         sup.start_perf();
     }
-    if app.view == View::Perf {
+    if wants_perf {
         app.perf = sup.perf();
     }
     app.config = engine.config();
@@ -580,6 +581,37 @@ async fn execute(
         Action::ConnectAll => {
             sup.connect_all().await;
             Ok("connect attempted for all agents".into())
+        }
+        Action::Refresh => {
+            // model lists first (they may have changed: a download, a login), then the agents
+            for kind in [
+                ProviderKind::Claude,
+                ProviderKind::Codex,
+                ProviderKind::Ollama,
+            ] {
+                let (s, tx) = (sup.clone(), tx.clone());
+                tokio::spawn(async move {
+                    if let Ok(list) = s.list_models(kind).await {
+                        let _ = tx.send(UiMsg::Models(kind, list)).await;
+                    }
+                });
+            }
+            let report = sup.refresh().await;
+            let up = report
+                .iter()
+                .filter(|(_, _, now)| {
+                    matches!(
+                        now,
+                        maw_core::AgentState::Idle
+                            | maw_core::AgentState::Thinking
+                            | maw_core::AgentState::Working
+                    )
+                })
+                .count();
+            Ok(format!(
+                "refreshed: model lists reloaded, {up} of {} agents that were down are up",
+                report.len()
+            ))
         }
         Action::DisconnectAgent(id) => {
             sup.disconnect_agent(&id, true).await;

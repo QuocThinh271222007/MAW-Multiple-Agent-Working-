@@ -70,6 +70,43 @@ pub fn resolve_project(ctx: &Ctx, arg: Option<&str>, register: bool) -> Result<P
     Ok(ProjectRef { name, path })
 }
 
+/// The folders where agent worktrees can live besides the project itself: on the Linux filesystem
+/// of WSL, or on a Windows drive. Each is the folder or the reason it cannot be used.
+pub fn worktree_bases(
+    ctx: &Ctx,
+    p: &ProjectRef,
+) -> (Result<PathBuf, String>, Result<PathBuf, String>) {
+    let wsl = match ctx.os {
+        Os::Wsl | Os::Linux => Ok(ctx.dirs.project_dir(&p.name).join("worktrees")),
+        _ => Err("MAW is not running on Linux or in WSL".to_string()),
+    };
+    let windows = if ctx.os != Os::Wsl {
+        Err("MAW is not running in WSL, so there is no Windows drive to reach".to_string())
+    } else {
+        let configured = ctx.cfg.orchestrator.windows_worktree_dir.trim().to_string();
+        let dir = if configured.is_empty() {
+            platform::windows_home()
+                .map(|h| h.join("MAW"))
+                .ok_or_else(|| {
+                    "could not find your Windows profile folder; set orchestrator.windows_worktree_dir".to_string()
+                })
+        } else {
+            Ok(platform::normalize_user_path(&configured, ctx.os))
+        };
+        dir.and_then(|d| {
+            if d.starts_with("/mnt/") {
+                Ok(d.join(crate::config::sanitize(&p.name)).join("worktrees"))
+            } else {
+                Err(format!(
+                    "{} is not on a Windows drive (expected /mnt/<drive>/... or C:\\...)",
+                    d.display()
+                ))
+            }
+        })
+    };
+    (wsl, windows)
+}
+
 pub fn open_store(ctx: &Ctx, p: &ProjectRef) -> Result<Arc<Store>> {
     std::fs::create_dir_all(ctx.dirs.project_dir(&p.name))?;
     Ok(Arc::new(
@@ -134,6 +171,8 @@ pub async fn boot(
         .recover()
         .map_err(|e| anyhow::anyhow!("recovery failed: {e}"))?;
     let sup = Supervisor::new(engine.clone());
+    let (wsl_base, windows_base) = worktree_bases(ctx, p);
+    sup.set_worktree_bases(wsl_base, windows_base);
     match providers {
         Providers::Real => {
             let state = ctx.dirs.project_dir(&p.name).join("ollama-sessions");

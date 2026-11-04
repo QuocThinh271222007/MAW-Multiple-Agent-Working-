@@ -17,7 +17,7 @@ you coordinate ONLY through the `maw` MCP tools (maw_*). Do not paste other agen
             "{common}\n\nROLE: LEADER. You own planning and coordination, not implementation.\n\
 1. Call maw_goal_get, then inspect the repository read-only to understand it. If there is no active goal and the user asked you to set one up, create it with maw_goal_create (objective + checkable success_criteria); you cannot replace or cancel a goal the user set.\n\
 2. Record your plan with maw_plan_propose_revision and set maw_goal_update(current_focus/current_milestone).\n\
-3. Create tasks with maw_task_create: small, independently verifiable, with acceptance_criteria, dependencies (task keys like T-2), weight, and an assignee (worker name) where it matters. Use idempotency_key so retries never duplicate tasks. Independent tasks run in parallel.\n\
+3. Create tasks with maw_task_create: small, independently verifiable, with acceptance_criteria, dependencies (task keys like T-2), weight, and an assignee where it matters: the assignee must be an exact name returned by maw_agent_list, never a guess. Use idempotency_key so retries never duplicate tasks. Independent tasks run in parallel.\n\
 4. MAW delivers worker reports, blockers and review results to you as messages. Resolve blockers (answer with maw_message_send, adjust with maw_task_update, reassign with maw_task_assign).\n\
 5. When a task reaches VERIFYING, inspect the evidence and the worker's changes, then call maw_task_verify(pass=true|false, notes). Failed verification should send it back with precise feedback or create a corrective task.\n\
 6. When every task is verified, check the goal's success criteria and call maw_goal_update(status=completed). It is rejected while unfinished tasks remain.\n\
@@ -99,7 +99,11 @@ pub fn review_prompt(task: &Task, workspace: Option<&str>) -> String {
     )
 }
 
-pub fn messages_prompt(messages: &[Message], names: &dyn Fn(&AgentId) -> String) -> String {
+pub fn messages_prompt(
+    role: Role,
+    messages: &[Message],
+    names: &dyn Fn(&AgentId) -> String,
+) -> String {
     // Written for small models too: say who wrote it, what to do, and give the acknowledge call
     // ready to copy (they mangle long ids and skip steps they have to infer).
     let n = messages.len();
@@ -131,6 +135,13 @@ pub fn messages_prompt(messages: &[Message], names: &dyn Fn(&AgentId) -> String)
                 m.id
             ));
         }
+    }
+    if role == Role::Leader
+        && messages
+            .iter()
+            .any(|m| m.sender_agent_id.as_str() == "user")
+    {
+        s.push_str("\nIf the user asks you to hand work to other agents: (1) call maw_agent_list for their exact names; (2) if there is no active goal, create one with maw_goal_create (objective and success_criteria); (3) create each task with maw_task_create (title, description, acceptance_criteria, assignee = an exact name from the list). Use only names that maw_agent_list returned.\n");
     }
     s.push_str(if messages.iter().all(|m| m.sender_agent_id.as_str() == "user") {
         "\nThe user reads your plain-text reply: answer questions and greetings directly in a sentence or two, without tools. Use your tools only if the message asks you to change or run something, then say briefly what you did. No acknowledgement call is needed."
@@ -170,10 +181,10 @@ mod tests {
 
     #[test]
     fn a_chat_line_from_the_user_needs_no_tool_call_but_agent_mail_shows_the_ack_call() {
-        let p = messages_prompt(&[msg("user")], &|_| "user".into());
+        let p = messages_prompt(Role::Worker, &[msg("user")], &|_| "user".into());
         assert!(p.contains("say hello in one sentence") && p.contains("plain-text reply"));
         assert!(!p.contains("maw_message_ack with"), "{p}");
-        let p = messages_prompt(&[msg("agent_9")], &|_| "worker2".into());
+        let p = messages_prompt(Role::Worker, &[msg("agent_9")], &|_| "worker2".into());
         assert!(p.contains("agent worker2"));
         assert!(
             p.contains(r#"maw_message_ack with {"message_id": "msg_abc"}"#),

@@ -116,6 +116,88 @@ pub struct ToolCall {
     pub arguments: Value,
 }
 
+/// Some small models write the tool call as ordinary text instead of using the structured field
+/// (`tool_call {"name": ..., "arguments": {...}}`, `<tool_call>{...}</tool_call>`, a fenced JSON
+/// block). Read those, but only for tools that really exist, so prose never becomes an action.
+pub fn text_tool_calls(text: &str, known: &dyn Fn(&str) -> bool) -> Vec<ToolCall> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < text.len() && out.len() < 8 {
+        if text.as_bytes()[i] == b'{' {
+            if let Some(end) = balanced_end(text, i) {
+                if let Ok(v) = serde_json::from_str::<Value>(&text[i..=end]) {
+                    if let Some(c) = as_text_call(&v, known, 0) {
+                        out.push(c);
+                        i = end + 1;
+                        continue;
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+/// Index of the `}` that closes the `{` at `start`, or `None`.
+fn balanced_end(text: &str, start: usize) -> Option<usize> {
+    let (mut depth, mut in_str, mut esc) = (0usize, false, false);
+    for (off, &b) in text.as_bytes()[start..].iter().enumerate() {
+        if in_str {
+            match (esc, b) {
+                (true, _) => esc = false,
+                (false, b'\\') => esc = true,
+                (false, b'"') => in_str = false,
+                _ => {}
+            }
+            continue;
+        }
+        match b {
+            b'"' => in_str = true,
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(start + off);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn as_text_call(v: &Value, known: &dyn Fn(&str) -> bool, depth: u8) -> Option<ToolCall> {
+    if let Some(name) = v.get("name").and_then(Value::as_str) {
+        if !known(name) {
+            return None;
+        }
+        let args = ["arguments", "parameters", "args"]
+            .iter()
+            .find_map(|k| v.get(*k))
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
+        // some models send the arguments as a JSON string
+        let args = match &args {
+            Value::String(s) => serde_json::from_str(s).ok()?,
+            _ => args,
+        };
+        return args.is_object().then_some(ToolCall {
+            id: None,
+            name: name.to_string(),
+            arguments: args,
+        });
+    }
+    if depth == 0 {
+        for k in ["tool_call", "function", "call"] {
+            if let Some(inner) = v.get(k) {
+                return as_text_call(inner, known, 1);
+            }
+        }
+    }
+    None
+}
+
 pub fn parse_chunk(line: &str) -> Result<ChatChunk, String> {
     let v: Value = serde_json::from_str(line).map_err(|e| format!("bad stream line: {e}"))?;
     let mut c = ChatChunk::default();
@@ -283,6 +365,36 @@ pub fn think_value(model: &str, info: &ModelInfo, effort: Option<&str>) -> Optio
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_tool_call_written_as_text_is_read_only_for_real_tools() {
+        let known = |n: &str| matches!(n, "maw_task_create" | "write_file");
+        let text = "Sure, I will do it.\ntool_call {\n  \"name\": \"maw_task_create\",\n  \"arguments\": {\"title\": \"A {brace} \\\"q\\\"\", \"assignee\": \"tester\"}\n}\nDone.";
+        let calls = text_tool_calls(text, &known);
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        assert_eq!(calls[0].name, "maw_task_create");
+        assert_eq!(calls[0].arguments["assignee"], "tester");
+        assert_eq!(calls[0].arguments["title"], "A {brace} \"q\"");
+        // tagged, fenced and wrapped forms; arguments given as a JSON string
+        let tagged = r#"<tool_call>{"name":"write_file","arguments":{"path":"a.txt","content":"x"}}</tool_call>"#;
+        assert_eq!(text_tool_calls(tagged, &known)[0].name, "write_file");
+        let fenced = "```json\n{\"tool_call\": {\"name\": \"write_file\", \"parameters\": \"{\\\"path\\\": \\\"b\\\"}\"}}\n```";
+        let c = text_tool_calls(fenced, &known);
+        assert_eq!(
+            (c[0].name.as_str(), c[0].arguments["path"].as_str()),
+            ("write_file", Some("b"))
+        );
+        // two calls in one message
+        let two = r#"{"name":"write_file","arguments":{"path":"1"}} then {"name":"write_file","arguments":{"path":"2"}}"#;
+        assert_eq!(text_tool_calls(two, &known).len(), 2);
+        // unknown tools, plain prose and broken JSON are not actions
+        assert!(text_tool_calls(r#"{"name":"rm_everything","arguments":{}}"#, &known).is_empty());
+        assert!(text_tool_calls("I would call write_file but will not.", &known).is_empty());
+        assert!(text_tool_calls(r#"{"name":"write_file","arguments":{"path":"#, &known).is_empty());
+        assert!(
+            text_tool_calls(r#"{"name":"write_file","arguments":"not json"}"#, &known).is_empty()
+        );
+    }
 
     #[test]
     fn urls_are_normalized_like_ollama_host() {

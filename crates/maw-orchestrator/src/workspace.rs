@@ -98,17 +98,56 @@ fn exclude_maw_dir(repo: &Path) {
     }
 }
 
-/// Create (or reuse) the agent's worktree on branch `maw/<agent>`.
+/// Where agent worktrees live unless the user chose another place: next to the project.
+pub fn default_base(repo: &Path) -> PathBuf {
+    repo.join(".maw").join("worktrees")
+}
+
+/// The directory where `branch` is checked out as a (linked) worktree, if it is.
+pub fn worktree_of_branch(repo: &Path, branch: &str) -> Option<PathBuf> {
+    let list = git(repo, &["worktree", "list", "--porcelain"]).ok()?;
+    let mut current: Option<PathBuf> = None;
+    for line in list.lines() {
+        if let Some(p) = line.strip_prefix("worktree ") {
+            current = Some(PathBuf::from(p));
+        } else if line
+            .strip_prefix("branch ")
+            .map(|b| b.trim_start_matches("refs/heads/"))
+            == Some(branch)
+        {
+            return current;
+        }
+    }
+    None
+}
+
 pub fn ensure_worktree(repo: &Path, agent_name: &str) -> Result<WorktreeInfo, String> {
+    ensure_worktree_in(repo, agent_name, &default_base(repo), false)
+}
+
+/// Create (or reuse) the agent's worktree on branch `maw/<agent>` under `base`.
+///
+/// When the branch is already checked out somewhere else (the user changed where worktrees go),
+/// `allow_move` decides: `false` keeps using that place; `true` moves it - leftover changes are
+/// committed on the agent's branch first, so nothing is lost, then the worktree is recreated under
+/// `base`. The caller only allows a move for an agent that has no work in flight.
+pub fn ensure_worktree_in(
+    repo: &Path,
+    agent_name: &str,
+    base_dir: &Path,
+    allow_move: bool,
+) -> Result<WorktreeInfo, String> {
     if !is_git_repo(repo) {
         return Err("project is not a git repository".into());
     }
     if !has_commits(repo) {
         return Err("repository has no commits yet; create an initial commit so MAW can branch worktrees from it".into());
     }
-    exclude_maw_dir(repo);
+    if base_dir.starts_with(repo) {
+        exclude_maw_dir(repo);
+    }
     let s = slug(agent_name);
-    let path = repo.join(".maw").join("worktrees").join(&s);
+    let path = base_dir.join(&s);
     let branch = format!("maw/{s}");
     let base = head_revision(repo).ok_or("cannot resolve HEAD")?;
     if path.join(".git").exists() {
@@ -118,6 +157,22 @@ pub fn ensure_worktree(repo: &Path, agent_name: &str) -> Result<WorktreeInfo, St
             base_revision: base,
             created: false,
         });
+    }
+    if let Some(old) = worktree_of_branch(repo, &branch).filter(|o| o != &path && o != repo) {
+        if !allow_move {
+            return Ok(WorktreeInfo {
+                path: old,
+                branch,
+                base_revision: base,
+                created: false,
+            });
+        }
+        // nothing is lost: leftovers go onto the agent's own branch before the folder is removed
+        commit_all(
+            &old,
+            &format!("[{branch}] changes saved before moving the worktree"),
+        )?;
+        remove_worktree(repo, &old)?;
     }
     std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
     // -B resets the branch only when the worktree is created fresh; existing agent branches keep their history.
@@ -186,8 +241,19 @@ pub fn commit_all(worktree: &Path, message: &str) -> Result<bool, String> {
 
 /// Merge `branch` into the integration worktree. Conflicts abort the merge and are reported.
 pub fn integrate(repo: &Path, branch: &str) -> Result<IntegrationOutcome, String> {
-    exclude_maw_dir(repo);
-    let int_path = repo.join(".maw").join("worktrees").join("_integration");
+    integrate_in(repo, branch, &default_base(repo))
+}
+
+/// `integrate` with the integration worktree kept under `base_dir`.
+pub fn integrate_in(
+    repo: &Path,
+    branch: &str,
+    base_dir: &Path,
+) -> Result<IntegrationOutcome, String> {
+    if base_dir.starts_with(repo) {
+        exclude_maw_dir(repo);
+    }
+    let int_path = base_dir.join("_integration");
     let int_branch = "maw/integration";
     if !int_path.join(".git").exists() {
         std::fs::create_dir_all(int_path.parent().unwrap()).map_err(|e| e.to_string())?;
@@ -377,5 +443,55 @@ mod tests {
         assert!(ensure_worktree(dir.path(), "x")
             .unwrap_err()
             .contains("no commits"));
+    }
+
+    #[test]
+    fn worktrees_can_live_elsewhere_and_move_without_losing_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().to_path_buf();
+        init_repo(&repo);
+        let elsewhere = tempfile::tempdir().unwrap();
+        let base = elsewhere.path().join("worktrees");
+        // created outside the project, on the agent's usual branch
+        let a = ensure_worktree_in(&repo, "Codex-1", &base, true).unwrap();
+        assert!(a.created && a.path.starts_with(&base), "{:?}", a.path);
+        assert!(
+            !repo.join(".maw").exists(),
+            "nothing was put next to the project"
+        );
+        std::fs::write(a.path.join("keep.txt"), "unsaved\n").unwrap();
+
+        // the user switches to another place: with work in flight the agent stays where it is
+        let other = elsewhere.path().join("moved");
+        let stay = ensure_worktree_in(&repo, "Codex-1", &other, false).unwrap();
+        assert_eq!((stay.path.clone(), stay.created), (a.path.clone(), false));
+        assert!(a.path.join("keep.txt").exists());
+
+        // idle agent: it moves, its unsaved file is committed on its own branch first
+        let moved = ensure_worktree_in(&repo, "Codex-1", &other, true).unwrap();
+        assert!(
+            moved.created && moved.path.starts_with(&other),
+            "{:?}",
+            moved.path
+        );
+        assert!(!a.path.exists(), "the old folder is gone");
+        assert_eq!(
+            std::fs::read_to_string(moved.path.join("keep.txt")).unwrap(),
+            "unsaved\n"
+        );
+        assert_eq!(
+            worktree_of_branch(&repo, &moved.branch),
+            Some(moved.path.clone())
+        );
+        // and asking again changes nothing
+        assert!(
+            !ensure_worktree_in(&repo, "Codex-1", &other, true)
+                .unwrap()
+                .created
+        );
+
+        // the integration worktree follows the same base
+        integrate_in(&repo, &moved.branch, &other).unwrap();
+        assert!(other.join("_integration").join("keep.txt").exists());
     }
 }
