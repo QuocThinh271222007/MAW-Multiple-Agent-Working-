@@ -3,7 +3,7 @@
 //! that has to reach the engine goes out as an `Action`, as everywhere else in the TUI.
 
 use crate::app::{run_cmd, Action, App, Cmd, DialogKind, Level, OutputState, Overlay, View};
-use crate::canvas::{build_scene, card, cycle, neighbor, Drag, NodeKey, Scene};
+use crate::canvas::{build_scene, card, cycle, neighbor, Button, Drag, NodeKey, Scene};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
 /// Make `key` the selection and point the rest of the TUI (agent list, task board) at the same thing,
@@ -140,6 +140,13 @@ pub fn canvas_key(app: &mut App, key: &KeyEvent) -> Option<Vec<Action>> {
             };
             if shift {
                 app.canvas.pan_cells(dx * 8, dy * 4);
+            } else if let Some(k) = app.canvas.grabbed.clone() {
+                // a picked-up node: the arrows nudge it by a quarter slot
+                if let Some(n) = scene.node(&k) {
+                    let at = (n.at.0 + dx as f32 * 0.25, n.at.1 + dy as f32 * 0.25);
+                    app.canvas.moved.insert(k.id(), at);
+                    app.canvas.dirty = true;
+                }
             } else {
                 let next = match &sel {
                     Some(k) => neighbor(&scene, k, dx, dy),
@@ -186,6 +193,23 @@ pub fn canvas_key(app: &mut App, key: &KeyEvent) -> Option<Vec<Action>> {
                 select(app, &scene, first);
             }
         },
+        KeyCode::Char('h') => {
+            app.canvas.clean = !app.canvas.clean;
+        }
+        KeyCode::Char('g') => match (app.canvas.grabbed.take(), sel.clone()) {
+            (Some(_), _) => {} // second press puts it down where it is
+            (None, Some(k)) => {
+                app.canvas.grabbed = Some(k);
+                app.set_toast(
+                    "node picked up: click where it goes (or nudge with the arrows), Esc cancels",
+                    Level::Info,
+                );
+            }
+            (None, None) => app.set_toast("select a node first, then g picks it up", Level::Info),
+        },
+        KeyCode::Esc if app.canvas.grabbed.is_some() => {
+            app.canvas.grabbed = None;
+        }
         KeyCode::Esc => {
             if sel.is_some() {
                 app.canvas.selected = None;
@@ -266,6 +290,48 @@ pub fn canvas_mouse(app: &mut App, m: MouseEvent) -> Vec<Action> {
     let inside = m.column >= vx && m.column < vx + vw && m.row >= vy && m.row < vy + vh;
     let rel = (m.column as i32 - vx as i32, m.row as i32 - vy as i32);
     let mut out = vec![];
+    let at = |r: &(i32, i32, u16, u16)| {
+        let (c, rw) = (m.column as i32, m.row as i32);
+        c >= r.0 && c < r.0 + r.2 as i32 && rw >= r.1 && rw < r.1 + r.3 as i32
+    };
+    // the buttons of the top bar work with a plain click
+    if let MouseEventKind::Down(MouseButton::Left) = m.kind {
+        let hit = app
+            .canvas
+            .buttons
+            .borrow()
+            .iter()
+            .find(|(r, _)| at(r))
+            .map(|(_, b)| *b);
+        if let Some(b) = hit {
+            press(app, b);
+            save(app, &mut out);
+            return out;
+        }
+    }
+    // floating panels (the inspector) are not part of the board underneath
+    let shielded = matches!(
+        m.kind,
+        MouseEventKind::Down(_) | MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+    ) && app.canvas.shield.borrow().iter().any(at);
+    if shielded {
+        return out;
+    }
+    // a node picked up with `g` goes down where the click is
+    if let (MouseEventKind::Down(MouseButton::Left), Some(key), true) =
+        (m.kind, app.canvas.grabbed.clone(), inside)
+    {
+        let (cw, ch) = card(app.canvas.zoom);
+        let g = app
+            .canvas
+            .to_grid((rel.0 - cw as i32 / 2, rel.1 - ch as i32 / 2));
+        let snap = |v: f32| (v * 4.0).round() / 4.0;
+        app.canvas.moved.insert(key.id(), (snap(g.0), snap(g.1)));
+        app.canvas.grabbed = None;
+        app.canvas.dirty = true;
+        save(app, &mut out);
+        return out;
+    }
     match m.kind {
         MouseEventKind::Down(btn) if inside => {
             if btn == MouseButton::Left {
@@ -326,6 +392,33 @@ pub fn canvas_mouse(app: &mut App, m: MouseEvent) -> Vec<Action> {
                 save(app, &mut out);
             }
         }
+        // Shift+wheel (and a sideways wheel) pans left and right, Alt+wheel up and down
+        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+            if inside
+                && m.modifiers
+                    .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) =>
+        {
+            let s = if m.kind == MouseEventKind::ScrollUp {
+                -1
+            } else {
+                1
+            };
+            if m.modifiers.contains(KeyModifiers::SHIFT) {
+                app.canvas.pan_cells(s * 8, 0);
+            } else {
+                app.canvas.pan_cells(0, s * 4);
+            }
+            save(app, &mut out);
+        }
+        MouseEventKind::ScrollLeft | MouseEventKind::ScrollRight if inside => {
+            let s = if m.kind == MouseEventKind::ScrollLeft {
+                -1
+            } else {
+                1
+            };
+            app.canvas.pan_cells(s * 8, 0);
+            save(app, &mut out);
+        }
         MouseEventKind::ScrollUp | MouseEventKind::ScrollDown if inside => {
             let z = app.canvas.zoom;
             let nz = if m.kind == MouseEventKind::ScrollUp {
@@ -339,6 +432,25 @@ pub fn canvas_mouse(app: &mut App, m: MouseEvent) -> Vec<Action> {
         _ => {}
     }
     out
+}
+
+/// What a click on one of the top bar's buttons does.
+fn press(app: &mut App, b: Button) {
+    let c = center(app);
+    match b {
+        Button::ZoomIn => app.canvas.set_zoom(app.canvas.zoom + 1, c),
+        Button::ZoomOut => app.canvas.set_zoom(app.canvas.zoom.saturating_sub(1), c),
+        Button::Fit => {
+            let scene = build_scene(app);
+            let (_, _, w, h) = app.canvas.view.get();
+            app.canvas.fit(&scene, w, h);
+        }
+        Button::Left => app.canvas.pan_cells(-12, 0),
+        Button::Right => app.canvas.pan_cells(12, 0),
+        Button::Up => app.canvas.pan_cells(0, -6),
+        Button::Down => app.canvas.pan_cells(0, 6),
+        Button::Panels => app.canvas.clean = !app.canvas.clean,
+    }
 }
 
 /// Card size in cells at the current zoom, for tests and callers that lay things out.

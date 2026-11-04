@@ -1840,7 +1840,7 @@ fn download_picker_lists_suggestions_marks_installed_and_accepts_a_typed_name() 
     run_cmd(&mut a, Cmd::PullModel);
     let t = render_text(&a, 120, 30);
     assert!(
-        t.contains("Download a model") && t.contains("qwen3:8b") && t.contains("✓ installed"),
+        t.contains("Model shop") && t.contains("qwen3:8b") && t.contains("✓ installed"),
         "{t}"
     );
     assert!(

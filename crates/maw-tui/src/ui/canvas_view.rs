@@ -5,6 +5,7 @@
 
 use super::widgets::*;
 use crate::app::App;
+use crate::canvas::Button;
 use crate::canvas::{build_scene, card, pitch, EdgeKind, Node, NodeKey, Scene, Tone};
 use crate::theme::Theme;
 use ratatui::buffer::Buffer;
@@ -157,14 +158,13 @@ fn draw_card(
     p: &mut Painter,
     n: &Node,
     (x, y, w, h): (i32, i32, u16, u16),
-    zoom: u8,
     selected: bool,
     t: &Theme,
 ) {
     let tone = tone_style(t, n.tone);
     let w = w as i32;
     let h = h as i32;
-    if zoom <= 1 || h <= 1 {
+    if h <= 1 {
         // one line: icon, short tag, title
         // tasks and the objective keep their title next to the short name; everything else is
         // known by its short name alone (an agent's name, "mail" ...)
@@ -174,7 +174,7 @@ fn draw_card(
         } else {
             n.short.clone()
         };
-        let label = if zoom == 0 {
+        let label = if w < 20 {
             format!("{} {}", n.icon, body)
         } else {
             format!(" {} {}", n.icon, body)
@@ -221,7 +221,7 @@ fn draw_card(
     let inner = (w - 4).max(1) as usize;
     let rows = (h - 2) as usize;
     let mut lines: Vec<(String, Style)> = vec![];
-    let title_rows = if zoom >= 2 { 2 } else { 1 };
+    let title_rows = if h >= 5 { 2 } else { 1 };
     let tw = wrap_text(&n.title, inner);
     for r in tw.iter().take(title_rows) {
         lines.push((r.clone(), t.bold()));
@@ -235,7 +235,7 @@ fn draw_card(
         for r in wrap_text(d, inner) {
             lines.push((r, t.dim()));
         }
-        if zoom < 2 && lines.len() >= rows {
+        if h < 5 && lines.len() >= rows {
             break;
         }
     }
@@ -277,18 +277,11 @@ pub fn render_canvas(f: &mut Frame, area: Rect, app: &App) {
         );
         return;
     }
-    let insp_h: u16 = if area.height >= 22 {
-        6
-    } else if area.height >= 14 {
-        4
-    } else {
-        0
-    };
     let canvas_area = Rect {
         x: area.x,
         y: area.y + 1,
         width: area.width,
-        height: area.height - 1 - insp_h,
+        height: area.height - 1,
     };
     app.canvas.view.set((
         canvas_area.x,
@@ -301,20 +294,71 @@ pub fn render_canvas(f: &mut Frame, area: Rect, app: &App) {
     let zoom = c.zoom;
     let (cw, ch) = card(zoom);
 
-    // ---- toolbar
-    let bar = format!(
-        " BOARD · zoom {}/{} (+ -) · {} nodes · drag the background to pan, drag a node to move it · 0 fits all · Esc back · ? help ",
-        zoom + 1,
-        crate::canvas::ZOOM_LEVELS,
-        scene.nodes.len(),
-    );
-    f.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            truncate(&bar, area.width as usize),
+    // ---- the top bar: buttons you can click, then what the mouse is doing
+    {
+        let mut buttons = c.buttons.borrow_mut();
+        buttons.clear();
+        let mut spans: Vec<Span> = vec![Span::styled(" BOARD ", t.header())];
+        let mut x = area.x as i32 + 7;
+        let btn = |label: &str,
+                   b: Button,
+                   spans: &mut Vec<Span>,
+                   x: &mut i32,
+                   buttons: &mut Vec<(crate::canvas::Rect4, Button)>| {
+            let text = format!(" {label} ");
+            let w = text.chars().count() as u16;
+            if *x + w as i32 + 1 > area.x as i32 + area.width as i32 {
+                return;
+            }
+            buttons.push(((*x, area.y as i32, w, 1u16), b));
+            spans.push(Span::styled(text, t.selected()));
+            spans.push(Span::styled(" ", t.header()));
+            *x += w as i32 + 1;
+        };
+        btn("−", Button::ZoomOut, &mut spans, &mut x, &mut buttons);
+        btn("+", Button::ZoomIn, &mut spans, &mut x, &mut buttons);
+        btn("fit", Button::Fit, &mut spans, &mut x, &mut buttons);
+        btn("◀", Button::Left, &mut spans, &mut x, &mut buttons);
+        btn("▲", Button::Up, &mut spans, &mut x, &mut buttons);
+        btn("▼", Button::Down, &mut spans, &mut x, &mut buttons);
+        btn("▶", Button::Right, &mut spans, &mut x, &mut buttons);
+        btn(
+            if c.clean {
+                "show panels"
+            } else {
+                "hide panels"
+            },
+            Button::Panels,
+            &mut spans,
+            &mut x,
+            &mut buttons,
+        );
+        let mouse = if app.mouse_seen == 0 {
+            "mouse: nothing received yet".to_string()
+        } else {
+            format!("mouse ✓ {}", app.mouse_seen)
+        };
+        let status = format!(
+            " zoom {}/{} · {} nodes · {} ",
+            zoom + 1,
+            crate::canvas::ZOOM_LEVELS,
+            scene.nodes.len(),
+            mouse
+        );
+        let used = x - area.x as i32;
+        spans.push(Span::styled(
+            truncate(&status, (area.width as i32 - used).max(0) as usize),
             t.header(),
-        ))),
-        Rect { height: 1, ..area },
-    );
+        ));
+        let line_w: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+        let pad = (area.width as usize).saturating_sub(line_w);
+        spans.push(Span::styled(" ".repeat(pad), t.header()));
+        f.render_widget(
+            Paragraph::new(Line::from(spans)),
+            Rect { height: 1, ..area },
+        );
+    }
+    c.shield.borrow_mut().clear();
 
     // ---- the canvas itself
     c.hits.borrow_mut().clear();
@@ -409,7 +453,7 @@ pub fn render_canvas(f: &mut Frame, area: Rect, app: &App) {
                 draw_later = Some((n, r)); // the selected card is drawn last, on top
                 continue;
             }
-            draw_card(&mut p, n, r, zoom, false, t);
+            draw_card(&mut p, n, r, false, t);
             hits.push((
                 (
                     canvas_area.x as i32 + r.0,
@@ -421,7 +465,7 @@ pub fn render_canvas(f: &mut Frame, area: Rect, app: &App) {
             ));
         }
         if let Some((n, r)) = draw_later {
-            draw_card(&mut p, n, r, zoom, true, t);
+            draw_card(&mut p, n, r, true, t);
             hits.push((
                 (
                     canvas_area.x as i32 + r.0,
@@ -433,18 +477,26 @@ pub fn render_canvas(f: &mut Frame, area: Rect, app: &App) {
             ));
         }
         drop(hits);
-        minimap(&mut p, &scene, app, canvas_area);
+        if !c.clean {
+            minimap(&mut p, &scene, app, canvas_area);
+        }
     }
 
-    // ---- the inspector
-    if insp_h > 0 {
+    // ---- the inspector floats over the bottom of the board while something is selected
+    if !c.clean && c.selected.is_some() && area.height >= 12 && area.width >= 40 {
+        let insp_h: u16 = if area.height >= 24 { 8 } else { 6 };
+        let w = area.width.min(78);
         let r = Rect {
             x: area.x,
             y: area.y + area.height - insp_h,
-            width: area.width,
+            width: w,
             height: insp_h,
         };
+        f.render_widget(ratatui::widgets::Clear, r);
         inspector(f, r, &scene, app);
+        c.shield
+            .borrow_mut()
+            .push((r.x as i32, r.y as i32, r.width, r.height));
     }
 }
 

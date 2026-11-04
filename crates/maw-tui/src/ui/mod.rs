@@ -185,7 +185,7 @@ fn footer_hint(app: &App) -> &'static str {
         View::Tasks => "↑↓←→ select · Enter detail · R requeue · e release · x cancel · v verify · ? help",
         View::Goal => "↑↓ scroll · Enter/G redirect objective · ? help",
         View::Flow => "Tab graph/list · ↑↓ scroll · ? help",
-        View::Canvas => "arrows select · Shift+arrows or drag pan · + - zoom · 0 fit · Enter open · n task · P plan · G objective · ? help",
+        View::Canvas => "arrows select · drag pans · wheel zoom · Shift+wheel sideways · g pick up · h hide panels · 0 fit · Enter open · n task · P plan · ? help",
         View::Approvals => "↑↓ select · y approve · Y approve for session · n deny · x deny+abort",
         View::Logs => "↑↓ scroll · End latest · ? help",
         View::Config => "+/- concurrency · [ ] lease · u auto-assign · ? help",

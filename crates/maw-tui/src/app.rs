@@ -1074,6 +1074,8 @@ pub struct App {
     pub models: HashMap<ProviderKind, Vec<ModelChoice>>,
     /// Models the local provider suggests downloading.
     pub pull_suggestions: Vec<ModelChoice>,
+    /// Rows the output panel has after wrapping (set when drawn; the keys scroll up to it).
+    pub output_rows: std::cell::Cell<usize>,
     /// Machine performance samples (filled while the Perf view or a local agent needs them).
     pub perf: maw_core::perf::PerfHistory,
     /// Index into `ui::perf_view::WINDOWS`.
@@ -1149,6 +1151,7 @@ impl App {
             clipboard: String::new(),
             models: HashMap::new(),
             pull_suggestions: Vec::new(),
+            output_rows: std::cell::Cell::new(0),
             perf: maw_core::perf::PerfHistory::new(1),
             perf_window: 1,
             composer: TextInput::new(),
@@ -1730,6 +1733,11 @@ pub fn handle_mouse(app: &mut App, m: MouseEvent) -> Vec<Action> {
     app.mouse_seen += 1;
     let on_header = m.row == 0;
     let on_footer = app.size.1 > 0 && m.row == app.size.1 - 1;
+    // the board takes the whole mouse (wheel, Shift+wheel, drags ...) except on the two bars
+    if app.view == View::Canvas && matches!(app.overlay, Overlay::None) && !on_header && !on_footer
+    {
+        return crate::canvas_input::canvas_mouse(app, m);
+    }
     let dir: Option<isize> = match m.kind {
         MouseEventKind::ScrollLeft => Some(-1),
         MouseEventKind::ScrollRight => Some(1),
@@ -1796,7 +1804,7 @@ pub fn handle_mouse(app: &mut App, m: MouseEvent) -> Vec<Action> {
 
 fn output_key(app: &mut App, mut o: OutputState, key: KeyEvent) -> Vec<Action> {
     let page = (app.size.1 as usize).saturating_sub(8).max(3);
-    let max = o.lines.len().saturating_sub(1);
+    let max = app.output_rows.get().max(o.lines.len()).saturating_sub(1);
     match key.code {
         KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter => return vec![],
         KeyCode::Up | KeyCode::Char('k') => o.scroll = o.scroll.saturating_sub(1),

@@ -163,20 +163,39 @@ fn card(f: &mut Frame, area: Rect, app: &App, idx: usize, a: &Agent, focused: bo
         ),
         t.dim(),
     )]));
-    lines.push(Line::from(vec![
-        Span::styled("Task: ", t.dim()),
-        Span::raw(truncate(&task_label(app, a), w.saturating_sub(6))),
-    ]));
-    if let Some(act) = current_activity(app, a) {
+    // long texts take a second row (when the card is tall enough) instead of being cut
+    let spare_rows = (inner.height as usize).saturating_sub(7);
+    let wrap_to = |text: &str, lead: usize, maxr: usize| -> Vec<String> {
+        let mut rows = wrap_text(text, w.saturating_sub(lead).max(6));
+        if rows.len() > maxr {
+            rows.truncate(maxr);
+            if let Some(l) = rows.last_mut() {
+                *l = truncate(&format!("{l} …"), w.saturating_sub(lead).max(6));
+            }
+        }
+        rows
+    };
+    let task_rows = wrap_to(&task_label(app, a), 6, 1 + spare_rows.min(1));
+    for (i, r) in task_rows.into_iter().enumerate() {
         lines.push(Line::from(vec![
-            Span::styled("▶ ", t.ok()),
-            Span::styled(truncate(&act, w.saturating_sub(2)), t.warn()),
+            Span::styled(if i == 0 { "Task: " } else { "      " }, t.dim()),
+            Span::raw(r),
         ]));
+    }
+    if let Some(act) = current_activity(app, a) {
+        for (i, r) in wrap_to(&act, 2, 1 + spare_rows.min(1))
+            .into_iter()
+            .enumerate()
+        {
+            lines.push(Line::from(vec![
+                Span::styled(if i == 0 { "▶ " } else { "  " }, t.ok()),
+                Span::styled(r, t.warn()),
+            ]));
+        }
     } else if let Some(e) = &a.last_error {
-        lines.push(Line::from(Span::styled(
-            truncate(&format!("! {e}"), w),
-            t.err(),
-        )));
+        for r in wrap_to(&format!("! {e}"), 0, 1 + spare_rows.min(2)) {
+            lines.push(Line::from(Span::styled(r, t.err())));
+        }
     }
     let used = lines.len();
     let room = (inner.height as usize).saturating_sub(used);
@@ -361,7 +380,11 @@ pub fn render_agent_detail(f: &mut Frame, area: Rect, app: &App) {
     };
     let info_h = if area.height >= 20 { 7 } else { 4 };
     let search_h = if app.search.is_some() { 1 } else { 0 };
-    let composer_h: u16 = if area.height >= 12 { 3 } else { 0 };
+    let composer_h: u16 = if area.height >= 12 {
+        input_box_height(app, area.width, area.height)
+    } else {
+        0
+    };
     let parts = Layout::vertical([
         Constraint::Length(info_h.min(area.height)),
         Constraint::Min(1),
@@ -789,6 +812,56 @@ fn turn_status(app: &App, a: &Agent) -> (String, bool) {
     (s, false)
 }
 
+/// Most text rows a message box grows to.
+const MAX_INPUT_ROWS: u16 = 6;
+
+/// Height of a message box (borders included) for the text now typed: it grows with the text so
+/// nothing is hidden, up to a sixth of the screen and six rows.
+pub fn input_box_height(app: &App, outer_width: u16, avail_height: u16) -> u16 {
+    let text_w = (outer_width as usize).saturating_sub(4);
+    let rows = app.composer.wrap(text_w).rows.len() as u16;
+    let cap = (avail_height / 4).clamp(1, MAX_INPUT_ROWS);
+    rows.clamp(1, cap) + 2
+}
+
+/// Draw the typed text wrapped on the rows of `inner` ("› " before the first, an indent after),
+/// show `placeholder` while empty, and put the cursor where the next character will appear.
+fn draw_input(f: &mut Frame, inner: Rect, app: &App, placeholder: &str, focus: bool) {
+    let t = &app.theme;
+    let text_w = (inner.width as usize).saturating_sub(2);
+    let wrapped = app.composer.wrap(text_w);
+    if app.composer.value().is_empty() {
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("› ", t.accent()),
+                Span::styled(placeholder.to_string(), t.dim()),
+            ])),
+            inner,
+        );
+    } else {
+        let first = wrapped.first_visible(inner.height as usize);
+        let lines: Vec<Line> = wrapped
+            .rows
+            .iter()
+            .enumerate()
+            .skip(first)
+            .take(inner.height as usize)
+            .map(|(i, r)| {
+                Line::from(vec![
+                    Span::styled(if i == 0 { "› " } else { "  " }, t.accent()),
+                    Span::raw(r.clone()),
+                ])
+            })
+            .collect();
+        f.render_widget(Paragraph::new(lines), inner);
+    }
+    if focus {
+        let first = wrapped.first_visible(inner.height as usize);
+        let y = inner.y + wrapped.row.saturating_sub(first) as u16;
+        f.set_cursor_position((inner.x + 2 + wrapped.col as u16, y));
+    }
+}
+
 /// The message box: always ready for typing, `/` opens the command menu above it.
 fn render_composer(f: &mut Frame, area: Rect, app: &App, agent: &maw_core::Agent) {
     let t = &app.theme;
@@ -816,20 +889,13 @@ fn render_composer(f: &mut Frame, area: Rect, app: &App, agent: &maw_core::Agent
     if inner.width < 4 || inner.height == 0 {
         return;
     }
-    let text = app.composer.value();
-    let (vis, col) = app.composer.view((inner.width as usize).saturating_sub(3));
-    let line = if text.is_empty() && focus {
-        Line::from(vec![
-            Span::styled("› ", t.accent()),
-            Span::styled("message the agent, or type / for commands", t.dim()),
-        ])
-    } else {
-        Line::from(vec![Span::styled("› ", t.accent()), Span::raw(vis)])
-    };
-    f.render_widget(Paragraph::new(line), inner);
-    if focus {
-        f.set_cursor_position((inner.x + 2 + col as u16, inner.y));
-    }
+    draw_input(
+        f,
+        inner,
+        app,
+        "message the agent, or type / for commands",
+        focus,
+    );
 }
 
 /// The command line of the main screen: type `/command`, `!shell command`, or plain text for the
@@ -860,27 +926,17 @@ pub fn render_cmdline(f: &mut Frame, area: Rect, app: &App) {
     if inner.width < 4 || inner.height == 0 {
         return;
     }
-    let text = app.composer.value();
-    let (vis, col) = app.composer.view((inner.width as usize).saturating_sub(3));
-    let line = if text.is_empty() {
-        Line::from(vec![
-            Span::styled("› ", t.accent()),
-            Span::styled(
-                if focus {
-                    "type / for the list of commands, or !command to run a shell command"
-                } else {
-                    "press / to type a command"
-                },
-                t.dim(),
-            ),
-        ])
-    } else {
-        Line::from(vec![Span::styled("› ", t.accent()), Span::raw(vis)])
-    };
-    f.render_widget(Paragraph::new(line), inner);
-    if focus {
-        f.set_cursor_position((inner.x + 2 + col as u16, inner.y));
-    }
+    draw_input(
+        f,
+        inner,
+        app,
+        if focus {
+            "type / for the list of commands, or !command to run a shell command"
+        } else {
+            "press / to type a command"
+        },
+        focus,
+    );
 }
 
 /// The `/` command menu, drawn over the bottom of the transcript just above the message box.

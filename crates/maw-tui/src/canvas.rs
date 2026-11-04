@@ -121,28 +121,43 @@ impl Scene {
 
 // ---------------------------------------------------------------- geometry
 
-/// 0 overview (a few letters per node), 1 one line each, 2 cards, 3 cards with their details.
-pub const ZOOM_LEVELS: u8 = 4;
-pub const DEFAULT_ZOOM: u8 = 2;
+/// Zoom is a smooth scale, 16 steps of about 22% each from a tenth of the normal size (a dot per
+/// node, to see a very large board at once) to more than twice it (cards with all their details).
+pub const ZOOM_LEVELS: u8 = 16;
+/// The level whose scale is about 1: cards of 30x5 cells.
+pub const DEFAULT_ZOOM: u8 = 11;
+/// Bumped when the meaning of the saved zoom level changes (old saves keep their places only).
+pub const ZOOM_SCALE_VERSION: u64 = 2;
 
-/// Size of a node's card in terminal cells at a zoom level.
+/// The scale factor of a zoom level.
+pub fn scale(zoom: u8) -> f32 {
+    0.12 * 20f32.powf(zoom.min(ZOOM_LEVELS - 1) as f32 / (ZOOM_LEVELS - 1) as f32)
+}
+
+/// Size of a node's card in terminal cells at a zoom level. One row tall means a one-line label
+/// (icon and name), taller means a framed card with a title and details.
 pub fn card(zoom: u8) -> (u16, u16) {
-    match zoom {
-        0 => (14, 1),
-        1 => (24, 1),
-        2 => (30, 5),
-        _ => (44, 10),
-    }
+    let s = scale(zoom);
+    let w = (30.0 * s).round().clamp(4.0, 72.0) as u16;
+    let h = if s < 0.55 {
+        1
+    } else {
+        (5.0 * s).round().clamp(4.0, 14.0) as u16
+    };
+    (w, h)
 }
 
 /// Distance between neighbouring slots (card plus the gap the edges run through).
 pub fn pitch(zoom: u8) -> (u16, u16) {
-    match zoom {
-        0 => (17, 2),
-        1 => (31, 2),
-        2 => (40, 7),
-        _ => (58, 12),
-    }
+    let s = scale(zoom);
+    let (w, h) = card(zoom);
+    let gap_w = (10.0 * s).round().max(2.0) as u16;
+    let gap_h = if h == 1 {
+        1
+    } else {
+        (2.0 * s).round().max(2.0) as u16
+    };
+    (w + gap_w, h + gap_h)
 }
 
 // ---------------------------------------------------------------- scene
@@ -729,6 +744,19 @@ pub enum Drag {
     },
 }
 
+/// The buttons of the board's top bar (for terminals where only clicks are dependable).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Button {
+    ZoomOut,
+    ZoomIn,
+    Fit,
+    Left,
+    Right,
+    Up,
+    Down,
+    Panels,
+}
+
 #[derive(Clone, Debug)]
 pub struct CanvasState {
     /// Grid position shown at the top-left of the canvas.
@@ -738,6 +766,14 @@ pub struct CanvasState {
     /// Positions the user chose (node id -> grid position).
     pub moved: HashMap<String, (f32, f32)>,
     pub drag: Option<Drag>,
+    /// Only the board itself: no inspector and no map (`h`).
+    pub clean: bool,
+    /// A node picked up with `g`: the next click puts it down, the arrows nudge it.
+    pub grabbed: Option<NodeKey>,
+    /// Set by the renderer: floating panels that swallow mouse events (inspector, map).
+    pub shield: std::cell::RefCell<Vec<Rect4>>,
+    /// Set by the renderer: the clickable buttons of the top bar.
+    pub buttons: std::cell::RefCell<Vec<(Rect4, Button)>>,
     /// The last click (for double click), by time and node.
     pub last_click: Option<(chrono::DateTime<chrono::Utc>, NodeKey)>,
     /// Set by the renderer: the canvas rectangle on screen (x, y, w, h) and where each node is drawn.
@@ -756,6 +792,10 @@ impl Default for CanvasState {
             selected: None,
             moved: HashMap::new(),
             drag: None,
+            clean: false,
+            grabbed: None,
+            shield: std::cell::RefCell::new(vec![]),
+            buttons: std::cell::RefCell::new(vec![]),
             last_click: None,
             view: std::cell::Cell::new((0, 0, 0, 0)),
             hits: std::cell::RefCell::new(vec![]),
@@ -858,6 +898,7 @@ impl CanvasState {
             .collect();
         serde_json::json!({
             "zoom": self.zoom,
+            "zv": ZOOM_SCALE_VERSION,
             "origin": [self.origin.0, self.origin.1],
             "moved": moved,
         })
@@ -868,8 +909,11 @@ impl CanvasState {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(s) else {
             return;
         };
-        if let Some(z) = v.get("zoom").and_then(|z| z.as_u64()) {
-            self.zoom = (z as u8).min(ZOOM_LEVELS - 1);
+        // a zoom saved with the older four-level scale means something else now: keep the default
+        if v.get("zv").and_then(|z| z.as_u64()) == Some(ZOOM_SCALE_VERSION) {
+            if let Some(z) = v.get("zoom").and_then(|z| z.as_u64()) {
+                self.zoom = (z.min(ZOOM_LEVELS as u64 - 1)) as u8;
+            }
         }
         if let Some(o) = v.get("origin").and_then(|o| o.as_array()) {
             if let (Some(x), Some(y)) = (

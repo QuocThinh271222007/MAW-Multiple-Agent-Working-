@@ -42,6 +42,25 @@ fn mouse(kind: MouseEventKind, col: i32, row: i32) -> MouseEvent {
     }
 }
 
+/// A cell of the board that holds no node and is not under a floating panel.
+fn empty_spot(a: &App) -> (i32, i32) {
+    let (vx, vy, vw, vh) = a.canvas.view.get();
+    let hits = a.canvas.hits.borrow();
+    let shield = a.canvas.shield.borrow();
+    let inside = |r: &(i32, i32, u16, u16), x: i32, y: i32| {
+        x >= r.0 && x < r.0 + r.2 as i32 && y >= r.1 && y < r.1 + r.3 as i32
+    };
+    for y in vy as i32 + 1..(vy + vh) as i32 - 1 {
+        for x in vx as i32 + 1..(vx + vw) as i32 - 1 {
+            if !hits.iter().any(|(r, _)| inside(r, x, y)) && !shield.iter().any(|r| inside(r, x, y))
+            {
+                return (x, y);
+            }
+        }
+    }
+    panic!("no empty cell on the board");
+}
+
 fn mail(a: &App, from: usize, to: usize, subject: &str, content: &str) -> Message {
     Message {
         id: MessageId::from("msg_board_1"),
@@ -251,12 +270,19 @@ fn the_mouse_selects_moves_pans_and_opens() {
     // dragging empty space pans the whole view
     let _ = render_text(&a, 170, 44);
     let o = a.canvas.origin;
-    handle_mouse(&mut a, mouse(MouseEventKind::Down(MouseButton::Left), 5, 6));
+    let (ex, ey) = empty_spot(&a);
     handle_mouse(
         &mut a,
-        mouse(MouseEventKind::Drag(MouseButton::Left), 15, 9),
+        mouse(MouseEventKind::Down(MouseButton::Left), ex, ey),
     );
-    handle_mouse(&mut a, mouse(MouseEventKind::Up(MouseButton::Left), 15, 9));
+    handle_mouse(
+        &mut a,
+        mouse(MouseEventKind::Drag(MouseButton::Left), ex + 10, ey + 3),
+    );
+    handle_mouse(
+        &mut a,
+        mouse(MouseEventKind::Up(MouseButton::Left), ex + 10, ey + 3),
+    );
     assert!(
         a.canvas.origin.0 < o.0 && a.canvas.origin.1 < o.1,
         "{o:?} -> {:?}",
@@ -434,4 +460,203 @@ fn edges_are_routed_with_corners_and_an_arrow_head() {
     let r = route((0, 0, 10, 3), (0, 10, 10, 3));
     assert_eq!(r.last().unwrap().2, '▼');
     assert_eq!(r.first().map(|c| c.1), Some(3));
+}
+
+// ---- a wider, smoother, click-friendly board
+
+#[test]
+fn zoom_is_smooth_and_wide_and_every_step_draws() {
+    use maw_tui::canvas::{card, pitch, scale};
+    let mut last = (0, 0);
+    for z in 0..ZOOM_LEVELS {
+        let c = card(z);
+        let p = pitch(z);
+        assert!(
+            c.0 >= last.0 && c.1 >= last.1,
+            "cards only grow with the zoom"
+        );
+        assert!(
+            p.0 > c.0 && p.1 > c.1,
+            "there is always a gap for the edges"
+        );
+        last = c;
+    }
+    assert!(
+        scale(ZOOM_LEVELS - 1) / scale(0) > 15.0,
+        "a very wide range"
+    );
+    assert_eq!(ZOOM_LEVELS, 16, "many small steps, not four jumps");
+    let mut a = app();
+    open_board(&mut a);
+    for z in 0..ZOOM_LEVELS {
+        a.canvas.zoom = z;
+        let t = render_text(&a, 170, 44);
+        assert!(t.contains("BOARD"), "zoom {z}");
+    }
+}
+
+#[test]
+fn the_board_uses_the_whole_screen_and_the_panels_can_be_hidden() {
+    let mut a = app();
+    open_board(&mut a);
+    let t = render_text(&a, 170, 44);
+    let (_, vy, _, vh) = a.canvas.view.get();
+    assert_eq!(
+        vy as usize + vh as usize,
+        43,
+        "the canvas runs down to the hint line"
+    );
+    assert!(
+        !t.contains("Nothing selected"),
+        "no panel until something is selected"
+    );
+    // selecting something floats the inspector over the board, it does not shrink it
+    let (x, y) = screen_of(&a, &NodeKey::Task("T-2".into()));
+    handle_mouse(
+        &mut a,
+        mouse(MouseEventKind::Down(MouseButton::Left), x + 1, y),
+    );
+    let t = render_text(&a, 170, 44);
+    assert!(t.contains("Design interfaces"), "{t}");
+    assert_eq!(a.canvas.view.get().3, vh);
+    assert!(!a.canvas.shield.borrow().is_empty());
+    // h hides the inspector and the map
+    press(&mut a, KeyCode::Char('h'));
+    let _ = render_text(&a, 170, 44);
+    assert!(a.canvas.clean && a.canvas.shield.borrow().is_empty());
+}
+
+#[test]
+fn the_top_bar_buttons_zoom_pan_and_fit_with_plain_clicks() {
+    use maw_tui::canvas::Button;
+    let mut a = app();
+    open_board(&mut a);
+    let _ = render_text(&a, 170, 44);
+    let click = |a: &mut App, b: Button| {
+        let (x, y) = {
+            let btns = a.canvas.buttons.borrow();
+            let ((x, y, _, _), _) = btns
+                .iter()
+                .find(|(_, k)| *k == b)
+                .copied()
+                .expect("button drawn");
+            (x, y)
+        };
+        handle_mouse(a, mouse(MouseEventKind::Down(MouseButton::Left), x + 1, y));
+        let _ = render_text(a, 170, 44);
+    };
+    let z0 = a.canvas.zoom;
+    click(&mut a, Button::ZoomIn);
+    assert_eq!(a.canvas.zoom, z0 + 1);
+    click(&mut a, Button::ZoomOut);
+    click(&mut a, Button::ZoomOut);
+    assert_eq!(a.canvas.zoom, z0 - 1);
+    let o = a.canvas.origin;
+    click(&mut a, Button::Right);
+    assert!(a.canvas.origin.0 > o.0);
+    click(&mut a, Button::Down);
+    assert!(a.canvas.origin.1 > o.1);
+    a.canvas.origin = (80.0, 80.0);
+    click(&mut a, Button::Fit);
+    let _ = render_text(&a, 170, 44);
+    assert_eq!(a.canvas.hits.borrow().len(), build_scene(&a).nodes.len());
+    click(&mut a, Button::Panels);
+    assert!(a.canvas.clean);
+}
+
+#[test]
+fn shift_wheel_pans_sideways_and_the_wheel_zooms_under_the_pointer() {
+    let mut a = app();
+    open_board(&mut a);
+    let _ = render_text(&a, 170, 44);
+    let o = a.canvas.origin;
+    let mut m = mouse(MouseEventKind::ScrollDown, 60, 20);
+    m.modifiers = KeyModifiers::SHIFT;
+    handle_mouse(&mut a, m);
+    assert!(
+        a.canvas.origin.0 > o.0 && a.canvas.origin.1 == o.1,
+        "{o:?} -> {:?}",
+        a.canvas.origin
+    );
+    // the point under the pointer stays put while zooming
+    let before = a.canvas.to_grid((
+        60 - a.canvas.view.get().0 as i32,
+        20 - a.canvas.view.get().1 as i32,
+    ));
+    handle_mouse(&mut a, mouse(MouseEventKind::ScrollUp, 60, 20));
+    let after = a.canvas.to_grid((
+        60 - a.canvas.view.get().0 as i32,
+        20 - a.canvas.view.get().1 as i32,
+    ));
+    assert!(
+        (before.0 - after.0).abs() < 0.2 && (before.1 - after.1).abs() < 0.2,
+        "{before:?} {after:?}"
+    );
+    // wheel, drags and Shift+wheel reach the board even with the pointer far from any card
+    assert!(a.mouse_seen >= 2);
+}
+
+#[test]
+fn g_picks_a_node_up_and_a_click_puts_it_down_without_dragging() {
+    let mut a = app();
+    open_board(&mut a);
+    let t3 = NodeKey::Task("T-3".into());
+    let scene = build_scene(&a);
+    maw_tui::canvas_input::select(&mut a, &scene, Some(t3.clone()));
+    press(&mut a, KeyCode::Char('g'));
+    assert_eq!(a.canvas.grabbed, Some(t3.clone()));
+    // the arrows nudge it
+    let p0 = pos_of(&a, &t3);
+    press(&mut a, KeyCode::Right);
+    assert!(pos_of(&a, &t3).0 > p0.0);
+    // a click puts it where the pointer is
+    let _ = render_text(&a, 170, 44);
+    let (ex, ey) = empty_spot(&a);
+    let acts = handle_mouse(
+        &mut a,
+        mouse(MouseEventKind::Down(MouseButton::Left), ex, ey),
+    );
+    assert!(a.canvas.grabbed.is_none());
+    assert!(
+        matches!(acts.as_slice(), [Action::SaveCanvas(j)] if j.contains("task:T-3")),
+        "{acts:?}"
+    );
+    let (vx, vy, _, _) = a.canvas.view.get();
+    let cell = a.canvas.to_cell(pos_of(&a, &t3));
+    assert!(
+        (cell.0 + vx as i32 - ex).abs() <= 20 && (cell.1 + vy as i32 - ey).abs() <= 6,
+        "{cell:?} vs {ex},{ey}"
+    );
+    // Esc cancels a pick-up
+    press(&mut a, KeyCode::Char('g'));
+    assert!(a.canvas.grabbed.is_some());
+    press(&mut a, KeyCode::Esc);
+    assert!(a.canvas.grabbed.is_none() && a.view == View::Canvas);
+}
+
+#[test]
+fn the_bar_says_whether_the_terminal_sends_mouse_events() {
+    let mut a = app();
+    open_board(&mut a);
+    a.mouse_seen = 0;
+    assert!(render_text(&a, 170, 44).contains("mouse: nothing received yet"));
+    handle_mouse(&mut a, mouse(MouseEventKind::Moved, 40, 20));
+    assert!(render_text(&a, 170, 44).contains("mouse ✓ 1"));
+}
+
+#[test]
+fn a_layout_saved_with_the_old_four_step_zoom_keeps_its_places_but_not_its_zoom() {
+    use maw_tui::canvas::{CanvasState, DEFAULT_ZOOM};
+    let mut c = CanvasState::default();
+    c.load_json(r#"{"zoom":3,"origin":[1.0,2.0],"moved":{"task:T-1":[4.0,5.0]}}"#);
+    assert_eq!(c.zoom, DEFAULT_ZOOM);
+    assert_eq!(c.moved.len(), 1);
+    let d = CanvasState {
+        zoom: 5,
+        ..Default::default()
+    };
+    let j = d.to_json();
+    let mut e = CanvasState::default();
+    e.load_json(&j);
+    assert_eq!(e.zoom, 5);
 }

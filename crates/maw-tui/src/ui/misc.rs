@@ -33,6 +33,27 @@ pub fn stream_lines(app: &App) -> Vec<EventLine> {
         .collect()
 }
 
+/// Rows for a list of events: the time, then the text wrapped under itself so none of it is cut.
+fn event_rows(app: &App, evs: &[EventLine], w: usize) -> Vec<Line<'static>> {
+    let t = &app.theme;
+    let text_w = w.saturating_sub(9).max(8);
+    let mut out = vec![];
+    for e in evs {
+        for (i, row) in wrap_text(&e.text, text_w).into_iter().enumerate() {
+            let lead = if i == 0 {
+                format!("{} ", e.time)
+            } else {
+                " ".repeat(e.time.chars().count() + 1)
+            };
+            out.push(Line::from(vec![
+                Span::styled(lead, t.dim()),
+                Span::styled(row, class_style(app, e.class)),
+            ]));
+        }
+    }
+    out
+}
+
 pub fn render_events_panel(f: &mut Frame, area: Rect, app: &App, focused: bool) {
     let t = &app.theme;
     let block = panel(
@@ -44,22 +65,11 @@ pub fn render_events_panel(f: &mut Frame, area: Rect, app: &App, focused: bool) 
     f.render_widget(block, area);
     let evs = stream_lines(app);
     let h = inner.height as usize;
-    let scroll = clamp_scroll(app.events_scroll, evs.len(), h);
-    let end = evs.len() - scroll;
+    let rows = event_rows(app, &evs, inner.width as usize);
+    let scroll = clamp_scroll(app.events_scroll, rows.len(), h);
+    let end = rows.len() - scroll;
     let start = end.saturating_sub(h);
-    let w = inner.width as usize;
-    let lines: Vec<Line> = evs[start..end]
-        .iter()
-        .map(|e| {
-            Line::from(vec![
-                Span::styled(format!("{} ", e.time), t.dim()),
-                Span::styled(
-                    truncate(&e.text, w.saturating_sub(9)),
-                    class_style(app, e.class),
-                ),
-            ])
-        })
-        .collect();
+    let lines: Vec<Line> = rows[start..end].to_vec();
     if lines.is_empty() {
         f.render_widget(
             Paragraph::new("waiting for activity…").style(t.dim()),
@@ -73,7 +83,8 @@ pub fn render_events_panel(f: &mut Frame, area: Rect, app: &App, focused: bool) 
 pub fn render_dashboard(f: &mut Frame, area: Rect, app: &App) {
     // the command line takes the bottom of the main screen when there is room
     let (area, cmd) = if app.has_cmdline() && area.height >= 14 {
-        let parts = Layout::vertical([Constraint::Min(8), Constraint::Length(3)]).split(area);
+        let box_h = super::agents::input_box_height(app, area.width, area.height);
+        let parts = Layout::vertical([Constraint::Min(8), Constraint::Length(box_h)]).split(area);
         (parts[0], Some(parts[1]))
     } else {
         (area, None)
@@ -291,19 +302,7 @@ pub fn render_logs(f: &mut Frame, area: Rect, app: &App) {
         }
     }
     let evs = log_lines(app);
-    let w = inner.width as usize;
-    let mut body: Vec<Line> = evs
-        .iter()
-        .map(|e| {
-            Line::from(vec![
-                Span::styled(format!("{} ", e.time), t.dim()),
-                Span::styled(
-                    truncate(&e.text, w.saturating_sub(9)),
-                    class_style(app, e.class),
-                ),
-            ])
-        })
-        .collect();
+    let mut body: Vec<Line> = event_rows(app, &evs, inner.width as usize);
     if body.is_empty() {
         body.push(Line::from(Span::styled("no diagnostic events", t.dim())));
     }

@@ -11,6 +11,22 @@ pub struct TextInput {
     cursor: usize,
 }
 
+/// A text laid out on rows (see `TextInput::wrap`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Wrapped {
+    pub rows: Vec<String>,
+    /// Row and column of the cursor.
+    pub row: usize,
+    pub col: usize,
+}
+
+impl Wrapped {
+    /// The first row to show when only `room` rows fit, so that the cursor row is visible.
+    pub fn first_visible(&self, room: usize) -> usize {
+        (self.row + 1).saturating_sub(room.max(1))
+    }
+}
+
 impl TextInput {
     pub fn new() -> Self {
         Self::default()
@@ -162,6 +178,60 @@ impl TextInput {
         true
     }
 
+    /// The text laid out on rows `width` columns wide: lines break after the last space that fits
+    /// (a word longer than the row is cut), and the cursor is given as (row, column).
+    pub fn wrap(&self, width: usize) -> Wrapped {
+        let width = width.max(2);
+        let chars: Vec<char> = self.text.chars().collect();
+        let w = |c: char| c.width().unwrap_or(0);
+        let mut ranges: Vec<(usize, usize)> = vec![];
+        let (mut start, mut used, mut i) = (0usize, 0usize, 0usize);
+        let mut after_space: Option<usize> = None;
+        while i < chars.len() {
+            let cw = w(chars[i]);
+            if used + cw > width {
+                let end = match after_space {
+                    Some(s) if s > start => s,
+                    _ => i,
+                };
+                ranges.push((start, end));
+                start = end;
+                i = end;
+                used = 0;
+                after_space = None;
+                continue;
+            }
+            used += cw;
+            if chars[i] == ' ' {
+                after_space = Some(i + 1);
+            }
+            i += 1;
+        }
+        ranges.push((start, chars.len()));
+        let rows: Vec<String> = ranges
+            .iter()
+            .map(|&(s, e)| chars[s..e].iter().collect())
+            .collect();
+        let mut rows = rows;
+        let cur = self.cursor.min(chars.len());
+        let mut row = ranges.len() - 1;
+        for (r, &(s, e)) in ranges.iter().enumerate() {
+            if cur >= s && cur < e {
+                row = r;
+                break;
+            }
+        }
+        let (s, _) = ranges[row];
+        let mut col: usize = chars[s..cur].iter().map(|&c| w(c)).sum();
+        if col >= width && row + 1 == ranges.len() {
+            // the cursor sits after a full last row: it goes to a fresh row
+            rows.push(String::new());
+            row += 1;
+            col = 0;
+        }
+        Wrapped { rows, row, col }
+    }
+
     /// The visible slice for a field `width` columns wide and the cursor column inside it.
     /// The window scrolls so the cursor is always visible.
     pub fn view(&self, width: usize) -> (String, usize) {
@@ -248,6 +318,38 @@ mod tests {
         assert_eq!(s, "日本語");
         assert_eq!(col, 6, "each CJK glyph is two columns wide");
         assert_eq!(wide.view(0), (String::new(), 0));
+    }
+
+    #[test]
+    fn long_text_wraps_at_spaces_and_the_cursor_follows() {
+        let t = TextInput::with_text("write a bubble sort in python and add tests");
+        let w = t.wrap(16);
+        assert_eq!(
+            w.rows,
+            ["write a bubble ", "sort in python ", "and add tests"]
+        );
+        assert!(w.rows.iter().all(|r| r.chars().count() <= 16));
+        assert_eq!((w.row, w.col), (2, 13), "cursor at the end");
+        let mut t = t;
+        t.home();
+        assert_eq!(t.wrap(16).row, 0);
+        // a word longer than the row is cut instead of hidden
+        let long = TextInput::with_text("abcdefghijklmnopqrstuvwxyz");
+        let w = long.wrap(10);
+        assert_eq!(w.rows, ["abcdefghij", "klmnopqrst", "uvwxyz"]);
+        // a full last row sends the cursor to a new one
+        let full = TextInput::with_text("abcdefghij");
+        let w = full.wrap(10);
+        assert_eq!((w.rows.len(), w.row, w.col), (2, 1, 0));
+        // nothing typed is one empty row; wide glyphs count two columns
+        assert_eq!(TextInput::new().wrap(10).rows, [""]);
+        assert_eq!(
+            TextInput::with_text("日本語日本").wrap(6).rows,
+            ["日本語", "日本"]
+        );
+        // showing only the last rows that fit keeps the cursor visible
+        let w = TextInput::with_text("one two three four five six").wrap(8);
+        assert!(w.first_visible(2) + 2 > w.row);
     }
 
     #[test]

@@ -320,3 +320,35 @@ command line and everything works as before (`/` and `!` fall back to the palett
   yet, marked `⬇`. Picking one downloads it first (progress in the notices at the bottom), then adds
   and connects the agent. Models marked `⬇` have no effort levels listed because none are known until
   they are installed.
+
+## The board with the mouse (and without)
+
+The board fills the whole screen; the inspector floats over the bottom only while a node is selected and
+`h` (or the "hide panels" button) hides it and the map.
+
+* Click selects, double click opens, dragging a card moves it, dragging the background pans (the middle or
+  right button pans from anywhere).
+* The wheel zooms around the pointer in 16 smooth steps, from one dot per node to cards with all their
+  details. `Shift`+wheel (or a sideways wheel) pans left and right, `Alt`+wheel up and down.
+* The buttons in the top bar (`-` `+` `fit` and the four arrows) work with a plain click, for terminals that
+  do not report dragging. The bar also says `mouse: nothing received yet` until the terminal sends the first
+  mouse event: if it stays that way after you click, the terminal is not passing the mouse to MAW (try
+  Windows Terminal, or enable mouse reporting in the terminal) and the keyboard keeps working.
+* `g` picks the selected node up; a click puts it down (or nudge it with the arrows, `Esc` cancels), so a node
+  can be moved without dragging.
+
+## Long text is wrapped, not cut
+
+* The message box and the command line grow with what is typed (up to six rows) and wrap at spaces, so the
+  whole prompt stays readable.
+* The model lists, the command palette and the shop show the full text of the highlighted entry under the
+  list; the event stream, the logs and the shell result wrap long lines; agent cards use a second row for a
+  long task name.
+
+## The model shop
+
+`/shop` opens it. **Ollama** and **Hugging Face** are two tabs (`Tab` / `Shift+Tab`, or the arrows while the
+search is empty), the same download mechanism for both. Type to search (name, maker, size, capabilities);
+`F2` (or `Ctrl+O`) cycles the order: recommended, name, smallest, largest, fewest parameters, maker,
+installed first. A typed `owner/repo` on the Hugging Face tab downloads `hf.co/owner/repo`.
+
