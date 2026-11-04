@@ -592,3 +592,84 @@ async fn a_conversation_survives_a_restart_like_resuming_claude_or_codex() {
     assert!(saw_notice, "a lost conversation is reported, not hidden");
     s3.shutdown().await.unwrap();
 }
+
+fn requests_text(fake: &Fake, i: usize) -> String {
+    fake.chats.lock().unwrap()[i]["messages"].to_string()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_model_asking_for_the_same_read_again_is_told_to_move_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let fake = fake_ollama(
+        vec![
+            tool_call("list_dir", json!({"path":"."})),
+            tool_call("list_dir", json!({"path":"."})), // the same read, nothing changed
+            tool_call("write_file", json!({"path":"a.txt","content":"x"})),
+            tool_call("list_dir", json!({"path":"."})), // the same read, but after a change
+            answer("done"),
+        ],
+        vec!["completion", "tools"],
+    )
+    .await;
+    let (s, mut rx) = provider(&fake.url)
+        .start_session(cfg(dir.path(), PermissionProfile::Autonomous, None))
+        .await
+        .unwrap();
+    s.send_input(AgentInput::text("go")).await.unwrap();
+    collect_turn(&mut rx).await;
+    // third request carries the answer to the repeated read: a hint, not another listing
+    assert!(
+        requests_text(&fake, 2).contains("You already called list_dir"),
+        "{}",
+        requests_text(&fake, 2)
+    );
+    // after the write the same read is allowed again and really runs
+    assert!(
+        !requests_text(&fake, 4).contains("You already called list_dir with exactly these arguments in this turn; its result is above. Do not call it again. Use that result to take the next step now, or answer the user.\"}],\"role\":\"tool\"")
+            || requests_text(&fake, 4).matches("You already called list_dir").count() == 1,
+        "only the repeat before the change was refused"
+    );
+    assert_eq!(
+        requests_text(&fake, 4)
+            .matches("You already called list_dir")
+            .count(),
+        1
+    );
+    s.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_full_context_window_is_reported_and_the_leader_gets_a_bigger_one() {
+    let dir = tempfile::tempdir().unwrap();
+    // a reply whose prompt + output fill the 8192-token window
+    let full = line(json!({"message":{"role":"assistant","content":"ok"},"done":false}))
+        + &line(
+            json!({"done":true,"done_reason":"stop","prompt_eval_count":7800,"eval_count":600}),
+        );
+    let fake = fake_ollama(vec![full.clone(), full], vec!["completion", "tools"]).await;
+    let (s, mut rx) = provider(&fake.url)
+        .start_session(cfg(dir.path(), PermissionProfile::Safe, None))
+        .await
+        .unwrap();
+    s.send_input(AgentInput::text("hi")).await.unwrap();
+    let evs = collect_turn(&mut rx).await;
+    let warned = evs.iter().any(|e| {
+        matches!(e, ProviderEvent::Error { message, fatal: false } if message.contains("context window is full"))
+    });
+    assert!(warned, "{evs:?}");
+    s.shutdown().await.unwrap();
+    assert_eq!(
+        fake.chats.lock().unwrap()[0]["options"]["num_ctx"],
+        8192,
+        "a worker keeps the normal window"
+    );
+
+    // the Leader asks for the larger one
+    let mut c = cfg(dir.path(), PermissionProfile::Safe, None);
+    c.role = Role::Leader;
+    let (s, mut rx) = provider(&fake.url).start_session(c).await.unwrap();
+    s.send_input(AgentInput::text("hi")).await.unwrap();
+    collect_turn(&mut rx).await;
+    assert_eq!(fake.chats.lock().unwrap()[1]["options"]["num_ctx"], 12288);
+    s.shutdown().await.unwrap();
+}

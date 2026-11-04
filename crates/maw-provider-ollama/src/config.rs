@@ -6,6 +6,11 @@ pub struct OllamaConfig {
     pub url: Option<String>,
     /// Context window requested for every chat. Bigger needs more memory.
     pub num_ctx: u32,
+    /// Context window for the Leader. Its instructions and the many MAW tools take about 4,200 tokens
+    /// before any conversation, and a thinking model spends thousands more per step; when the window
+    /// is full Ollama silently drops the START of the prompt (the instructions), and the model forgets
+    /// what it is doing. Used when larger than `num_ctx`.
+    pub num_ctx_leader: u32,
     /// How long Ollama keeps the model loaded after a request.
     pub keep_alive: String,
     /// Model/tool round trips allowed in one turn.
@@ -31,6 +36,7 @@ impl Default for OllamaConfig {
         OllamaConfig {
             url: None,
             num_ctx: 8192,
+            num_ctx_leader: 12288,
             keep_alive: "10m".into(),
             max_steps: 40,
             idle_timeout: Duration::from_secs(300),

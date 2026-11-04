@@ -2084,7 +2084,29 @@ impl Supervisor {
 
     /// Integrate completed (DONE) tasks' worker branches into the integration branch.
     pub async fn integrate_done_work(&self) -> CoreResult<Vec<(String, ws::IntegrationOutcome)>> {
-        let snapshot = self.engine.snapshot()?;
+        let mut snapshot = self.engine.snapshot()?;
+        // A task can be verified before its submission has been recorded (the recording runs from
+        // the event stream, a verification can come right behind the submission). Such a worker's
+        // workspace still reads "none" and would be skipped for good. Record it now.
+        let uncaptured: Vec<TaskId> = snapshot
+            .tasks
+            .iter()
+            .filter(|t| {
+                t.status == TaskStatus::Done
+                    && snapshot.workspaces.iter().any(|w| {
+                        w.kind == "worktree"
+                            && w.agent_id == t.owner_agent_id
+                            && w.integration_status == "none"
+                    })
+            })
+            .map(|t| t.id.clone())
+            .collect();
+        if !uncaptured.is_empty() {
+            for tid in &uncaptured {
+                self.capture_submission(tid).await;
+            }
+            snapshot = self.engine.snapshot()?;
+        }
         let root = self.project_root();
         let mut results = vec![];
         for w in snapshot

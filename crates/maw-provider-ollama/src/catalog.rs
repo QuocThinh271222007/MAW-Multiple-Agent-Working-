@@ -22,6 +22,12 @@ pub const SUGGESTED: &[Suggested] = &[
         note: "best general choice that fits 8 GB",
     },
     Suggested {
+        name: "qwen3:4b-instruct-2507-q4_K_M",
+        gb: 2.5,
+        caps: "tools",
+        note: "4B that does NOT think: steadier for tool-heavy roles such as Leader",
+    },
+    Suggested {
         name: "qwen3:4b",
         gb: 2.5,
         caps: "tools, thinking",

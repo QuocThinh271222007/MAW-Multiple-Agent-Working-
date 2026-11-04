@@ -477,7 +477,11 @@ impl AgentProvider for OllamaProvider {
             base_url: base,
             think: api::think_value(&model, &info, cfg.effort.as_deref()),
             model,
-            num_ctx: self.cfg.num_ctx,
+            num_ctx: if cfg.role == maw_core::Role::Leader {
+                self.cfg.num_ctx_leader.max(self.cfg.num_ctx)
+            } else {
+                self.cfg.num_ctx
+            },
             keep_alive: self.cfg.keep_alive.clone(),
             max_steps: self.cfg.max_steps,
             idle_timeout: self.cfg.idle_timeout,

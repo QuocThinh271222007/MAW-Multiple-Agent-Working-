@@ -197,3 +197,33 @@ it does not show they cope with real multi-file work. Three further changes came
 duplicate open tasks are returned instead of created twice, a worker who names its old task is told
 which one is running, and MAW records the files it observed changed in the worker's worktree as
 `file_changes` evidence when the worker did not list them.
+
+## A Leader that repeats itself and forgets (qwen3:4b)
+
+Seen in a real project: asked to hand out a task, the Leader listed the agents three times, then ended
+its turn with "I am checking the list, please wait", and kept doing so when asked again. Measured:
+
+* The Leader's first request is about **4,230 tokens** (instructions and the many MAW tool schemas), a
+  worker's about 3,000, before any conversation, in a window of 8,192.
+* `qwen3:4b` (the default tag) is a **thinking-only** model here: `think:false` makes it write its reasoning
+  into the answer (1,645 tokens for "say hello"), and `/no_think` is ignored. Its reasoning is thousands
+  of tokens per step.
+* When prompt plus reply no longer fit the window, Ollama silently drops the START of the prompt, which is
+  the instructions and tool list. The model then re-reads the conversation, forgets its role and loops.
+
+What MAW does about it now:
+
+* The Leader gets a larger window: `ollama.num_ctx_leader` (default 12288; `num_ctx` stays 8192 for
+  workers). It costs memory: for a 4B model about 1 GB more than 8192. On a 6 GB GPU 12288 fits; if the
+  model gets pushed to the CPU, lower it, or raise it only if you have the room (`maw config set
+  ollama.num_ctx_leader=16384`).
+* A warning appears in the agent's conversation when the instructions and tools already take more than
+  45% of the window, and once when a request fills 92% of it ("context window is full ...").
+* A read-only call repeated with the same arguments in one turn (`maw_agent_list`, `read_file`, ...) is
+  answered with "you already called this, use the result" instead of running again; any write, command
+  or MAW action lifts that.
+
+Options if it still loops: a Leader on a model that does not think, for example
+`qwen3:4b-instruct-2507-q4_K_M` (2.5 GB, now in the download list) or a 7-8B instruct model, with the local
+model as Worker only. The instruct tag was found in the Ollama registry but has **not been tried** with
+MAW's Leader role here.

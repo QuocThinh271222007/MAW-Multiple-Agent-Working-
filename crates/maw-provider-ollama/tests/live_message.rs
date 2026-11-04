@@ -19,6 +19,11 @@ async fn live_small_model_gets_a_user_message() {
     let model = std::env::var("MAW_LIVE_OLLAMA_MODEL").unwrap_or_else(|_| "qwen3:4b".into());
     let text = std::env::var("MAW_LIVE_MESSAGE")
         .unwrap_or_else(|_| "Create a file named hello.txt containing the word hi.".into());
+    let role = if std::env::var("MAW_LIVE_ROLE").as_deref() == Ok("leader") {
+        Role::Leader
+    } else {
+        Role::Worker
+    };
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("README.md"), "# demo\n").unwrap();
     let engine = Engine::open(
@@ -32,7 +37,7 @@ async fn live_small_model_gets_a_user_message() {
         .add_agent(
             "worker1",
             ProviderKind::Ollama,
-            Role::Worker,
+            role,
             Some(model.clone()),
             PermissionProfile::Balanced,
             None,
@@ -50,7 +55,7 @@ async fn live_small_model_gets_a_user_message() {
         )
         .unwrap();
     let msgs = engine.undelivered_for(&agent.id).unwrap();
-    let prompt = prompts::messages_prompt(Role::Worker, &msgs, &|_| "user".to_string());
+    let prompt = prompts::messages_prompt(role, &msgs, &|_| "user".to_string());
     eprintln!("=== prompt sent to the model:\n{prompt}\n===");
     let token = engine.mint_token(&agent.id);
     let server = maw_mcp::serve_http(engine.clone(), "127.0.0.1:0".parse().unwrap())
@@ -63,7 +68,7 @@ async fn live_small_model_gets_a_user_message() {
     let cfg = SessionConfig {
         agent_id: agent.id.clone(),
         name: "worker1".into(),
-        role: Role::Worker,
+        role,
         cwd: dir.path().to_path_buf(),
         model: Some(model.clone()),
         effort: None,
@@ -72,13 +77,14 @@ async fn live_small_model_gets_a_user_message() {
             url: server.url.clone(),
             token,
         }),
-        instructions: prompts::role_instructions(Role::Worker, "worker1"),
+        instructions: prompts::role_instructions(role, "worker1"),
         env: Default::default(),
         resume_native_id: None,
     };
     let (s, mut rx) = p.start_session(cfg).await.expect("session");
     s.send_input(AgentInput::text(prompt)).await.unwrap();
     let mut log = vec![];
+    let mut first_in: Option<u64> = None;
     loop {
         let Ok(Some(ev)) = tokio::time::timeout(Duration::from_secs(300), rx.recv()).await else {
             eprintln!("(gave up after 300 s)");
@@ -117,6 +123,11 @@ async fn live_small_model_gets_a_user_message() {
                 "  says: {}",
                 text.chars().take(200).collect::<String>()
             )),
+            ProviderEvent::Usage(u) => {
+                if first_in.is_none() {
+                    first_in = u.input_tokens;
+                }
+            }
             ProviderEvent::TurnCompleted { .. } => break,
             _ => {}
         }
@@ -125,7 +136,7 @@ async fn live_small_model_gets_a_user_message() {
         .inbox(
             &Actor::Agent {
                 id: agent.id.clone(),
-                role: Role::Worker,
+                role,
             },
             false,
             10,
@@ -143,6 +154,7 @@ async fn live_small_model_gets_a_user_message() {
         .collect();
     eprintln!("files now: {wrote:?}");
     eprintln!("message acknowledged: {acked}");
+    eprintln!("role {role:?}: first request used {first_in:?} prompt tokens (instructions + tool schemas + message)");
     s.shutdown().await.unwrap();
     server.stop().await;
 }

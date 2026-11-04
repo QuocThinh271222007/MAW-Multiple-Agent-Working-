@@ -29,6 +29,8 @@ pub struct OllamaSection {
     pub url: Option<String>,
     /// Context window per chat (more memory for bigger values).
     pub num_ctx: u32,
+    /// Context window for the Leader (its tools and instructions are large). More memory.
+    pub num_ctx_leader: u32,
     pub keep_alive: String,
     /// Model/tool round trips allowed in one turn.
     pub max_steps: usize,
@@ -50,6 +52,7 @@ impl Default for OllamaSection {
         OllamaSection {
             url: None,
             num_ctx: d.num_ctx,
+            num_ctx_leader: d.num_ctx_leader,
             keep_alive: d.keep_alive,
             max_steps: d.max_steps,
             command_timeout_secs: d.command_timeout.as_secs(),

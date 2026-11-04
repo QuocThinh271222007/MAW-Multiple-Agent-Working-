@@ -60,6 +60,10 @@ pub struct SessionParams {
 
 #[derive(Default)]
 struct Inner {
+    /// Read-only calls already made since the last change in this turn (name + arguments).
+    turn_calls: HashSet<String>,
+    /// The "context is full" warning is given once per session.
+    ctx_warned: bool,
     history: Vec<Value>,
     cancel: Option<CancellationToken>,
     pending: HashMap<String, oneshot::Sender<ApprovalDecision>>,
@@ -139,6 +143,23 @@ impl OllamaSession {
             tool_defs: defs,
             native_id: native_id.clone(),
         });
+        // The instructions and tool schemas are sent with every request. If they already take
+        // close to half of the window there is no room for a thinking model to work.
+        let reserved = (shared.p.system.len()
+            + serde_json::to_string(&shared.tool_defs)
+                .map(|s| s.len())
+                .unwrap_or(0))
+            / 3;
+        if shared.p.num_ctx > 0 && reserved * 100 > shared.p.num_ctx as usize * 45 {
+            let size_note = format!(
+                "the instructions and tools take about {reserved} of the {} context tokens; that leaves little room for the model to think. Raise ollama.num_ctx (Leader: ollama.num_ctx_leader) or the agent may forget its instructions and repeat itself.",
+                shared.p.num_ctx
+            );
+            notice = Some(match notice.take() {
+                Some(n) => format!("{n}. Also: {size_note}"),
+                None => size_note,
+            });
+        }
         let s = shared.clone();
         let id = native_id.clone();
         tokio::spawn(async move {
@@ -258,9 +279,11 @@ async fn run_turn(sh: Arc<Shared>, text: String, turn_id: String, cancel: Cancel
         turn_id: turn_id.clone(),
     })
     .await;
-    sh.lock()
-        .history
-        .push(json!({"role":"user","content":text}));
+    {
+        let mut g = sh.lock();
+        g.turn_calls.clear();
+        g.history.push(json!({"role":"user","content":text}));
+    }
     let mut outcome = TurnOutcome::Completed;
     let mut error = None;
     let mut finished = false;
@@ -444,6 +467,21 @@ async fn step(sh: &Arc<Shared>, cancel: &CancellationToken) -> Result<Step, Stri
             *g = Some((std::time::Instant::now(), dec, pro));
         }
     }
+    // A full window silently loses the start of the prompt (the instructions and the tools): the
+    // model then forgets its role and loops. Say so once instead of leaving it a mystery.
+    let used = fin.prompt_tokens + fin.output_tokens;
+    let window = sh.p.num_ctx as u64;
+    if window > 0 && used * 100 >= window * 92 && !sh.lock().ctx_warned {
+        sh.lock().ctx_warned = true;
+        sh.emit(ProviderEvent::Error {
+            message: format!(
+                "the context window is full ({used} of {window} tokens: {} prompt + {} reply). Ollama then drops the start of the conversation, so the model may forget its instructions and repeat itself. Raise ollama.num_ctx (Leader: ollama.num_ctx_leader), or use a model that thinks less.",
+                fin.prompt_tokens, fin.output_tokens
+            ),
+            fatal: false,
+        })
+        .await;
+    }
     // usage: Ollama reports per-request counts; the session keeps the running total
     {
         let (i, o) = {
@@ -507,6 +545,23 @@ async fn step(sh: &Arc<Shared>, cancel: &CancellationToken) -> Result<Step, Stri
     }
     let mut handed_back = false;
     for call in calls {
+        // A small model that did not get what it expected tends to ask the same read again and
+        // again. Say so instead of repeating it; any change (write, command, MAW action) resets this.
+        if is_read_only(&call.name) {
+            let key = format!("{}\u{0}{}", call.name, call.arguments);
+            if !sh.lock().turn_calls.insert(key) {
+                let hint = format!(
+                    "You already called {} with exactly these arguments in this turn; its result is above. Do not call it again. Use that result to take the next step now, or answer the user.",
+                    call.name
+                );
+                sh.lock()
+                    .history
+                    .push(json!({"role":"tool","tool_name":call.name,"content":hint}));
+                continue;
+            }
+        } else {
+            sh.lock().turn_calls.clear();
+        }
         match exec_tool(sh, &call, cancel).await {
             None => return Ok(Step::Interrupted),
             Some(text) => {
@@ -525,6 +580,16 @@ async fn step(sh: &Arc<Shared>, cancel: &CancellationToken) -> Result<Step, Stri
     } else {
         Step::Continue
     })
+}
+
+/// Calls that only look at things. Repeating one with the same arguments, with nothing changed in
+/// between, cannot give a new answer.
+fn is_read_only(name: &str) -> bool {
+    matches!(name, "read_file" | "list_dir" | "search_text")
+        || (name.starts_with("maw_")
+            && ["_get", "_list", "_inbox", "_read", "_history"]
+                .iter()
+                .any(|s| name.ends_with(s)))
 }
 
 fn clip(s: &str, max: usize) -> String {

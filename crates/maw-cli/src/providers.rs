@@ -21,6 +21,7 @@ pub fn ollama(
         state_dir,
         url: c.url.clone().filter(|u| !u.trim().is_empty()),
         num_ctx: c.num_ctx,
+        num_ctx_leader: c.num_ctx_leader,
         keep_alive: c.keep_alive.clone(),
         max_steps: c.max_steps,
         command_timeout: std::time::Duration::from_secs(c.command_timeout_secs.max(5)),
