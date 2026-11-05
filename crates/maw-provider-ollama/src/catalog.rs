@@ -392,7 +392,8 @@ pub fn check_pull_name(name: &str, max_params_b: f64) -> Result<String, String> 
             .flatten()
     });
     if let Some(p) = size {
-        if p > max_params_b {
+        // 0 (or less) means no limit
+        if max_params_b > 0.0 && p > max_params_b {
             return Err(format!(
                 "'{n}' has about {p}B parameters; downloads are limited to {max_params_b}B so they fit your VRAM (change `max_pull_params_b` under [ollama] to allow more)"
             ));
@@ -428,6 +429,10 @@ mod tests {
             .contains("limited to 8B"));
         assert!(check_pull_name("qwen3:14b", 8.0).is_err());
         assert!(check_pull_name("qwen3:14b", 16.0).is_ok());
+        assert!(
+            check_pull_name("llama3.1:70b", 0.0).is_ok(),
+            "0 means no limit"
+        );
         for bad in ["", "-x", "a b", "a;rm -rf /", "../x\n"] {
             assert!(check_pull_name(bad, 8.0).is_err(), "{bad:?}");
         }

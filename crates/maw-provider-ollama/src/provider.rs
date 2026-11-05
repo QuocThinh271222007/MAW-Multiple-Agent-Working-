@@ -328,7 +328,8 @@ impl AgentProvider for OllamaProvider {
                 }
                 let total: u64 = layers.values().map(|l| l.0).sum();
                 let completed: u64 = layers.values().map(|l| l.1.min(l.0)).sum();
-                if total > self.cfg.max_pull_bytes {
+                // 0 means no limit (a personal machine decides for itself)
+                if self.cfg.max_pull_bytes > 0 && total > self.cfg.max_pull_bytes {
                     return Err(ProviderError::Protocol(format!(
                         "'{name}' needs a download of {:.1} GB, above the {:.1} GB limit (change `max_pull_gb` under [ollama] to allow more); the download was cancelled",
                         total as f64 / 1e9,

@@ -1228,9 +1228,17 @@ async fn cmd_models_pull(ctx: &Ctx, name: Option<String>) -> Result<()> {
                 .map(|l| l.into_iter().map(|m| m.id).collect())
                 .unwrap_or_default();
             let sugg = p.pull_suggestions();
+            let limit = |v: f64, unit: &str| {
+                if v > 0.0 {
+                    format!("{v}{unit}")
+                } else {
+                    "no limit".to_string()
+                }
+            };
             println!(
-                "Models that fit {}B / ~{:.1} GB (installed ones are marked):",
-                ctx.cfg.ollama.max_pull_params_b, ctx.cfg.ollama.max_pull_gb
+                "Download limits: parameters {}, size {} (installed ones are marked):",
+                limit(ctx.cfg.ollama.max_pull_params_b, "B"),
+                limit(ctx.cfg.ollama.max_pull_gb, " GB")
             );
             for (i, m) in sugg.iter().enumerate() {
                 let mark = if installed.contains(&m.id) {

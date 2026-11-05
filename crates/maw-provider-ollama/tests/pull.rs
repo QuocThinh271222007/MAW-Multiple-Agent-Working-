@@ -178,3 +178,26 @@ async fn a_pre_release_model_says_so() {
         .to_string();
     assert!(e.contains("pre-release build"), "{e}");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn zero_means_no_limit_on_the_download_size() {
+    let body = lines(vec![
+        json!({"status":"pulling manifest"}),
+        json!({"status":"pulling aaa","digest":"sha256:aaa","total":40_000_000_000u64,"completed":1_000u64}),
+        json!({"status":"pulling aaa","digest":"sha256:aaa","total":40_000_000_000u64,"completed":40_000_000_000u64}),
+        json!({"status":"success"}),
+    ]);
+    // 40 GB: refused under a 6.5 GB limit ...
+    let url = fake(body.clone(), vec!["tools"]).await;
+    let (tx, _rx) = mpsc::channel(64);
+    let e = provider(&url, 6_500_000_000)
+        .pull_model("big:7b", tx)
+        .await
+        .unwrap_err();
+    assert!(e.to_string().contains("limit"), "{e}");
+    // ... and allowed with 0
+    let url = fake(body, vec!["tools"]).await;
+    let (tx, _rx) = mpsc::channel(64);
+    let ok = provider(&url, 0).pull_model("big:7b", tx).await.unwrap();
+    assert!(ok.contains("40.0 GB"), "{ok}");
+}

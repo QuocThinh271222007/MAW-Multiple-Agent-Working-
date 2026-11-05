@@ -122,6 +122,8 @@ Limits (defaults assume ~8 GB of VRAM; change in `[ollama]`):
 * `max_pull_params_b = 8.0`: a tag such as `:70b` is refused before anything is downloaded;
 * `max_pull_gb = 6.5`: a download whose reported size exceeds this is cancelled.
 
+Set either to `0` for no limit (your machine, your call): `max_pull_gb = 0` lets any size download.
+
 These are about download size, not your actual VRAM: check it (`nvidia-smi`). Models larger than
 VRAM still run if the rest fits in RAM, but slowly.
 
