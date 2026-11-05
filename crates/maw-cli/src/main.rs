@@ -2,6 +2,7 @@ mod app;
 mod config;
 mod doctor;
 mod headless;
+mod lab;
 mod logging;
 mod platform;
 mod providers;
@@ -71,6 +72,11 @@ enum Cmd {
     Stop,
     /// Re-check providers and local models, and ask a running MAW to reconnect agents that are down
     Refresh,
+    /// Learn how language models work: train a tiny Transformer on your own text and watch it in 3D
+    Lab {
+        #[command(subcommand)]
+        cmd: Option<lab::LabCmd>,
+    },
     /// Where agent worktrees live: project (next to the code), wsl (Linux disk, fast git) or windows
     Workspace {
         /// project | wsl | windows (without it: show the current choice); or `allow` / `deny` to
@@ -394,6 +400,7 @@ async fn real_main(cli: Cli) -> Result<()> {
             Ok(())
         }
         Some(Cmd::Refresh) => cmd_refresh(&ctx, project_arg.as_deref()).await,
+        Some(Cmd::Lab { cmd }) => lab::run(cmd),
         Some(Cmd::Workspace { mode, dir }) => {
             cmd_workspace(&ctx, project_arg.as_deref(), mode, dir)
         }

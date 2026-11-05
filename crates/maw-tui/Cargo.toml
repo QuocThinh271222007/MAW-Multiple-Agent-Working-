@@ -13,6 +13,7 @@ chrono.workspace = true
 crossterm.workspace = true
 futures.workspace = true
 ratatui.workspace = true
+maw-lab.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true

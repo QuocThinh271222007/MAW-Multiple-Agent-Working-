@@ -15,6 +15,7 @@ maw-storage.workspace = true
 maw-orchestrator.workspace = true
 maw-mcp.workspace = true
 maw-tui.workspace = true
+maw-lab.workspace = true
 maw-provider-codex.workspace = true
 maw-provider-claude.workspace = true
 maw-provider-ollama.workspace = true

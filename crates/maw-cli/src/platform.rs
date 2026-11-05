@@ -184,8 +184,8 @@ mod tests {
     #[test]
     fn the_windows_profile_folder_is_read_from_cmd_output() {
         assert_eq!(
-            parse_cmd_path("C:\\Users\\Thinh\r\n"),
-            Some(PathBuf::from("/mnt/c/Users/Thinh"))
+            parse_cmd_path("C:\\Users\\Someone\r\n"),
+            Some(PathBuf::from("/mnt/c/Users/Someone"))
         );
         // cmd.exe leaves the variable as is when it does not exist; empty output is nothing
         assert_eq!(parse_cmd_path("%USERPROFILE%\r\n"), None);

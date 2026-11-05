@@ -1,0 +1,12 @@
+[package]
+name = "maw-lab"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "A tiny Transformer you can train and take apart: for learning how language models work"
+
+[dependencies]
+serde.workspace = true
+# exact number round trips: a saved model must load back bit for bit
+serde_json = { workspace = true, features = ["float_roundtrip"] }
+thiserror.workspace = true

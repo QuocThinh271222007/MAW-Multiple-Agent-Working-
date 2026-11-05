@@ -1035,6 +1035,7 @@ dependencies = [
  "directories",
  "libc",
  "maw-core",
+ "maw-lab",
  "maw-mcp",
  "maw-orchestrator",
  "maw-provider-claude",
@@ -1062,6 +1063,15 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "uuid",
+]
+
+[[package]]
+name = "maw-lab"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -1173,6 +1183,7 @@ dependencies = [
  "crossterm",
  "futures",
  "maw-core",
+ "maw-lab",
  "maw-orchestrator",
  "maw-storage",
  "ratatui",

@@ -16,6 +16,7 @@ pub mod downloads;
 pub mod events;
 pub mod flow;
 pub mod input;
+pub mod lab_ui;
 pub mod picker;
 pub mod runtime;
 pub mod theme;

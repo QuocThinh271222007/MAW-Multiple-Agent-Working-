@@ -1,0 +1,25 @@
+A language model learns to guess the next piece of text.
+It reads a long text, and at every position it tries to predict what comes next.
+When the guess is wrong, the model is corrected a little, and it tries again.
+After many corrections the guesses get better, and the model starts to write text that looks like what it read.
+
+A small model learns small things. At first it only learns which letters are common.
+Then it learns that some letters like to follow others. After a while it learns whole words.
+The more text it reads, and the longer it practises, the more it can learn.
+
+Every word is cut into small pieces called tokens. The model never sees letters or words, only numbers.
+Each token has a list of numbers called an embedding. Tokens that are used in similar ways end up with similar embeddings.
+Attention lets every token look back at the tokens before it and decide which ones matter for the next guess.
+
+The learning rate says how big each correction is. At the start it is small, then it grows, then it shrinks again.
+If the corrections are too big the model jumps around and never settles. If they are too small it learns very slowly.
+Weight decay gently pulls every weight toward zero, so that the model does not memorise by using huge numbers.
+
+A model that has memorised its text knows it by heart but cannot write anything new.
+To notice this we keep a little of the text aside and never train on it.
+If the loss on that text stops falling while the loss on the training text keeps falling, the model is over-fitting.
+
+Temperature controls how adventurous the writing is. A low temperature always picks the likeliest token.
+A high temperature sometimes picks an unlikely one, which makes the text more surprising and more often wrong.
+The model can only look at a limited number of tokens at once. That limit is called the context window.
+Anything that falls outside the window is forgotten, because the model simply cannot see it.

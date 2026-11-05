@@ -110,6 +110,24 @@ maw agent add --name local --provider ollama --model qwen3:8b
 ```
 MAW starts `ollama serve` by itself when an Ollama agent needs it, runs the agent loop (file tools, commands with approvals, and the `maw_*` coordination tools over MCP) and shows the model's reasoning when it streams one. There is no OS sandbox around commands. Details and limits: [docs/providers/ollama.md](docs/providers/ollama.md).
 
+### Learn how language models work (`maw lab`)
+
+```bash
+maw lab                       # trains a tiny Transformer on a built-in text and opens a live 3D view
+maw lab train my-notes.txt    # ...on your own text
+```
+A real Transformer with about 27,000 parameters, written from scratch, that a student trains in a minute or
+two on their own data while watching the token embeddings move in 3D, the loss and learning-rate curves, the
+attention weights and what the model writes. Ten built-in lessons explain tokenizers, embeddings, attention,
+loss, learning-rate decay, weight decay, over-fitting, sampling, the context window and where the parameters
+are, using the numbers on screen. No Ollama, GPU, download or network needed. See [docs/LAB.md](docs/LAB.md).
+
+### The Leader can choose the project folder
+
+By default agents work in the folder `maw` was started in. A Leader can propose a better one (a WSL or a
+Windows path) with `maw_workspace_propose`; nothing changes until you approve it in the Approval Center.
+`maw workspace folder <path>` sets it yourself. See the end of [docs/TUI.md](docs/TUI.md).
+
 Try it with no providers at all (scripted *mock* agents; it exercises MAW itself, not Claude/Codex):
 
 ```bash
@@ -131,7 +149,7 @@ maw demo --headless    # prints the event flow and exits
 
 ## Documentation
 
-[`ARCHITECTURE`](docs/ARCHITECTURE.md) · [`PROTOCOL`](docs/PROTOCOL.md) · [`MCP_TOOLS`](docs/MCP_TOOLS.md) (36 tools, generated) · [`TASK_LIFECYCLE`](docs/TASK_LIFECYCLE.md) · [`SECURITY`](docs/SECURITY.md) · [`AUTHENTICATION`](docs/AUTHENTICATION.md) · [`PROVIDER_COMPATIBILITY`](docs/PROVIDER_COMPATIBILITY.md) · [`TUI`](docs/TUI.md) · [`WINDOWS_WSL`](docs/WINDOWS_WSL.md) · [`ROADMAP`](docs/ROADMAP.md) · [`AGENTS.md`](AGENTS.md)
+[`ARCHITECTURE`](docs/ARCHITECTURE.md) · [`PROTOCOL`](docs/PROTOCOL.md) · [`MCP_TOOLS`](docs/MCP_TOOLS.md) (39 tools, generated) · [`TASK_LIFECYCLE`](docs/TASK_LIFECYCLE.md) · [`SECURITY`](docs/SECURITY.md) · [`AUTHENTICATION`](docs/AUTHENTICATION.md) · [`PROVIDER_COMPATIBILITY`](docs/PROVIDER_COMPATIBILITY.md) · [`TUI`](docs/TUI.md) · [`LAB`](docs/LAB.md) · [`WINDOWS_WSL`](docs/WINDOWS_WSL.md) · [`ROADMAP`](docs/ROADMAP.md) · [`AGENTS.md`](AGENTS.md)
 
 ## Known limitations
 

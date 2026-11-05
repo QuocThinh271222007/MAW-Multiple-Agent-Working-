@@ -1,0 +1,25 @@
+Mô hình ngôn ngữ học cách đoán đoạn văn bản tiếp theo.
+Nó đọc một văn bản dài, và ở mỗi vị trí nó cố đoán xem điều gì sẽ đến sau.
+Khi đoán sai, mô hình được sửa một chút, rồi nó thử lại.
+Sau rất nhiều lần sửa, các dự đoán tốt dần lên, và mô hình bắt đầu viết ra những câu giống với những gì nó đã đọc.
+
+Một mô hình nhỏ chỉ học được những điều nhỏ. Lúc đầu nó chỉ biết chữ cái nào hay gặp.
+Sau đó nó biết chữ cái nào thường đi sau chữ cái nào. Rồi nó biết cả những từ hoàn chỉnh.
+Đọc càng nhiều và luyện tập càng lâu thì mô hình học được càng nhiều.
+
+Mỗi từ được cắt thành những mảnh nhỏ gọi là token. Mô hình không bao giờ nhìn thấy chữ, nó chỉ thấy các con số.
+Mỗi token có một danh sách số gọi là embedding. Những token được dùng giống nhau sẽ có embedding gần nhau.
+Cơ chế attention cho phép mỗi token nhìn lại các token đứng trước nó và chọn ra token nào quan trọng cho lần đoán tiếp theo.
+
+Tốc độ học cho biết mỗi lần sửa lớn đến đâu. Lúc đầu nó nhỏ, sau đó tăng lên, rồi lại giảm dần.
+Nếu mỗi lần sửa quá lớn thì mô hình nhảy loạn và không bao giờ ổn định. Nếu quá nhỏ thì nó học rất chậm.
+Weight decay nhẹ nhàng kéo mọi trọng số về phía không, để mô hình không học vẹt bằng những con số khổng lồ.
+
+Một mô hình đã học thuộc lòng văn bản của nó thì nhớ rất kỹ nhưng không viết được điều gì mới.
+Để phát hiện điều này, ta để riêng một phần nhỏ văn bản và không bao giờ huấn luyện trên đó.
+Nếu độ lỗi trên phần đó ngừng giảm trong khi độ lỗi trên phần huấn luyện vẫn giảm, mô hình đang học vẹt.
+
+Nhiệt độ quyết định việc viết táo bạo đến mức nào. Nhiệt độ thấp luôn chọn token có khả năng cao nhất.
+Nhiệt độ cao đôi khi chọn một token ít có khả năng, làm văn bản bất ngờ hơn nhưng cũng sai nhiều hơn.
+Mô hình chỉ nhìn được một số lượng token giới hạn cùng lúc. Giới hạn đó gọi là cửa sổ ngữ cảnh.
+Mọi thứ nằm ngoài cửa sổ đều bị quên, vì mô hình đơn giản là không nhìn thấy chúng.
