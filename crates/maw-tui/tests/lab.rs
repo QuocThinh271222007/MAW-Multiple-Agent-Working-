@@ -43,7 +43,7 @@ fn session(steps: usize, paused: bool) -> LabSession {
 }
 
 fn wait(s: &LabSession, f: impl Fn(&Snapshot) -> bool) -> Snapshot {
-    for _ in 0..600 {
+    for _ in 0..1200 {
         let snap = s.snapshot();
         if f(&snap) {
             return snap;

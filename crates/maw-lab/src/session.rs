@@ -327,7 +327,7 @@ mod tests {
     }
 
     fn wait_for(s: &LabSession, f: impl Fn(&Snapshot) -> bool) -> Snapshot {
-        for _ in 0..400 {
+        for _ in 0..1200 {
             let snap = s.snapshot();
             if f(&snap) {
                 return snap;
@@ -374,11 +374,15 @@ mod tests {
         let moved = wait_for(&s, |x| x.step > 5);
         assert_eq!(moved.status, Status::Running);
         s.toggle_pause();
-        std::thread::sleep(Duration::from_millis(150));
-        let a = s.snapshot().step;
-        std::thread::sleep(Duration::from_millis(150));
-        let b = s.snapshot().step;
-        assert!(b - a <= 2, "paused again: {a} -> {b}");
+        // snapshots are published a little after the fact, so wait until the one that says "paused"
+        // arrives; from then on the step count must not move at all (however busy the machine is)
+        let paused = wait_for(&s, |x| x.status == Status::Paused);
+        std::thread::sleep(Duration::from_millis(500));
+        assert_eq!(
+            s.snapshot().step,
+            paused.step,
+            "paused again, yet it kept stepping"
+        );
         s.stop();
     }
 
