@@ -326,6 +326,8 @@ pub struct Supervisor {
     shown: Mutex<HashSet<MessageId>>,
     user_stopped: Mutex<HashSet<AgentId>>,
     reconnecting: Mutex<HashSet<AgentId>>,
+    /// Agents to restart in the new working folder as soon as they are not in the middle of a turn.
+    reconnect_after: Mutex<HashSet<AgentId>>,
     /// goal -> (nudges sent, when the last one was sent)
     nudges: Mutex<HashMap<GoalId, (u32, std::time::Instant)>>,
     perf: Arc<crate::perf::PerfMonitor>,
@@ -353,6 +355,7 @@ impl Supervisor {
             extra_dirs: RwLock::new(Vec::new()),
             user_stopped: Mutex::new(HashSet::new()),
             reconnecting: Mutex::new(HashSet::new()),
+            reconnect_after: Mutex::new(HashSet::new()),
             nudges: Mutex::new(HashMap::new()),
             perf: crate::perf::PerfMonitor::new(),
         })
@@ -422,8 +425,9 @@ impl Supervisor {
         self.cancel.clone()
     }
 
+    /// Where agents work: the folder the user approved for the project, else the folder it started in.
     fn project_root(&self) -> PathBuf {
-        PathBuf::from(&self.engine.project().path)
+        self.engine.workspace_root()
     }
 
     /// Tell the supervisor which folders agent worktrees can live in. Each side is a folder or the
@@ -1348,7 +1352,7 @@ impl Supervisor {
     }
 
     pub async fn resolve_approval(
-        &self,
+        self: &Arc<Self>,
         approval_id: &ApprovalId,
         decision: ApprovalDecision,
     ) -> CoreResult<()> {
@@ -1356,6 +1360,10 @@ impl Supervisor {
             .engine
             .read(|db| db.get_approval(approval_id))?
             .ok_or_else(|| CoreError::not_found("approval", approval_id))?;
+        // the Leader's proposal for the working folder is answered here, not by any provider
+        if ap.kind == crate::folder::KIND {
+            return self.resolve_workspace_approval(&ap, decision).await;
+        }
         let live = self.sessions.lock().await.get(&ap.agent_id).cloned();
         let status = match decision {
             ApprovalDecision::Approve => ApprovalStatus::Approved,
@@ -1386,6 +1394,125 @@ impl Supervisor {
         }
         self.bump();
         Ok(())
+    }
+
+    /// The user answered the Leader's proposal for the working folder.
+    async fn resolve_workspace_approval(
+        self: &Arc<Self>,
+        ap: &Approval,
+        decision: ApprovalDecision,
+    ) -> CoreResult<()> {
+        if ap.status != ApprovalStatus::Pending {
+            return Err(CoreError::Conflict(format!(
+                "this proposal is already {}",
+                ap.status.as_str()
+            )));
+        }
+        let path = ap
+            .details
+            .get("path")
+            .and_then(|v| v.as_str())
+            .map(PathBuf::from)
+            .ok_or_else(|| {
+                CoreError::Internal("a working-folder proposal without a path".into())
+            })?;
+        let tell = |subject: &str, text: String| {
+            let _ = self.engine.send_message(
+                &Actor::System,
+                &ap.agent_id.0,
+                MessageType::Instruction,
+                subject,
+                &text,
+                None,
+                None,
+            );
+        };
+        match decision {
+            ApprovalDecision::Deny | ApprovalDecision::Abort => {
+                self.engine
+                    .resolve_approval(&ap.id, ApprovalStatus::Denied)?;
+                tell(
+                    "Working folder not changed",
+                    format!(
+                        "The user declined moving the project to {}. Keep working in {}.",
+                        path.display(),
+                        self.engine.workspace_root().display()
+                    ),
+                );
+            }
+            ApprovalDecision::Approve | ApprovalDecision::ApproveForSession => {
+                // re-checked now: things may have started since it was proposed
+                let blockers = self.engine.workspace_change_blockers()?;
+                if !blockers.is_empty() {
+                    return Err(CoreError::Precondition(format!(
+                        "not now: work is still in flight ({}). Finish or cancel it, then approve again",
+                        blockers.join(", ")
+                    )));
+                }
+                if !self.engine.folder_allowed(&path) {
+                    return Err(CoreError::Precondition(format!(
+                        "{} is no longer inside the allowed places",
+                        path.display()
+                    )));
+                }
+                let p2 = path.clone();
+                let note = tokio::task::spawn_blocking(move || ws::prepare_folder(&p2))
+                    .await
+                    .map_err(|e| CoreError::Internal(e.to_string()))?
+                    .map_err(CoreError::Precondition)?;
+                let previous = self.engine.workspace_root();
+                self.engine.set_work_dir(Some(&path))?;
+                self.engine
+                    .resolve_approval(&ap.id, ApprovalStatus::Approved)?;
+                // every connected agent restarts in the new folder (a busy one as soon as its turn ends)
+                let ids = self.live_agents().await;
+                if let Ok(mut set) = self.reconnect_after.lock() {
+                    set.extend(ids);
+                }
+                self.reconnect_pending().await;
+                tell(
+                    "Working folder changed",
+                    format!(
+                        "The user approved. The project now lives in {} (it was {}). {note}. Your session and the workers' are restarted in the new folder: continue from maw_goal_get and maw_task_list, and create the tasks there.",
+                        path.display(),
+                        previous.display()
+                    ),
+                );
+            }
+        }
+        self.bump();
+        Ok(())
+    }
+
+    /// Restart agents that have to move to a new working folder, once they are between turns.
+    async fn reconnect_pending(self: &Arc<Self>) {
+        let ids: Vec<AgentId> = self
+            .reconnect_after
+            .lock()
+            .map(|s| s.iter().cloned().collect())
+            .unwrap_or_default();
+        for id in ids {
+            let done = |me: &Self| {
+                if let Ok(mut s) = me.reconnect_after.lock() {
+                    s.remove(&id);
+                }
+            };
+            if !self.is_live(&id).await {
+                done(self); // it will start in the new folder whenever it connects
+                continue;
+            }
+            match self.engine.get_agent(&id) {
+                Ok(a) if a.state.is_available() => {
+                    done(self);
+                    self.disconnect_agent(&id, false).await;
+                    if let Err(e) = self.connect_agent(&id).await {
+                        tracing::warn!(agent = %id, "could not restart in the new folder: {e}");
+                    }
+                }
+                Ok(_) => {} // busy: next pass
+                Err(_) => done(self),
+            }
+        }
     }
 
     /// Send the user's message to an agent (delivered by the scheduler when the agent is idle,
@@ -1473,6 +1600,7 @@ impl Supervisor {
                     self.poll_refresh_request();
                 }
             }
+            self.reconnect_pending().await;
             if let Err(e) = self.scheduler_pass().await {
                 tracing::warn!("scheduler pass failed: {e}");
             }

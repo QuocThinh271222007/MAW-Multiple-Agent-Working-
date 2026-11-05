@@ -1639,6 +1639,45 @@ fn cmd_workspace(
     dir: Option<String>,
 ) -> Result<()> {
     let p = resolve_project(ctx, project_arg, false)?;
+    // folder: the folder the project's agents work in (the user decides directly; no approval needed)
+    if mode.as_deref().map(str::to_lowercase).as_deref() == Some("folder") {
+        let eng = open_utility_engine(ctx, &p)?;
+        let Some(raw) = dir else {
+            bail!("give the folder, or `reset` to use the project folder again: maw workspace folder <folder>");
+        };
+        let blockers = anyhow_core(eng.workspace_change_blockers())?;
+        if !blockers.is_empty() {
+            bail!(
+                "work is still in flight ({}); finish, release or cancel those tasks first",
+                blockers.join(", ")
+            );
+        }
+        if raw.trim().eq_ignore_ascii_case("reset") {
+            anyhow_core(eng.set_work_dir(None))?;
+            println!(
+                "Agents work in the project folder again: {}",
+                p.path.display()
+            );
+        } else {
+            let home = std::env::var_os("HOME").map(PathBuf::from);
+            let folder = maw_orchestrator::workspace::normalize_folder(
+                &raw,
+                home.as_deref(),
+                matches!(ctx.os, platform::Os::Wsl),
+            )
+            .map_err(|e| anyhow::anyhow!(e))?;
+            let note = maw_orchestrator::workspace::prepare_folder(&folder)
+                .map_err(|e| anyhow::anyhow!(e))?;
+            anyhow_core(eng.set_work_dir(Some(&folder)))?;
+            println!("Agents now work in {}", folder.display());
+            println!("  ({note})");
+        }
+        match app::read_runtime_info(ctx, &p) {
+            Some(_) => println!("A MAW is running for this project: restart it so its agents start in the new folder."),
+            None => println!("It applies the next time MAW starts."),
+        }
+        return Ok(());
+    }
     // allow / deny: the folders agents may write to besides their worktree
     if let Some(verb) = mode.as_deref().map(str::to_lowercase) {
         if verb == "allow" || verb == "deny" {
@@ -1713,6 +1752,19 @@ fn cmd_workspace(
     println!("  wsl      {}", describe(&wsl));
     println!("  windows  {}", describe(&windows));
     println!("Saved choice: {shown} (set with `maw workspace <project|wsl|windows>`)");
+    if let Ok(eng) = open_utility_engine(ctx, &p) {
+        match eng.work_dir() {
+            Some(d) => println!("Working folder: {} (the project was started in {}; `maw workspace folder reset` goes back)", d.display(), p.path.display()),
+            None => println!("Working folder: {} (the folder MAW was started in; `maw workspace folder <folder>` or the Leader's proposal changes it)", p.path.display()),
+        }
+    }
+    let roots = app::workspace_roots(ctx);
+    if !roots.is_empty() {
+        println!("The Leader may propose a project folder inside (you approve each one):");
+        for r in &roots {
+            println!("  {}", r.display());
+        }
+    }
     let (allowed, refused) = app::allowed_extra_dirs(ctx);
     if allowed.is_empty() && refused.is_empty() {
         println!("Folders agents may also write to: none (add one with `maw workspace allow <folder>`; only you can).");

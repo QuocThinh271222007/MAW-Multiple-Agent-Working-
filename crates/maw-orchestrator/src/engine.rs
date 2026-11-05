@@ -103,6 +103,10 @@ pub struct Engine {
     pub(crate) project: Project,
     pub(crate) run_id: RunId,
     pub(crate) cfg: RwLock<OrchestratorConfig>,
+    /// The working folder chosen for the project (see `folder.rs`); `None` = the project's own folder.
+    pub(crate) work_dir: RwLock<Option<std::path::PathBuf>>,
+    /// Places the Leader may propose a working folder in.
+    pub(crate) workspace_roots: RwLock<Vec<std::path::PathBuf>>,
     events: broadcast::Sender<Event>,
     /// Wakes the scheduler/supervisor when state changes.
     pub(crate) wake: Arc<Notify>,
@@ -140,7 +144,7 @@ impl Engine {
         cfg: OrchestratorConfig,
         track_run: bool,
     ) -> CoreResult<Arc<Engine>> {
-        let (project, paused) = store.write(|db| {
+        let project = store.write(|db| {
             let project = match db.find_project(name)? {
                 Some(p) => p,
                 None => {
@@ -155,8 +159,15 @@ impl Engine {
                 }
             };
             let paused = db.kv_get(&project.id, "scheduler_paused")?.as_deref() == Some("1");
-            Ok((project, paused))
+            // a chosen working folder that has since disappeared is forgotten, not trusted
+            let work_dir = db
+                .kv_get(&project.id, "work_dir")?
+                .filter(|v| !v.is_empty())
+                .map(std::path::PathBuf::from)
+                .filter(|p| p.is_dir());
+            Ok((project, paused, work_dir))
         })?;
+        let (project, paused, work_dir) = (project.0, project.1, project.2);
         let run_id = RunId::new();
         if track_run {
             store.write(|db| {
@@ -175,6 +186,8 @@ impl Engine {
             project,
             run_id,
             cfg: RwLock::new(cfg),
+            work_dir: RwLock::new(work_dir),
+            workspace_roots: RwLock::new(Vec::new()),
             events: tx,
             wake: Arc::new(Notify::new()),
             paused: AtomicBool::new(paused),

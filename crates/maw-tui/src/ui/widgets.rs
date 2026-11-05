@@ -52,6 +52,33 @@ pub fn bar(width: usize, frac: f64) -> String {
     )
 }
 
+/// Wrap a path on its separators so a long one breaks between folders, not in the middle of a name.
+/// A single component wider than `width` is split as a last resort. Never returns an empty vec.
+pub fn wrap_path(p: &str, width: usize) -> Vec<String> {
+    let width = width.max(4);
+    let mut out: Vec<String> = vec![];
+    let mut line = String::new();
+    for seg in p.split_inclusive(['/', '\\']) {
+        if line.width() + seg.width() > width && !line.is_empty() {
+            out.push(std::mem::take(&mut line));
+        }
+        if seg.width() > width {
+            for piece in wrap_text(seg, width) {
+                if !line.is_empty() {
+                    out.push(std::mem::take(&mut line));
+                }
+                line = piece;
+            }
+        } else {
+            line.push_str(seg);
+        }
+    }
+    if !line.is_empty() || out.is_empty() {
+        out.push(line);
+    }
+    out
+}
+
 /// Greedy word wrap by display width. Never returns an empty vec.
 pub fn wrap_text(s: &str, width: usize) -> Vec<String> {
     let width = width.max(1);
@@ -171,6 +198,23 @@ mod tests {
         assert_eq!(truncate("x", 0), "");
         assert_eq!(pad("ab", 5), "ab   ");
         assert_eq!(pad("abcdefgh", 4).width(), 4);
+    }
+
+    #[test]
+    fn paths_break_between_folders() {
+        let p = "/mnt/c/Users/Someone/Documents/projects/a-folder-with-a-rather-long-name/radix-sort-demo";
+        let rows = wrap_path(p, 50);
+        assert_eq!(rows.concat(), p, "nothing lost");
+        assert!(rows.iter().all(|r| r.width() <= 50), "{rows:?}");
+        assert!(
+            rows.iter()
+                .any(|r| r.starts_with("radix-sort-demo") || r.ends_with("radix-sort-demo")),
+            "{rows:?}"
+        );
+        assert_eq!(wrap_path("/a/b", 40), vec!["/a/b"]);
+        // one component wider than the room is still shown in full
+        assert_eq!(wrap_path(&"x".repeat(30), 10).concat(), "x".repeat(30));
+        assert_eq!(wrap_path("", 10), vec![""]);
     }
 
     #[test]

@@ -319,6 +319,161 @@ pub fn remove_worktree(repo: &Path, path: &Path) -> Result<(), String> {
     .map(|_| ())
 }
 
+// ---------------------------------------------------------------- the folder agents work in
+
+/// Whether this process runs inside WSL (Windows drives are then under `/mnt/<letter>`).
+pub fn running_in_wsl() -> bool {
+    if std::env::var_os("WSL_DISTRO_NAME").is_some() || std::env::var_os("WSL_INTEROP").is_some() {
+        return true;
+    }
+    cfg!(target_os = "linux")
+        && std::fs::read_to_string("/proc/version")
+            .map(|v| v.to_lowercase().contains("microsoft"))
+            .unwrap_or(false)
+}
+
+/// Turn what the Leader wrote into an absolute folder path on THIS machine, or say why not.
+///
+/// Accepted: a WSL/Linux path (`/home/me/projects/app`, `~/projects/app`), a Windows path
+/// (`C:\Users\me\projects\app` or `C:/Users/...`, which under WSL is `/mnt/c/Users/...`) and a WSL
+/// path seen from Windows (`\\wsl$\Ubuntu\home\me\app`, `\\wsl.localhost\Ubuntu\...`). Relative
+/// paths and `..` are refused: where they point depends on a directory the Leader cannot know.
+pub fn normalize_folder(input: &str, home: Option<&Path>, wsl: bool) -> Result<PathBuf, String> {
+    let raw = input.trim();
+    if raw.is_empty() {
+        return Err("the path is empty".into());
+    }
+    if raw.len() > 240 || raw.chars().any(|c| c == '\0' || c == '\n' || c == '\r') {
+        return Err("the path is too long or contains control characters".into());
+    }
+    let b = raw.as_bytes();
+    let drive = b.len() >= 3
+        && b[0].is_ascii_alphabetic()
+        && b[1] == b':'
+        && (b[2] == b'\\' || b[2] == b'/');
+    let unc = raw.starts_with("\\\\wsl$\\")
+        || raw.to_ascii_lowercase().starts_with("\\\\wsl.localhost\\");
+    let unix: String = if drive {
+        if wsl {
+            let rest = raw[3..].replace('\\', "/");
+            format!(
+                "/mnt/{}/{}",
+                (b[0] as char).to_ascii_lowercase(),
+                rest.trim_start_matches('/')
+            )
+        } else if cfg!(windows) {
+            return clean_components(Path::new(raw));
+        } else {
+            return Err("a Windows path can only be used from Windows or WSL".into());
+        }
+    } else if unc {
+        if !wsl {
+            return Err("a \\\\wsl$ path can only be used from WSL".into());
+        }
+        // \\wsl$\<distro>\home\me\app  ->  /home/me/app
+        let parts: Vec<&str> = raw.split('\\').filter(|p| !p.is_empty()).collect();
+        if parts.len() < 3 {
+            return Err(
+                "give a folder inside the distribution, e.g. \\\\wsl$\\Ubuntu\\home\\me\\app"
+                    .into(),
+            );
+        }
+        format!("/{}", parts[2..].join("/"))
+    } else if raw == "~" || raw.starts_with("~/") {
+        if raw == "~" || raw.trim_end_matches('/') == "~" {
+            return Err("give a folder inside your home folder, e.g. ~/projects/app".into());
+        }
+        let h = home.ok_or("no home folder is known on this machine")?;
+        h.join(raw.trim_start_matches('~').trim_start_matches('/'))
+            .to_string_lossy()
+            .into_owned()
+    } else {
+        raw.replace('\\', "/")
+    };
+    if !unix.starts_with('/') && !cfg!(windows) {
+        return Err(format!(
+            "'{raw}' is not an absolute path (start it with /, ~/ or a drive letter such as C:\\)"
+        ));
+    }
+    let cleaned = clean_components(Path::new(&unix))?;
+    // /mnt/<letter> alone is a whole Windows drive
+    let comps: Vec<String> = cleaned
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    if comps.len() == 3 && comps[1] == "mnt" && comps[2].len() == 1 {
+        return Err("that is a whole Windows drive; pick a project folder inside it".into());
+    }
+    Ok(cleaned)
+}
+
+/// Drop `.` and refuse `..`; the result must have at least two components below the root.
+fn clean_components(p: &Path) -> Result<PathBuf, String> {
+    let mut out = PathBuf::new();
+    let mut depth = 0;
+    for c in p.components() {
+        match c {
+            std::path::Component::ParentDir => return Err("'..' is not allowed in the path".into()),
+            std::path::Component::CurDir => {}
+            std::path::Component::Normal(n) => {
+                depth += 1;
+                out.push(n);
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    if depth < 2 {
+        return Err("that is too close to the root of a drive; pick a project folder inside your own folders".into());
+    }
+    Ok(out)
+}
+
+/// Create the folder (and its parents) and make it a git repository with one starting commit, so
+/// every agent can have its own worktree. A folder that already holds a repository is left alone.
+/// Returns a note about what was done; git trouble is reported, not fatal (agents then share the folder).
+pub fn prepare_folder(path: &Path) -> Result<String, String> {
+    if path.exists() && !path.is_dir() {
+        return Err(format!("{} exists and is not a folder", path.display()));
+    }
+    let existed = path.is_dir();
+    std::fs::create_dir_all(path).map_err(|e| format!("cannot create {}: {e}", path.display()))?;
+    let mut note = if existed {
+        format!("{} already existed", path.display())
+    } else {
+        format!("created {}", path.display())
+    };
+    if is_git_repo(path) {
+        note.push_str("; it is already a git repository");
+        return Ok(note);
+    }
+    match git(path, &["init", "-q", "-b", "main"]) {
+        Ok(_) => {
+            let committed = git(
+                path,
+                &[
+                    "-c",
+                    "user.name=MAW",
+                    "-c",
+                    "user.email=maw@localhost",
+                    "commit",
+                    "-q",
+                    "--allow-empty",
+                    "-m",
+                    "maw: start of the project folder",
+                ],
+            );
+            match committed {
+                Ok(_) => note.push_str("; started a git repository so each agent can have its own worktree"),
+                Err(e) => note.push_str(&format!("; git init worked but the first commit did not ({e}); agents will share the folder")),
+            }
+        }
+        Err(e) => note.push_str(&format!(
+            "; could not start a git repository ({e}); agents will share the folder"
+        )),
+    }
+    Ok(note)
+}
+
 /// True when `path` resolves inside `root` (after normalising `..`). Used for boundary checks.
 pub fn is_within(root: &Path, path: &Path) -> bool {
     fn norm(p: &Path) -> PathBuf {
@@ -346,6 +501,77 @@ pub fn is_within(root: &Path, path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn folders_from_windows_and_wsl_become_one_kind_of_path() {
+        let home = PathBuf::from("/home/me");
+        let n = |s: &str| normalize_folder(s, Some(&home), true);
+        assert_eq!(
+            n("/home/me/projects/app").unwrap(),
+            PathBuf::from("/home/me/projects/app")
+        );
+        assert_eq!(
+            n("~/projects/app").unwrap(),
+            PathBuf::from("/home/me/projects/app")
+        );
+        assert_eq!(
+            n("C:\\Users\\Me\\projects\\app").unwrap(),
+            PathBuf::from("/mnt/c/Users/Me/projects/app")
+        );
+        assert_eq!(n("d:/work/app").unwrap(), PathBuf::from("/mnt/d/work/app"));
+        assert_eq!(
+            n("\\\\wsl$\\Ubuntu\\home\\me\\app").unwrap(),
+            PathBuf::from("/home/me/app")
+        );
+        assert_eq!(
+            n("\\\\wsl.localhost\\Ubuntu-24.04\\home\\me\\app").unwrap(),
+            PathBuf::from("/home/me/app")
+        );
+        assert_eq!(
+            n("  /home/me/./projects//app/ ").unwrap(),
+            PathBuf::from("/home/me/projects/app")
+        );
+        for bad in [
+            "",
+            "projects/app",
+            "../x",
+            "/home/me/../root/app",
+            "/",
+            "/home",
+            "C:\\",
+            "~",
+            "/a\nb",
+        ] {
+            assert!(n(bad).is_err(), "{bad:?} should be refused");
+        }
+        assert!(n(&"x/".repeat(200)).is_err());
+        // outside WSL a Windows path is not usable
+        if !cfg!(windows) {
+            assert!(normalize_folder("C:\\Users\\Me\\app", Some(&home), false).is_err());
+            assert!(
+                normalize_folder("\\\\wsl$\\Ubuntu\\home\\me\\app", Some(&home), false).is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn a_new_project_folder_becomes_a_git_repo_with_a_first_commit() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("projects").join("radix");
+        let note = prepare_folder(&p).unwrap();
+        assert!(p.is_dir() && is_git_repo(&p), "{note}");
+        assert!(
+            has_commits(&p),
+            "agents need a commit to branch worktrees from: {note}"
+        );
+        // running it again leaves it alone
+        let again = prepare_folder(&p).unwrap();
+        assert!(again.contains("already"), "{again}");
+        // a file where the folder should be is refused
+        let f = d.path().join("file");
+        std::fs::write(&f, "x").unwrap();
+        assert!(prepare_folder(&f).is_err());
+    }
 
     fn init_repo(dir: &Path) {
         git(dir, &["init", "-q", "-b", "main"]).unwrap();

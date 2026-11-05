@@ -86,10 +86,22 @@ impl Default for OllamaSection {
     }
 }
 
+/// Where the Leader may propose a working folder (`[workspace]` in config.toml).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct WorkspaceSection {
+    /// Folders the Leader may propose a project folder inside, WSL or Windows style
+    /// (`~/projects`, `/home/me/work`, `C:\\Users\\me\\projects`). Empty = `~/projects` and, in WSL,
+    /// `projects` in your Windows profile. The project's own folder is always allowed. The user
+    /// still has to approve each proposal.
+    pub roots: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct MawConfig {
     pub ui: UiConfig,
+    pub workspace: WorkspaceSection,
     pub orchestrator: OrchestratorConfig,
     pub codex: ProviderConfig,
     pub claude: ProviderConfig,

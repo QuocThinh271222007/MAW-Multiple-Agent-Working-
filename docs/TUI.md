@@ -372,3 +372,24 @@ be a notice that disappeared after a few seconds). The most common reason on a f
 newer than the Ollama server ("requires a newer version of Ollama"); the message names the running
 version and says to update Ollama.
 
+## The working folder (Leader proposes, you approve)
+
+By default agents work in the folder `maw` was started in. When that is the wrong place (a home folder full of
+unrelated files, say) the **Leader can ask for another one** with `maw_workspace_propose(path, reason)`;
+`maw_workspace_get` shows the current folder, where proposals are allowed and whether a change is possible.
+
+* The path may be a WSL path (`/home/me/projects/app`, `~/projects/app`) or a Windows path
+  (`C:\Users\me\projects\app`, which under WSL is `/mnt/c/Users/me/projects/app`). `..`, relative paths and
+  a whole drive are refused.
+* It must be inside one of the places you allowed: `[workspace] roots` in `config.toml` (by default
+  `~/projects` and, under WSL, `projects` in your Windows profile) or inside the project's own folder.
+* Nothing changes until **you approve it in the Approval Center** (`o`, then `y`; `n` declines). The request
+  shows the whole folder, the current one and the Leader's reason. An agent never widens where agents may work
+  on its own; the proposal also survives a restart of MAW until you answer it.
+* Approving creates the folder (and a git repository with a first commit, so each agent can have its own
+  worktree), then restarts every connected agent in it (a busy one as soon as its turn ends) and tells the
+  Leader. It is refused while tasks are assigned, running, blocked or waiting for review, because their work
+  lives in worktrees of the old folder.
+* You can also set it yourself: `maw workspace folder <folder>` (`maw workspace folder reset` goes back);
+  `maw workspace` shows the current folder and the allowed places.
+

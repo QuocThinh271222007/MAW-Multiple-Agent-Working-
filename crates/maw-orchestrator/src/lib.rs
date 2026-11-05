@@ -3,6 +3,7 @@
 
 pub mod comms;
 pub mod engine;
+pub mod folder;
 pub mod mock;
 pub mod models;
 pub mod perf;

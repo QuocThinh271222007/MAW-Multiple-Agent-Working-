@@ -1162,7 +1162,7 @@ impl<'a> Db<'a> {
     pub fn expire_agent_approvals(&self, agent: &AgentId) -> CoreResult<usize> {
         self.0
             .execute(
-                "UPDATE approvals SET status='expired', resolved_at=?2 WHERE agent_id=?1 AND status='pending'",
+                "UPDATE approvals SET status='expired', resolved_at=?2 WHERE agent_id=?1 AND status='pending' AND kind<>'workspace'",
                 params![agent.0, ts(Utc::now())],
             )
             .map_err(se)

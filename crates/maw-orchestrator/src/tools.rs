@@ -114,6 +114,15 @@ struct TaskCreateArgs {
     idempotency_key: Option<String>,
 }
 
+#[derive(Deserialize, JsonSchema)]
+struct WorkspaceProposeArgs {
+    /// The folder the project should live in: a WSL path (`/home/me/projects/app`, `~/projects/app`)
+    /// or a Windows path (`C:\Users\me\projects\app`). Created if it does not exist.
+    path: String,
+    /// Why this folder fits the project (shown to the user).
+    reason: String,
+}
+
 #[derive(Deserialize, JsonSchema, Default)]
 struct TaskListArgs {
     /// Filter by status (e.g. READY, RUNNING, DONE).
@@ -368,6 +377,8 @@ pub fn tool_specs() -> Vec<ToolSpec> {
         spec!("maw_goal_create", "Leader: create the project's goal when none is active (fails while one is). Only the user can change or cancel an existing goal.", L, false, GoalCreateArgs),
         spec!("maw_goal_update","Leader: update goal criteria/focus/milestone/status. Completion requires every task verified. Revisions are recorded.", L, false, GoalUpdateArgs),
         spec!("maw_goal_get_history", "List all goal revisions with reasons and authors.", ANY, true, Empty),
+        spec!("maw_workspace_get", "Show the folder the agents work in, the places you may propose, whether a change is possible now and any proposal waiting for the user.", ANY, true, Empty),
+        spec!("maw_workspace_propose", "Leader: propose a different working folder for the project (WSL or Windows path), for instance a dedicated folder instead of a home folder. Nothing changes until the user approves it; every agent is then restarted in the new folder. Not possible while tasks are assigned, running, blocked or waiting for review.", L, false, WorkspaceProposeArgs),
         spec!("maw_plan_get", "Get the latest plan revision and its history.", ANY, true, Empty),
         spec!("maw_plan_propose_revision", "Leader: record a new plan revision (milestones, next actions, reason).", L, false, PlanArgs),
         spec!("maw_task_create", "Leader: create a task. Dependencies are validated (no cycles); retries with the same idempotency_key return the original task.", L, false, TaskCreateArgs),
@@ -537,6 +548,17 @@ impl Engine {
                     },
                 )?;
                 Ok(json!({ "goal": g }))
+            }
+            "maw_workspace_get" => self.workspace_info(),
+            "maw_workspace_propose" => {
+                let a: WorkspaceProposeArgs = parse(args)?;
+                let ap = self.propose_workspace(actor, &a.path, &a.reason)?;
+                Ok(json!({
+                    "status": "waiting_for_the_user",
+                    "approval_id": ap.id,
+                    "folder": ap.details.get("path"),
+                    "message": "The user has been asked. Do not start work that depends on the new folder yet: you will get a message when they answer. Meanwhile you can end your turn."
+                }))
             }
             "maw_goal_get_history" => Ok(json!({ "revisions": self.goal_history()? })),
             "maw_plan_get" => {

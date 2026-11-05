@@ -107,6 +107,33 @@ pub fn worktree_bases(
     (wsl, windows)
 }
 
+/// The places the Leader may propose a project folder inside: the configured `[workspace] roots`,
+/// else `~/projects` and, under WSL, `projects` in the Windows profile. Created when needed.
+pub fn workspace_roots(ctx: &Ctx) -> Vec<PathBuf> {
+    let configured: Vec<PathBuf> = ctx
+        .cfg
+        .workspace
+        .roots
+        .iter()
+        .map(|r| r.trim())
+        .filter(|r| !r.is_empty())
+        .map(|r| platform::normalize_user_path(r, ctx.os))
+        .collect();
+    if !configured.is_empty() {
+        return configured;
+    }
+    let mut out = vec![];
+    if let Some(h) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+        out.push(PathBuf::from(h).join("projects"));
+    }
+    if ctx.os == Os::Wsl {
+        if let Some(w) = platform::windows_home() {
+            out.push(w.join("projects"));
+        }
+    }
+    out
+}
+
 /// Whether `path` may be offered to agents as a place they can write besides their worktree. The
 /// check is on the real path (symlinks resolved). Disks, system folders, the home folder itself and
 /// credential folders are refused: the list is meant for a download or output folder, not for
@@ -247,6 +274,7 @@ pub async fn boot(
         .recover()
         .map_err(|e| anyhow::anyhow!("recovery failed: {e}"))?;
     let sup = Supervisor::new(engine.clone());
+    engine.set_workspace_roots(workspace_roots(ctx));
     let (wsl_base, windows_base) = worktree_bases(ctx, p);
     sup.set_worktree_bases(wsl_base, windows_base);
     let (dirs, problems) = allowed_extra_dirs(ctx);

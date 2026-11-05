@@ -260,6 +260,9 @@ pub fn describe(e: &Event, name_of: &dyn Fn(&str) -> String) -> EventLine {
         ProviderError => (format!("{agent} provider error: {}", s(p, "error")), Bad),
         SessionRecovered => ("session recovered from previous run".to_string(), Warn),
         RecoveryRequired => (format!("{task} needs recovery decision"), Bad),
+        WorkspaceUpdated if p.get("kind").and_then(|k| k.as_str()) == Some("folder") => {
+            (format!("working folder is now {}", s(p, "folder")), Good)
+        }
         WorkspaceUpdated => (
             format!("workspace {} {}", s(p, "branch"), s(p, "integration")),
             Dim,

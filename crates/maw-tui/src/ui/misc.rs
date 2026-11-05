@@ -193,11 +193,44 @@ pub fn render_approvals(f: &mut Frame, area: Rect, app: &App) {
             ),
         ]));
         if selected {
+            // the working-folder proposal: the whole path matters, so it is written out in full
+            if a.kind == "workspace" {
+                for (label, key) in [("    folder: ", "path"), ("    now:    ", "previous")] {
+                    if let Some(p) = a.details.get(key).and_then(|v| v.as_str()) {
+                        let rows = wrap_path(p, w.saturating_sub(label.len()).max(8));
+                        for (i, row) in rows.into_iter().enumerate() {
+                            lines.push(Line::from(vec![
+                                Span::styled(
+                                    if i == 0 {
+                                        label.to_string()
+                                    } else {
+                                        " ".repeat(label.len())
+                                    },
+                                    t.dim(),
+                                ),
+                                Span::styled(row, if key == "path" { t.bold() } else { t.base() }),
+                            ]));
+                        }
+                    }
+                }
+            }
             if let Some(r) = &a.reason {
-                lines.push(Line::from(vec![
-                    Span::styled("    reason: ", t.dim()),
-                    Span::raw(truncate(r, w.saturating_sub(12))),
-                ]));
+                for (i, row) in wrap_text(r, w.saturating_sub(12).max(8))
+                    .into_iter()
+                    .enumerate()
+                {
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            if i == 0 {
+                                "    reason: "
+                            } else {
+                                "            "
+                            },
+                            t.dim(),
+                        ),
+                        Span::raw(row),
+                    ]));
+                }
             }
             let paths = a
                 .details
@@ -222,13 +255,21 @@ pub fn render_approvals(f: &mut Frame, area: Rect, app: &App) {
                     Span::styled(truncate(cmd, w.saturating_sub(13)), t.warn()),
                 ]));
             }
-            lines.push(Line::from(vec![
-                Span::styled("    asked: ", t.dim()),
-                Span::raw(format!(
-                    "{} ago · grants: this action only (Y = same kind for the session)",
-                    fmt_ago((app.now - a.requested_at).num_seconds())
-                )),
-            ]));
+            let ago = fmt_ago((app.now - a.requested_at).num_seconds());
+            let what = if a.kind == "workspace" {
+                format!("{ago} ago · y approves: the folder is created and every agent restarts in it · n declines")
+            } else {
+                format!("{ago} ago · grants: this action only (Y = same kind for the session)")
+            };
+            for (i, row) in wrap_text(&what, w.saturating_sub(12).max(8))
+                .into_iter()
+                .enumerate()
+            {
+                lines.push(Line::from(vec![
+                    Span::styled(if i == 0 { "    asked: " } else { "           " }, t.dim()),
+                    Span::raw(row),
+                ]));
+            }
         }
     }
     f.render_widget(Paragraph::new(lines), inner);

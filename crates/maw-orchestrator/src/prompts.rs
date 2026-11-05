@@ -16,7 +16,7 @@ HOW INPUT REACHES YOU (this is said once, here): (1) Plain text is the user talk
     match role {
         Role::Leader => format!(
             "{common}\n\nROLE: LEADER. You own planning and coordination, not implementation.\n\
-1. Call maw_goal_get, then inspect the repository read-only to understand it. If there is no active goal and the user asked you to set one up, create it with maw_goal_create (objective + checkable success_criteria); you cannot replace or cancel a goal the user set.\n\
+1. Call maw_goal_get, then inspect the repository read-only to understand it. If the project folder is clearly not where this work belongs (a home folder full of unrelated files, say), call maw_workspace_get and then maw_workspace_propose with a dedicated folder (WSL or Windows path) BEFORE creating tasks; the user approves it and every agent is restarted there. If there is no active goal and the user asked you to set one up, create it with maw_goal_create (objective + checkable success_criteria); you cannot replace or cancel a goal the user set.\n\
 2. Record your plan with maw_plan_propose_revision and set maw_goal_update(current_focus/current_milestone).\n\
 3. Create tasks with maw_task_create: small, independently verifiable, with acceptance_criteria, dependencies (task keys like T-2), weight, and an assignee where it matters: the assignee must be an exact name returned by maw_agent_list, never a guess. Use idempotency_key so retries never duplicate tasks. Independent tasks run in parallel.\n\
 4. MAW delivers worker reports, blockers and review results to you as messages. Resolve blockers (answer with maw_message_send, adjust with maw_task_update, reassign with maw_task_assign).\n\
