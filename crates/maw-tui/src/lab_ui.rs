@@ -29,6 +29,48 @@ pub struct LabView {
     pub head: usize,
     /// `Some(text)` while the user is typing a new sentence for the probe.
     pub editing: Option<String>,
+    /// `Some("/rot...")` while a `/command` is being typed.
+    pub command: Option<String>,
+    /// The answer to the last command, shown in the footer for a few seconds.
+    pub message: String,
+    pub message_ttl: u32,
+    /// Seconds since the student last touched the keyboard or mouse (the view spins by itself only
+    /// after a few quiet seconds, so it never fights the student's own hand).
+    pub since_input: f64,
+    /// Where the mouse button went down, while dragging.
+    pub drag_from: Option<(u16, u16)>,
+}
+
+impl LabView {
+    pub fn say(&mut self, text: impl Into<String>) {
+        self.message = text.into();
+        self.message_ttl = 90;
+    }
+
+    /// Turn the view by angles in radians; pitch is kept short of straight up or down.
+    pub fn turn(&mut self, dyaw: f64, dpitch: f64) {
+        self.yaw += dyaw;
+        self.pitch = (self.pitch + dpitch).clamp(-1.5, 1.5);
+        self.since_input = 0.0;
+    }
+
+    pub fn zoom_by(&mut self, factor: f64) {
+        self.zoom = (self.zoom * factor).clamp(0.4, 6.0);
+        self.since_input = 0.0;
+    }
+
+    /// Advance the clock by `dt` seconds: the message fades and the view spins when left alone.
+    pub fn tick(&mut self, dt: f64) {
+        self.message_ttl = self.message_ttl.saturating_sub(1);
+        self.since_input += dt;
+        if self.auto_rotate
+            && self.since_input > 4.0
+            && self.editing.is_none()
+            && self.command.is_none()
+        {
+            self.yaw += 0.35 * dt;
+        }
+    }
 }
 
 impl Default for LabView {
@@ -42,6 +84,11 @@ impl Default for LabView {
             layer: 0,
             head: 0,
             editing: None,
+            command: None,
+            message: String::new(),
+            message_ttl: 0,
+            since_input: 99.0,
+            drag_from: None,
         }
     }
 }
@@ -90,7 +137,12 @@ fn render_cloud(f: &mut Frame, area: Rect, snap: &Snapshot, view: &LabView, t: &
         .borders(Borders::ALL)
         .border_style(t.border(true))
         .title(Span::styled(
-            " EMBEDDINGS · every dot is a token, placed by what the model learned about it ",
+            format!(
+                " EMBEDDINGS · yaw {:.0}° pitch {:.0}° zoom {:.1}x · every dot is a token ",
+                view.yaw.to_degrees().rem_euclid(360.0),
+                view.pitch.to_degrees(),
+                view.zoom
+            ),
             t.bold(),
         ));
     let pts = normalise(&snap.emb3);
@@ -497,6 +549,7 @@ pub fn render_lab(
             .wrap(Wrap { trim: false }),
         bottom[0],
     );
+
     let write_block = Block::default()
         .borders(Borders::ALL)
         .border_style(t.border(false))
@@ -515,17 +568,24 @@ pub fn render_lab(
             .wrap(Wrap { trim: false }),
         bottom[1],
     );
+    // the command menu is drawn last so that nothing paints over it
+    if let Some(typed) = &view.command {
+        render_command_menu(f, rows[2], typed, t);
+    }
     // footer
-    let foot = match &view.editing {
-        Some(text) => format!(" sentence to study: {text}█   Enter apply · Esc cancel"),
-        None => {
-            let note = if snap.notice.is_empty() {
-                String::new()
-            } else {
-                format!(" │ {}", snap.notice)
-            };
-            format!(" Space pause/resume · ←→↑↓ rotate · +/- zoom · a auto-rotate · Tab lessons · l/h layer/head · p your own sentence · s sample · w save · q quit{note}")
-        }
+    let foot = if let Some(typed) = &view.command {
+        format!(" {typed}█   Enter run · Tab complete · Esc cancel")
+    } else if let Some(text) = &view.editing {
+        format!(" sentence to study: {text}█   Enter apply · Esc cancel")
+    } else if view.message_ttl > 0 {
+        format!(" {}", view.message)
+    } else {
+        let note = if snap.notice.is_empty() {
+            String::new()
+        } else {
+            format!(" │ {}", snap.notice)
+        };
+        format!(" / commands · arrows or mouse drag rotate (or , . [ ]) · +/- zoom · Space pause · Tab lessons · p sentence · s sample · w save · q quit{note}")
     };
     f.render_widget(Paragraph::new(Line::styled(foot, t.footer())), rows[3]);
 }
@@ -535,6 +595,239 @@ pub fn render_lab(
 pub enum LabKey {
     None,
     Quit,
+}
+
+/// Every `/command`: name, arguments, what it does.
+pub const COMMANDS: &[(&str, &str, &str)] = &[
+    (
+        "rotate",
+        "<yaw> [pitch]",
+        "turn the 3D view by degrees, e.g. /rotate 45 20",
+    ),
+    ("view", "front|side|top|iso", "jump to a standard angle"),
+    ("zoom", "<0.4-6>", "zoom the 3D view, e.g. /zoom 2"),
+    (
+        "spin",
+        "on|off",
+        "slow automatic rotation when you are not touching anything",
+    ),
+    ("pause", "", "pause training"),
+    ("resume", "", "continue training"),
+    ("lesson", "<1-10>", "show one of the ten lessons"),
+    ("layer", "<n>", "which attention layer to show"),
+    ("head", "<n>", "which attention head to show"),
+    (
+        "probe",
+        "<sentence>",
+        "study your own sentence (attention map and next-token chart)",
+    ),
+    ("sample", "", "write new text with the current weights"),
+    ("save", "[file]", "save the model to a file"),
+    ("help", "", "list the commands and keys"),
+    ("quit", "", "leave the Lab"),
+];
+
+/// The commands that match what has been typed so far (`/ro` finds `rotate`).
+pub fn command_matches(typed: &str) -> Vec<&'static (&'static str, &'static str, &'static str)> {
+    let word = typed
+        .trim_start_matches('/')
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_lowercase();
+    // once a space follows the name, the command is chosen: show just that one
+    if typed.contains(' ') {
+        return COMMANDS.iter().filter(|c| c.0 == word).collect();
+    }
+    COMMANDS.iter().filter(|c| c.0.starts_with(&word)).collect()
+}
+
+/// Tab: finish the command name (`/ro` -> `/rotate `).
+pub fn complete(typed: &str) -> String {
+    if typed.contains(' ') {
+        return typed.to_string();
+    }
+    match command_matches(typed).first() {
+        Some(c) => format!("/{} ", c.0),
+        None => typed.to_string(),
+    }
+}
+
+fn render_command_menu(f: &mut Frame, area: Rect, typed: &str, t: &Theme) {
+    use crate::ui::widgets::truncate;
+    f.render_widget(ratatui::widgets::Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(t.border(true))
+        .title(Span::styled(
+            " COMMANDS · Enter run · Tab complete · Esc cancel ",
+            t.bold(),
+        ));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let m = command_matches(typed);
+    if m.is_empty() {
+        f.render_widget(
+            Paragraph::new(Line::styled("no such command: type /help", t.dim())),
+            inner,
+        );
+        return;
+    }
+    let rows = inner.height.max(1) as usize;
+    // two columns on a wide screen when the list does not fit in one
+    let cols = if inner.width >= 100 && m.len() > rows {
+        2
+    } else {
+        1
+    };
+    let per = m.len().div_ceil(cols);
+    let areas = Layout::horizontal(vec![Constraint::Ratio(1, cols as u32); cols]).split(inner);
+    for (c, col) in areas.iter().enumerate() {
+        let w = col.width as usize;
+        let mut lines: Vec<Line> = m
+            .iter()
+            .skip(c * per)
+            .take(per.min(rows))
+            .map(|cmd| {
+                let name = format!("/{:<7} {:<19} ", cmd.0, cmd.1);
+                let used = name.chars().count();
+                Line::from(vec![
+                    Span::styled(name, t.bold()),
+                    Span::styled(truncate(cmd.2, w.saturating_sub(used + 1)), t.dim()),
+                ])
+            })
+            .collect();
+        // a single short column: say that more are hidden instead of silently cutting them
+        if cols == 1 && m.len() > rows && rows > 1 {
+            lines.truncate(rows - 1);
+            lines.push(Line::styled(
+                format!(
+                    "... {} more: keep typing to narrow the list",
+                    m.len() - (rows - 1)
+                ),
+                t.dim(),
+            ));
+        }
+        f.render_widget(Paragraph::new(lines), *col);
+    }
+}
+
+/// Run a typed `/command`. The answer (or the reason it failed) is shown in the footer.
+pub fn run_command(
+    view: &mut LabView,
+    session: &LabSession,
+    snap: &Snapshot,
+    line: &str,
+    save_path: &std::path::Path,
+) -> LabKey {
+    let mut parts = line.trim().trim_start_matches('/').split_whitespace();
+    let name = parts.next().unwrap_or("").to_lowercase();
+    let args: Vec<&str> = parts.collect();
+    let num = |i: usize| args.get(i).and_then(|a| a.parse::<f64>().ok());
+    let count = |i: usize, max: usize| {
+        args.get(i)
+            .and_then(|a| a.parse::<usize>().ok())
+            .filter(|n| (1..=max).contains(n))
+    };
+    match name.as_str() {
+        "rotate" | "rot" => match num(0) {
+            Some(y) => {
+                view.yaw = y.to_radians();
+                if let Some(p) = num(1) {
+                    view.pitch = p.to_radians().clamp(-1.5, 1.5);
+                }
+                view.auto_rotate = false;
+                view.since_input = 0.0;
+                view.say(format!("view turned to yaw {y:.0}° pitch {:.0}° (automatic spin is off)", view.pitch.to_degrees()));
+            }
+            None => view.say("usage: /rotate <yaw in degrees> [pitch], e.g. /rotate 45 20"),
+        },
+        "view" => {
+            let (y, p) = match args.first().copied().unwrap_or("") {
+                "front" => (0.0, 0.0),
+                "side" => (90.0, 0.0),
+                "top" => (0.0, 85.0),
+                "iso" | "isometric" => (35.0, 30.0),
+                _ => {
+                    view.say("usage: /view front | side | top | iso");
+                    return LabKey::None;
+                }
+            };
+            view.yaw = f64::to_radians(y);
+            view.pitch = f64::to_radians(p);
+            view.auto_rotate = false;
+            view.since_input = 0.0;
+            view.say(format!("{} view", args[0]));
+        }
+        "zoom" => match num(0).filter(|z| (0.4..=6.0).contains(z)) {
+            Some(z) => {
+                view.zoom = z;
+                view.since_input = 0.0;
+                view.say(format!("zoom {z:.1}x"));
+            }
+            None => view.say("usage: /zoom <number from 0.4 to 6>"),
+        },
+        "spin" => match args.first().copied() {
+            Some("on") => {
+                view.auto_rotate = true;
+                view.say("automatic spin on (it starts after a few quiet seconds)");
+            }
+            Some("off") => {
+                view.auto_rotate = false;
+                view.say("automatic spin off");
+            }
+            _ => view.say("usage: /spin on | off"),
+        },
+        "pause" => {
+            session.set_paused(true);
+            view.say("training paused (/resume continues)");
+        }
+        "resume" => {
+            session.set_paused(false);
+            view.say("training continues");
+        }
+        "lesson" => match count(0, LESSONS) {
+            Some(n) => view.lesson = n - 1,
+            None => view.say(format!("usage: /lesson <1-{LESSONS}>")),
+        },
+        "layer" => match count(0, snap.config.layers.max(1)) {
+            Some(n) => {
+                view.layer = n - 1;
+                view.say(format!("attention layer {n}"));
+            }
+            None => view.say(format!("this model has {} layer(s): /layer <1-{}>", snap.config.layers, snap.config.layers)),
+        },
+        "head" => match count(0, snap.config.heads.max(1)) {
+            Some(n) => {
+                view.head = n - 1;
+                view.say(format!("attention head {n}"));
+            }
+            None => view.say(format!("this model has {} head(s): /head <1-{}>", snap.config.heads, snap.config.heads)),
+        },
+        "probe" => {
+            let text = args.join(" ");
+            if text.is_empty() || text.chars().count() > 60 {
+                view.say("usage: /probe <a sentence of up to 60 characters>");
+            } else {
+                session.set_probe(text.clone());
+                view.say(format!("studying: {text}"));
+            }
+        }
+        "sample" => {
+            session.request_sample();
+            view.say("writing new text...");
+        }
+        "save" => {
+            let path = args.first().map(std::path::PathBuf::from).unwrap_or_else(|| save_path.to_path_buf());
+            view.say(format!("saving to {}", path.display()));
+            session.request_save(path);
+        }
+        "help" | "?" => view.say("commands: /rotate /view /zoom /spin /pause /resume /lesson /layer /head /probe /sample /save /quit   keys: arrows or , . [ ] rotate, mouse drag rotates, +/- zoom, Tab lessons"),
+        "quit" | "exit" | "q" => return LabKey::Quit,
+        "" => {}
+        other => view.say(format!("unknown command /{other}: type /help")),
+    }
+    LabKey::None
 }
 
 pub fn handle_key(
@@ -551,6 +844,29 @@ pub fn handle_key(
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
         return LabKey::Quit;
     }
+    view.since_input = 0.0;
+    // typing a /command
+    if let Some(typed) = &mut view.command {
+        match key.code {
+            KeyCode::Esc => view.command = None,
+            KeyCode::Enter => {
+                let line = std::mem::take(typed);
+                view.command = None;
+                return run_command(view, session, snap, &line, save_path);
+            }
+            KeyCode::Tab => *typed = complete(typed),
+            KeyCode::Backspace => {
+                typed.pop();
+                if typed.is_empty() {
+                    view.command = None;
+                }
+            }
+            KeyCode::Char(c) if typed.chars().count() < 80 => typed.push(c),
+            _ => {}
+        }
+        return LabKey::None;
+    }
+    // typing a sentence to study
     if let Some(text) = &mut view.editing {
         match key.code {
             KeyCode::Esc => view.editing = None,
@@ -570,14 +886,15 @@ pub fn handle_key(
         return LabKey::None;
     }
     match key.code {
+        KeyCode::Char('/') => view.command = Some("/".into()),
         KeyCode::Char('q') | KeyCode::Esc => return LabKey::Quit,
         KeyCode::Char(' ') => session.toggle_pause(),
-        KeyCode::Left => view.yaw -= 0.1,
-        KeyCode::Right => view.yaw += 0.1,
-        KeyCode::Up => view.pitch = (view.pitch - 0.1).clamp(-1.5, 1.5),
-        KeyCode::Down => view.pitch = (view.pitch + 0.1).clamp(-1.5, 1.5),
-        KeyCode::Char('+') | KeyCode::Char('=') => view.zoom = (view.zoom * 1.15).min(6.0),
-        KeyCode::Char('-') | KeyCode::Char('_') => view.zoom = (view.zoom / 1.15).max(0.4),
+        KeyCode::Left | KeyCode::Char(',') => view.turn(-0.1, 0.0),
+        KeyCode::Right | KeyCode::Char('.') => view.turn(0.1, 0.0),
+        KeyCode::Up | KeyCode::Char('[') => view.turn(0.0, -0.1),
+        KeyCode::Down | KeyCode::Char(']') => view.turn(0.0, 0.1),
+        KeyCode::Char('+') | KeyCode::Char('=') => view.zoom_by(1.15),
+        KeyCode::Char('-') | KeyCode::Char('_') => view.zoom_by(1.0 / 1.15),
         KeyCode::Char('a') => view.auto_rotate = !view.auto_rotate,
         KeyCode::Tab => view.lesson = (view.lesson + 1) % LESSONS,
         KeyCode::BackTab => view.lesson = (view.lesson + LESSONS - 1) % LESSONS,
@@ -593,13 +910,33 @@ pub fn handle_key(
     LabKey::None
 }
 
+/// Mouse: drag with the left button to turn the 3D view, wheel to zoom. (Only if the terminal passes
+/// the mouse on; every mouse action also has a key or a /command.)
+pub fn handle_mouse(view: &mut LabView, m: crossterm::event::MouseEvent) {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    match m.kind {
+        MouseEventKind::Down(MouseButton::Left) => view.drag_from = Some((m.column, m.row)),
+        MouseEventKind::Drag(MouseButton::Left) => {
+            if let Some((c0, r0)) = view.drag_from {
+                let (dx, dy) = (m.column as f64 - c0 as f64, m.row as f64 - r0 as f64);
+                view.turn(dx * 0.06, dy * 0.1);
+                view.drag_from = Some((m.column, m.row));
+            }
+        }
+        MouseEventKind::Up(_) => view.drag_from = None,
+        MouseEventKind::ScrollUp => view.zoom_by(1.15),
+        MouseEventKind::ScrollDown => view.zoom_by(1.0 / 1.15),
+        _ => {}
+    }
+}
+
 /// Run the Lab full screen until the student quits. The training thread stops when this returns.
 pub fn run_lab(session: LabSession, save_path: std::path::PathBuf) -> anyhow::Result<()> {
     use crossterm::event::{self, Event};
     use ratatui::backend::CrosstermBackend;
     use ratatui::Terminal;
     use std::time::{Duration, Instant};
-    let _guard = crate::runtime::TerminalGuard::enter(false)?;
+    let _guard = crate::runtime::TerminalGuard::enter(true)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(std::io::stdout()))?;
     let theme = Theme::from_env(false);
     let mut view = LabView::default();
@@ -608,17 +945,19 @@ pub fn run_lab(session: LabSession, save_path: std::path::PathBuf) -> anyhow::Re
         let snap = session.snapshot();
         terminal.draw(|f| render_lab(f, f.area(), &snap, &view, &theme, session.is_paused()))?;
         if event::poll(Duration::from_millis(50))? {
-            if let Event::Key(k) = event::read()? {
-                if let LabKey::Quit = handle_key(&mut view, &session, k, &snap, &save_path) {
-                    break;
+            match event::read()? {
+                Event::Key(k) => {
+                    if let LabKey::Quit = handle_key(&mut view, &session, k, &snap, &save_path) {
+                        break;
+                    }
                 }
+                Event::Mouse(m) => handle_mouse(&mut view, m),
+                _ => {}
             }
         }
         let dt = last.elapsed().as_secs_f64();
         last = Instant::now();
-        if view.auto_rotate && view.editing.is_none() {
-            view.yaw += 0.35 * dt;
-        }
+        view.tick(dt);
     }
     session.stop();
     Ok(())

@@ -41,9 +41,22 @@ window), `--lr`, `--schedule constant|cosine|exponential`, `--warmup`, `--wd` (w
 | **Lesson** (bottom left, `Tab`) | Ten short lessons that quote the numbers on screen right now. | tokenizer, embedding, attention, loss, learning rate, weight decay, over-fitting, sampling, context window / KV cache / RoPE decay, parameters |
 | **What the model writes** | Text it generates from the current weights; `s` writes again. | sampling |
 
-Keys: `Space` pause/resume, arrows rotate, `+`/`-` zoom, `a` auto-rotate, `Tab`/`Shift+Tab` or `1`-`9`/`0`
-lessons, `l`/`h` layer/head, `p` type a sentence to study, `s` sample, `w` save, `q` quit. It needs a
-terminal of at least 60x22 and uses Braille characters for the 3D drawing; no mouse is needed.
+Turning the 3D view (use whichever your terminal passes on): the arrow keys, or `,` `.` (left/right) and
+`[` `]` (up/down) if the arrows do not reach the program; dragging with the left mouse button; or a command
+such as `/rotate 45 20` or `/view top`. The title of the panel always shows the angle in use. The view turns
+by itself only after four quiet seconds and stops the moment you touch anything (`/spin off` or `a` stops
+it for good). `+`/`-` or the wheel zoom.
+
+Other keys: `Space` pause/resume, `Tab`/`Shift+Tab` or `1`-`9`/`0` lessons, `l`/`h` layer/head, `p` type a
+sentence to study, `s` sample, `w` save, `q` quit.
+
+**Commands.** Type `/` and a menu of every command appears (Tab completes, Enter runs, Esc cancels):
+`/rotate <yaw> [pitch]` (degrees), `/view front|side|top|iso`, `/zoom <0.4-6>`, `/spin on|off`, `/pause`,
+`/resume`, `/lesson <1-10>`, `/layer <n>`, `/head <n>`, `/probe <sentence>`, `/sample`, `/save [file]`,
+`/help`, `/quit`. The answer, or the reason a command was refused, shows in the bottom line.
+
+It needs a terminal of at least 60x22 and uses Braille characters for the 3D drawing. The mouse is optional:
+under Windows `cmd` the terminal may keep it for selecting text, and everything has a key or a command.
 
 ## Exercises
 

@@ -261,6 +261,10 @@ impl LabSession {
         self.shared.paused.store(!p, Ordering::SeqCst);
     }
 
+    pub fn set_paused(&self, paused: bool) {
+        self.shared.paused.store(paused, Ordering::SeqCst);
+    }
+
     pub fn is_paused(&self) -> bool {
         self.shared.paused.load(Ordering::SeqCst)
     }
