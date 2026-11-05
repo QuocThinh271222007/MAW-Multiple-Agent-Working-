@@ -140,7 +140,35 @@ autostart = true
 # path = "/path/to/ollama"
 max_pull_params_b = 8.0
 max_pull_gb = 6.5
+think_budget_leader = 400    # tokens of reasoning per request; 0 = no limit
+think_budget_worker = 1500
+think_budget_other = 1500    # reviewers, specialists
 ```
+
+## Thinking has an allowance
+
+A small thinking model can spend thousands of tokens reasoning about a step that needs one tool call
+(measured on `lfm3:1.7b`: 600 to 7,700 output tokens for the same radix-sort request, and 628,000
+characters of reasoning from a Leader over a 3-hour session of simple coordination calls). Each agent
+gets an allowance by role (`think_budget_*`, in tokens). When a request has used its allowance without
+having started to answer, MAW drops it (Ollama stops generating) and asks again with `think: false`, so the model acts on what it
+has; the transcript shows "thinking stopped after about N tokens". The whole turn gets twice the
+allowance of one request: once it is spent the remaining requests of the turn are made without thinking.
+
+* `0` turns the limit off for that role.
+* Not applied to `gpt-oss` (it has real effort levels) or to models whose thinking cannot be switched off
+  cleanly: `qwen3:4b` and anything with `thinking` in its tag keep reasoning when asked not to, and the text
+  ends up in the answer, which is slower than letting them think.
+* Turning thinking off entirely costs correctness on a 1.7B model (2 of 4 files were wrong in a
+  measurement), which is why this is an allowance and not a switch.
+
+## Loop guards
+
+Small models repeat themselves. Per turn, MAW: refuses a read-only call it already made with the same
+arguments; refuses a call that already failed twice with the same arguments (the third attempt gets "do
+not send it again" instead of running; the turn ends after three such refusals); adds the expected
+arguments (names, types, required) to an `invalid input` error; and after 8 reads in a row with no write,
+command or MAW action tells the model to act, ending the turn after 14.
 
 ## Watching the machine
 

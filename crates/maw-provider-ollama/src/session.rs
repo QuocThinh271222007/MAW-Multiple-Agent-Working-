@@ -34,6 +34,15 @@ const TERMINAL_TOOLS: &[&str] = &[
     "maw_review_submit",
 ];
 
+/// A call that failed this many times with the same arguments is not run again in the same turn.
+const MAX_SAME_FAILURES: u32 = 2;
+/// Refused repeats of failing calls in one turn before the turn is ended.
+const MAX_BLOCKED: u32 = 3;
+/// Reads in a row (no write, command or MAW action between) before the model is told to act, and
+/// before the turn is ended.
+const READS_NUDGE: u32 = 8;
+const READS_STOP: u32 = 14;
+
 const MAX_LINE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_TOOL_RESULT_BYTES: usize = 16 * 1024;
 
@@ -43,6 +52,9 @@ pub struct SessionParams {
     pub base_url: String,
     pub model: String,
     pub think: Option<Value>,
+    /// Tokens of reasoning allowed before each answer or tool call (0 = no limit). When used up the
+    /// request is stopped and asked again with thinking off.
+    pub think_budget: u32,
     pub num_ctx: u32,
     pub keep_alive: String,
     pub max_steps: usize,
@@ -62,6 +74,14 @@ pub struct SessionParams {
 struct Inner {
     /// Read-only calls already made since the last change in this turn (name + arguments).
     turn_calls: HashSet<String>,
+    /// Calls that failed in this turn (name + arguments): how often, and the last error.
+    failed_calls: HashMap<String, (u32, String)>,
+    /// Repeats of failing calls refused in this turn.
+    blocked_calls: u32,
+    /// Read-only calls in a row without any change in between.
+    reads_in_row: u32,
+    /// Characters of reasoning spent so far in this turn (the allowance covers the whole turn).
+    turn_thought: usize,
     /// The "context is full" warning is given once per session.
     ctx_warned: bool,
     history: Vec<Value>,
@@ -282,6 +302,10 @@ async fn run_turn(sh: Arc<Shared>, text: String, turn_id: String, cancel: Cancel
     {
         let mut g = sh.lock();
         g.turn_calls.clear();
+        g.failed_calls.clear();
+        g.blocked_calls = 0;
+        g.reads_in_row = 0;
+        g.turn_thought = 0;
         g.history.push(json!({"role":"user","content":text}));
     }
     let mut outcome = TurnOutcome::Completed;
@@ -349,108 +373,156 @@ async fn step(sh: &Arc<Shared>, cancel: &CancellationToken) -> Result<Step, Stri
         m.extend(g.history.iter().cloned());
         m
     };
-    let mut body = json!({
-        "model": sh.p.model,
-        "messages": messages,
-        "tools": sh.tool_defs,
-        "stream": true,
-        "keep_alive": sh.p.keep_alive,
-        "options": {"num_ctx": sh.p.num_ctx},
-    });
-    if let Some(t) = &sh.p.think {
-        body["think"] = t.clone();
+    // Thinking has an allowance (`SessionParams::think_budget`). If the model uses it all without
+    // having started to answer, that request is dropped (Ollama stops generating) and asked again
+    // with thinking off, so it acts on what it has instead of reasoning for minutes.
+    // The allowance is for one request, and the whole turn gets twice that: a model that reasons a
+    // little at every step of a long turn would otherwise cost more than one that reasons once.
+    let per_request: Option<usize> =
+        (sh.p.think_budget > 0).then(|| sh.p.think_budget as usize * 7 / 2);
+    let left_in_turn = per_request.map(|b| (b * 2).saturating_sub(sh.lock().turn_thought));
+    let mut think = sh.p.think.clone();
+    if left_in_turn == Some(0) {
+        think = Some(Value::Bool(false)); // this turn's thinking is spent
     }
-    let url = format!("{}/api/chat", sh.p.base_url);
-    let sent = tokio::select! {
-        _ = cancel.cancelled() => return Ok(Step::Interrupted),
-        r = sh.p.http.post(&url).json(&body).send() => r,
+    let mut budget_chars: Option<usize> = match (per_request, left_in_turn) {
+        (Some(b), Some(left)) if left > 0 => Some(b.min(left)),
+        _ => None,
     };
-    let resp = sent.map_err(|e| format!("cannot reach Ollama at {}: {e}", sh.p.base_url))?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        let msg = serde_json::from_str::<Value>(&text)
-            .ok()
-            .and_then(|v| v.get("error").and_then(Value::as_str).map(String::from))
-            .unwrap_or(text);
-        return Err(format!("Ollama answered {status}: {}", msg.trim()));
-    }
-
-    let mut stream = resp.bytes_stream();
-    let mut buf: Vec<u8> = Vec::new();
+    let mut thought_total = 0usize;
     let (mut content, mut calls) = (String::new(), Vec::<ToolCall>::new());
-    let mut last: Option<ChatChunk> = None;
-    let handle = |line: &[u8],
-                  content: &mut String,
-                  calls: &mut Vec<ToolCall>,
-                  last: &mut Option<ChatChunk>|
-     -> Result<Vec<ProviderEvent>, String> {
-        let text = String::from_utf8_lossy(line);
-        let text = text.trim();
-        if text.is_empty() {
-            return Ok(vec![]);
+    let mut last: Option<ChatChunk>;
+    'attempt: loop {
+        let mut body = json!({
+            "model": sh.p.model,
+            "messages": messages,
+            "tools": sh.tool_defs,
+            "stream": true,
+            "keep_alive": sh.p.keep_alive,
+            "options": {"num_ctx": sh.p.num_ctx},
+        });
+        if let Some(t) = &think {
+            body["think"] = t.clone();
         }
-        let c = match api::parse_chunk(text) {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!("{e}");
+        let url = format!("{}/api/chat", sh.p.base_url);
+        let sent = tokio::select! {
+            _ = cancel.cancelled() => return Ok(Step::Interrupted),
+            r = sh.p.http.post(&url).json(&body).send() => r,
+        };
+        let resp = sent.map_err(|e| format!("cannot reach Ollama at {}: {e}", sh.p.base_url))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            let msg = serde_json::from_str::<Value>(&text)
+                .ok()
+                .and_then(|v| v.get("error").and_then(Value::as_str).map(String::from))
+                .unwrap_or(text);
+            return Err(format!("Ollama answered {status}: {}", msg.trim()));
+        }
+
+        let mut stream = resp.bytes_stream();
+        let mut buf: Vec<u8> = Vec::new();
+        content.clear();
+        calls.clear();
+        last = None;
+        let mut thought = 0usize;
+        let mut cut = false;
+        let handle = |line: &[u8],
+                      content: &mut String,
+                      calls: &mut Vec<ToolCall>,
+                      last: &mut Option<ChatChunk>|
+         -> Result<Vec<ProviderEvent>, String> {
+            let text = String::from_utf8_lossy(line);
+            let text = text.trim();
+            if text.is_empty() {
                 return Ok(vec![]);
             }
-        };
-        if let Some(e) = &c.error {
-            return Err(format!("Ollama error: {e}"));
-        }
-        let mut evs = Vec::new();
-        if !c.thinking.is_empty() {
-            evs.push(ProviderEvent::Reasoning {
-                text: c.thinking.clone(),
-            });
-        }
-        if !c.content.is_empty() {
-            content.push_str(&c.content);
-            evs.push(ProviderEvent::MessageDelta {
-                text: c.content.clone(),
-            });
-        }
-        calls.extend(c.tool_calls.iter().cloned());
-        if c.done {
-            *last = Some(c);
-        }
-        Ok(evs)
-    };
-    loop {
-        let next = tokio::select! {
-            _ = cancel.cancelled() => return Ok(Step::Interrupted),
-            r = tokio::time::timeout(sh.p.idle_timeout, stream.next()) => r,
-        };
-        let bytes = match next {
-            Err(_) => {
-                return Err(format!(
-                    "no data from Ollama for {}s (model still loading, or the server is stuck)",
-                    sh.p.idle_timeout.as_secs()
-                ))
+            let c = match api::parse_chunk(text) {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!("{e}");
+                    return Ok(vec![]);
+                }
+            };
+            if let Some(e) = &c.error {
+                return Err(format!("Ollama error: {e}"));
             }
-            Ok(None) => break,
-            Ok(Some(Err(e))) => return Err(format!("connection to Ollama broke: {e}")),
-            Ok(Some(Ok(b))) => b,
+            let mut evs = Vec::new();
+            if !c.thinking.is_empty() {
+                evs.push(ProviderEvent::Reasoning {
+                    text: c.thinking.clone(),
+                });
+            }
+            if !c.content.is_empty() {
+                content.push_str(&c.content);
+                evs.push(ProviderEvent::MessageDelta {
+                    text: c.content.clone(),
+                });
+            }
+            calls.extend(c.tool_calls.iter().cloned());
+            if c.done {
+                *last = Some(c);
+            }
+            Ok(evs)
         };
-        buf.extend_from_slice(&bytes);
-        if buf.len() > MAX_LINE_BYTES {
-            return Err("Ollama sent an oversized stream line".into());
+        loop {
+            let next = tokio::select! {
+                _ = cancel.cancelled() => return Ok(Step::Interrupted),
+                r = tokio::time::timeout(sh.p.idle_timeout, stream.next()) => r,
+            };
+            let bytes = match next {
+                Err(_) => {
+                    return Err(format!(
+                        "no data from Ollama for {}s (model still loading, or the server is stuck)",
+                        sh.p.idle_timeout.as_secs()
+                    ))
+                }
+                Ok(None) => break,
+                Ok(Some(Err(e))) => return Err(format!("connection to Ollama broke: {e}")),
+                Ok(Some(Ok(b))) => b,
+            };
+            buf.extend_from_slice(&bytes);
+            if buf.len() > MAX_LINE_BYTES {
+                return Err("Ollama sent an oversized stream line".into());
+            }
+            while let Some(pos) = buf.iter().position(|b| *b == b'\n') {
+                let line: Vec<u8> = buf.drain(..=pos).collect();
+                for ev in handle(&line, &mut content, &mut calls, &mut last)? {
+                    if let ProviderEvent::Reasoning { text } = &ev {
+                        thought += text.len();
+                    }
+                    sh.emit(ev).await;
+                }
+            }
+            // still thinking, nothing said or called yet, and the allowance is gone
+            if budget_chars.is_some_and(|b| thought > b) && content.is_empty() && calls.is_empty() {
+                cut = true;
+                break;
+            }
         }
-        while let Some(pos) = buf.iter().position(|b| *b == b'\n') {
-            let line: Vec<u8> = buf.drain(..=pos).collect();
+        thought_total += thought;
+        if cut {
+            drop(stream);
+            sh.emit(ProviderEvent::Reasoning {
+                text: format!(
+                    "\n[thinking stopped after about {} tokens: answering now]\n",
+                    thought * 2 / 7
+                ),
+            })
+            .await;
+            think = Some(Value::Bool(false));
+            budget_chars = None;
+            continue 'attempt;
+        }
+        if !buf.is_empty() {
+            let line = std::mem::take(&mut buf);
             for ev in handle(&line, &mut content, &mut calls, &mut last)? {
                 sh.emit(ev).await;
             }
         }
+        break 'attempt;
     }
-    if !buf.is_empty() {
-        let line = std::mem::take(&mut buf);
-        for ev in handle(&line, &mut content, &mut calls, &mut last)? {
-            sh.emit(ev).await;
-        }
-    }
+    sh.lock().turn_thought += thought_total;
     let Some(fin) = last else {
         return Err("the response from Ollama ended before it was complete".into());
     };
@@ -545,11 +617,36 @@ async fn step(sh: &Arc<Shared>, cancel: &CancellationToken) -> Result<Step, Stri
     }
     let mut handed_back = false;
     for call in calls {
+        let key = format!("{}\u{0}{}", call.name, call.arguments);
+        // A call that failed twice with exactly these arguments will fail a third time. Do not run
+        // it again; tell the model why, and end the turn if it keeps insisting.
+        let prior = sh.lock().failed_calls.get(&key).cloned();
+        if let Some((times, why)) = prior.filter(|(n, _)| *n >= MAX_SAME_FAILURES) {
+            let blocked = {
+                let mut g = sh.lock();
+                g.blocked_calls += 1;
+                g.blocked_calls
+            };
+            let hint = format!(
+                "This exact call has already failed {times} times in this turn (last error: {}). Do not send it again. Change the arguments, use a different tool, or end your turn with a short status.",
+                clip(&why, 300)
+            );
+            sh.lock()
+                .history
+                .push(json!({"role":"tool","tool_name":call.name,"content":hint}));
+            if blocked >= MAX_BLOCKED {
+                return Err(format!(
+                    "stopped: the model kept repeating a failing call to {}; send a follow-up to continue",
+                    call.name
+                ));
+            }
+            continue;
+        }
         // A small model that did not get what it expected tends to ask the same read again and
         // again. Say so instead of repeating it; any change (write, command, MAW action) resets this.
         if is_read_only(&call.name) {
-            let key = format!("{}\u{0}{}", call.name, call.arguments);
-            if !sh.lock().turn_calls.insert(key) {
+            sh.lock().reads_in_row += 1;
+            if !sh.lock().turn_calls.insert(key.clone()) {
                 let hint = format!(
                     "You already called {} with exactly these arguments in this turn; its result is above. Do not call it again. Use that result to take the next step now, or answer the user.",
                     call.name
@@ -560,13 +657,29 @@ async fn step(sh: &Arc<Shared>, cancel: &CancellationToken) -> Result<Step, Stri
                 continue;
             }
         } else {
-            sh.lock().turn_calls.clear();
+            let mut g = sh.lock();
+            g.turn_calls.clear();
+            g.reads_in_row = 0;
         }
         match exec_tool(sh, &call, cancel).await {
             None => return Ok(Step::Interrupted),
-            Some(text) => {
+            Some(mut text) => {
                 if TERMINAL_TOOLS.contains(&call.name.as_str()) && !text.starts_with("error:") {
                     handed_back = true;
+                }
+                if is_failure(&text) {
+                    let mut g = sh.lock();
+                    let e = g.failed_calls.entry(key).or_insert((0, String::new()));
+                    e.0 += 1;
+                    e.1 = clip(&text, 300);
+                    drop(g);
+                    // a call with the wrong arguments gets the shape it should have had
+                    if text.contains("invalid input") || text.contains("invalid_input") {
+                        if let Some(h) = args_hint(&sh.tool_defs, &call.name) {
+                            text.push('\n');
+                            text.push_str(&h);
+                        }
+                    }
                 }
                 let text = clip(&text, MAX_TOOL_RESULT_BYTES);
                 sh.lock()
@@ -575,11 +688,58 @@ async fn step(sh: &Arc<Shared>, cancel: &CancellationToken) -> Result<Step, Stri
             }
         }
     }
+    // Only looking, never acting: say so, and stop the turn if it goes on.
+    let reads = sh.lock().reads_in_row;
+    if !handed_back && reads >= READS_STOP {
+        return Err(format!(
+            "stopped: {reads} reads in a row without doing anything; send a follow-up to continue"
+        ));
+    }
+    if !handed_back && reads == READS_NUDGE {
+        sh.lock().history.push(json!({"role":"user","content":
+            "[MAW] You have only been reading for several steps in a row. Stop reading: take the next action now (write the file, submit the result, send the message) or answer."}));
+    }
     Ok(if handed_back {
         Step::Done
     } else {
         Step::Continue
     })
+}
+
+/// Whether a tool result is a failure of the call (not just an unwelcome answer).
+fn is_failure(text: &str) -> bool {
+    text.starts_with("error:")
+        || text.starts_with("refused:")
+        || text.starts_with("unknown tool")
+        || text.starts_with("the user denied")
+}
+
+/// "Expected arguments for NAME: a (string, required), b (array) ..." from the tool's schema.
+fn args_hint(defs: &[Value], name: &str) -> Option<String> {
+    let f = defs
+        .iter()
+        .find(|d| d["function"]["name"].as_str() == Some(name))?;
+    let params = &f["function"]["parameters"];
+    let props = params["properties"].as_object()?;
+    let required: Vec<&str> = params["required"]
+        .as_array()
+        .map(|r| r.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    let list: Vec<String> = props
+        .iter()
+        .map(|(k, v)| {
+            let ty = v["type"].as_str().unwrap_or("value");
+            if required.contains(&k.as_str()) {
+                format!("{k} ({ty}, required)")
+            } else {
+                format!("{k} ({ty})")
+            }
+        })
+        .collect();
+    Some(clip(
+        &format!("Expected arguments for {name}: {}", list.join(", ")),
+        600,
+    ))
 }
 
 /// Calls that only look at things. Repeating one with the same arguments, with nothing changed in

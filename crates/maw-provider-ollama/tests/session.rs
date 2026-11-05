@@ -674,3 +674,321 @@ async fn a_full_context_window_is_reported_and_the_leader_gets_a_bigger_one() {
     assert_eq!(fake.chats.lock().unwrap()[1]["options"]["num_ctx"], 12288);
     s.shutdown().await.unwrap();
 }
+
+// ---- thinking allowance and loop guards -----------------------------------------------------------
+
+fn thinking_only(chars: usize) -> String {
+    // a model that thinks and thinks: several chunks of reasoning, never an answer
+    let chunk = "x".repeat(chars / 4);
+    (0..4)
+        .map(|_| line(json!({"message":{"role":"assistant","thinking":chunk},"done":false})))
+        .collect::<String>()
+        + &line(json!({"done":true,"done_reason":"stop","prompt_eval_count":100,"eval_count":500}))
+}
+
+fn provider_with(url: &str, f: impl FnOnce(&mut OllamaConfig)) -> OllamaProvider {
+    let mut c = OllamaConfig {
+        url: Some(url.to_string()),
+        idle_timeout: Duration::from_secs(10),
+        command_timeout: Duration::from_secs(10),
+        ..Default::default()
+    };
+    f(&mut c);
+    OllamaProvider::new(c)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_model_that_uses_up_its_thinking_allowance_is_asked_again_with_thinking_off() {
+    let dir = tempfile::tempdir().unwrap();
+    // request 1: 4000 characters of reasoning against an allowance of 100 tokens (350 characters)
+    // request 2: the answer, which must have been asked for without thinking
+    let fake = fake_ollama(
+        vec![thinking_only(4000), answer("done")],
+        vec!["completion", "tools", "thinking"],
+    )
+    .await;
+    let p = provider_with(&fake.url, |c| c.think_budget_worker = 100);
+    let (s, mut rx) = p
+        .start_session(cfg(dir.path(), PermissionProfile::Autonomous, None))
+        .await
+        .unwrap();
+    s.send_input(AgentInput::text("go")).await.unwrap();
+    let evs = collect_turn(&mut rx).await;
+    let chats = fake.chats.lock().unwrap().clone();
+    assert_eq!(chats.len(), 2, "one cut request and one new one");
+    assert_eq!(chats[0]["think"], json!(true));
+    assert_eq!(
+        chats[1]["think"],
+        json!(false),
+        "asked again with thinking off"
+    );
+    assert!(evs.iter().any(
+        |e| matches!(e, ProviderEvent::Reasoning { text } if text.contains("thinking stopped"))
+    ));
+    assert!(evs
+        .iter()
+        .any(|e| matches!(e, ProviderEvent::Message { text } if text == "done")));
+    assert!(matches!(
+        evs.last(),
+        Some(ProviderEvent::TurnCompleted {
+            outcome: TurnOutcome::Completed,
+            ..
+        })
+    ));
+    s.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn thinking_within_the_allowance_is_left_alone_and_zero_means_no_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    // under the allowance: a single request, thinking on
+    let fake = fake_ollama(vec![answer("ok")], vec!["completion", "tools", "thinking"]).await;
+    let (s, mut rx) = provider_with(&fake.url, |c| c.think_budget_worker = 1500)
+        .start_session(cfg(dir.path(), PermissionProfile::Autonomous, None))
+        .await
+        .unwrap();
+    s.send_input(AgentInput::text("go")).await.unwrap();
+    collect_turn(&mut rx).await;
+    assert_eq!(fake.chats.lock().unwrap().len(), 1);
+    assert_eq!(fake.chats.lock().unwrap()[0]["think"], json!(true));
+    s.shutdown().await.unwrap();
+    // 0 = no limit: long reasoning is never cut
+    let fake = fake_ollama(
+        vec![thinking_only(4000), answer("late")],
+        vec!["completion", "tools", "thinking"],
+    )
+    .await;
+    let (s, mut rx) = provider_with(&fake.url, |c| c.think_budget_worker = 0)
+        .start_session(cfg(dir.path(), PermissionProfile::Autonomous, None))
+        .await
+        .unwrap();
+    s.send_input(AgentInput::text("go")).await.unwrap();
+    collect_turn(&mut rx).await;
+    assert!(fake
+        .chats
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|c| c["think"] == json!(true)));
+    s.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn each_role_has_its_own_allowance() {
+    let dir = tempfile::tempdir().unwrap();
+    let fake = fake_ollama(
+        vec![thinking_only(2000), answer("leader answer")],
+        vec!["completion", "tools", "thinking"],
+    )
+    .await;
+    // Leader 100 tokens (cut), Worker 100000 (not cut): same reasoning, different roles
+    let p = provider_with(&fake.url, |c| {
+        c.think_budget_leader = 100;
+        c.think_budget_worker = 100_000;
+    });
+    let mut leader = cfg(dir.path(), PermissionProfile::Autonomous, None);
+    leader.role = Role::Leader;
+    let (s, mut rx) = p.start_session(leader).await.unwrap();
+    s.send_input(AgentInput::text("go")).await.unwrap();
+    collect_turn(&mut rx).await;
+    assert_eq!(
+        fake.chats.lock().unwrap().len(),
+        2,
+        "the Leader's reasoning was cut"
+    );
+    s.shutdown().await.unwrap();
+    // the same reasoning from a Worker is not cut
+    let fake = fake_ollama(
+        vec![thinking_only(2000), answer("worker answer")],
+        vec!["completion", "tools", "thinking"],
+    )
+    .await;
+    let p = provider_with(&fake.url, |c| {
+        c.think_budget_leader = 100;
+        c.think_budget_worker = 100_000;
+    });
+    let (s, mut rx) = p
+        .start_session(cfg(dir.path(), PermissionProfile::Autonomous, None))
+        .await
+        .unwrap();
+    s.send_input(AgentInput::text("go")).await.unwrap();
+    collect_turn(&mut rx).await;
+    assert!(fake
+        .chats
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|c| c["think"] == json!(true)));
+    s.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_call_that_failed_twice_is_refused_the_third_time_and_a_stubborn_model_is_stopped() {
+    let dir = tempfile::tempdir().unwrap();
+    let bad = || {
+        tool_call(
+            "write_file",
+            json!({"path":"/definitely/outside/x.txt","content":"x"}),
+        )
+    };
+    let fake = fake_ollama(
+        vec![
+            bad(),
+            bad(),
+            bad(),
+            bad(),
+            bad(),
+            bad(),
+            answer("never reached"),
+        ],
+        vec!["completion", "tools"],
+    )
+    .await;
+    let (s, mut rx) = provider(&fake.url)
+        .start_session(cfg(dir.path(), PermissionProfile::Autonomous, None))
+        .await
+        .unwrap();
+    s.send_input(AgentInput::text("go")).await.unwrap();
+    let evs = collect_turn(&mut rx).await;
+    // requests 1 and 2 run the call; 3, 4 and 5 are refused (the 3rd refusal ends the turn)
+    let chats = fake.chats.lock().unwrap().len();
+    assert_eq!(chats, 5, "stopped after the third refusal");
+    assert!(
+        requests_text(&fake, 3).contains("has already failed 2 times"),
+        "{}",
+        requests_text(&fake, 3)
+    );
+    match evs.last() {
+        Some(ProviderEvent::TurnCompleted {
+            outcome: TurnOutcome::Failed,
+            error: Some(e),
+            ..
+        }) => {
+            assert!(e.contains("kept repeating a failing call"), "{e}")
+        }
+        other => panic!("{other:?}"),
+    }
+    s.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_different_call_in_between_is_not_a_loop() {
+    let dir = tempfile::tempdir().unwrap();
+    let bad = || {
+        tool_call(
+            "write_file",
+            json!({"path":"/definitely/outside/x.txt","content":"x"}),
+        )
+    };
+    // a failing call, a different call, the failing call again: only one failure of each, so it runs
+    let fake = fake_ollama(
+        vec![
+            bad(),
+            tool_call("write_file", json!({"path":"ok.txt","content":"y"})),
+            bad(),
+            answer("done"),
+        ],
+        vec!["completion", "tools"],
+    )
+    .await;
+    let (s, mut rx) = provider(&fake.url)
+        .start_session(cfg(dir.path(), PermissionProfile::Autonomous, None))
+        .await
+        .unwrap();
+    s.send_input(AgentInput::text("go")).await.unwrap();
+    let evs = collect_turn(&mut rx).await;
+    assert!(matches!(
+        evs.last(),
+        Some(ProviderEvent::TurnCompleted {
+            outcome: TurnOutcome::Completed,
+            ..
+        })
+    ));
+    assert!(!requests_text(&fake, 3).contains("has already failed"));
+    s.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_model_that_only_reads_is_told_to_act_and_then_stopped() {
+    let dir = tempfile::tempdir().unwrap();
+    for i in 0..20 {
+        std::fs::write(dir.path().join(format!("f{i}.txt")), "x").unwrap();
+    }
+    // 16 reads of different files in a row: never repeats an exact call, never changes anything
+    let mut script: Vec<String> = (0..16)
+        .map(|i| tool_call("read_file", json!({"path": format!("f{i}.txt")})))
+        .collect();
+    script.push(answer("never reached"));
+    let fake = fake_ollama(script, vec!["completion", "tools"]).await;
+    let (s, mut rx) = provider(&fake.url)
+        .start_session(cfg(dir.path(), PermissionProfile::Autonomous, None))
+        .await
+        .unwrap();
+    s.send_input(AgentInput::text("go")).await.unwrap();
+    let evs = collect_turn(&mut rx).await;
+    // the nudge arrives with the 9th request (after the 8th read) ...
+    assert!(
+        requests_text(&fake, 8).contains("Stop reading"),
+        "{}",
+        requests_text(&fake, 8)
+    );
+    assert!(!requests_text(&fake, 7).contains("Stop reading"));
+    // ... and the turn ends after the 14th
+    assert_eq!(fake.chats.lock().unwrap().len(), 14);
+    match evs.last() {
+        Some(ProviderEvent::TurnCompleted {
+            outcome: TurnOutcome::Failed,
+            error: Some(e),
+            ..
+        }) => {
+            assert!(e.contains("14 reads in a row"), "{e}")
+        }
+        other => panic!("{other:?}"),
+    }
+    s.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_allowance_covers_the_whole_turn_not_just_one_request() {
+    let dir = tempfile::tempdir().unwrap();
+    // allowance 100 tokens = 350 characters per request, 700 for the turn. Each request reasons for
+    // exactly 350 characters (within its allowance) and then writes a file; after two of them the
+    // turn's allowance is gone and the third request is made with thinking already off.
+    let think350 =
+        || line(json!({"message":{"role":"assistant","thinking":"y".repeat(350)},"done":false}));
+    let fake = fake_ollama(
+        vec![
+            think350() + &tool_call("write_file", json!({"path":"a.txt","content":"1"})),
+            think350() + &tool_call("write_file", json!({"path":"b.txt","content":"2"})),
+            answer("done"),
+        ],
+        vec!["completion", "tools", "thinking"],
+    )
+    .await;
+    let (s, mut rx) = provider_with(&fake.url, |c| c.think_budget_worker = 100)
+        .start_session(cfg(dir.path(), PermissionProfile::Autonomous, None))
+        .await
+        .unwrap();
+    s.send_input(AgentInput::text("go")).await.unwrap();
+    let evs = collect_turn(&mut rx).await;
+    let chats = fake.chats.lock().unwrap().clone();
+    assert_eq!(chats.len(), 3);
+    assert_eq!(
+        [
+            chats[0]["think"].clone(),
+            chats[1]["think"].clone(),
+            chats[2]["think"].clone()
+        ],
+        [json!(true), json!(true), json!(false)]
+    );
+    assert!(matches!(
+        evs.last(),
+        Some(ProviderEvent::TurnCompleted {
+            outcome: TurnOutcome::Completed,
+            ..
+        })
+    ));
+    // a new turn starts with a fresh allowance
+    let _ = &fake;
+    s.shutdown().await.unwrap();
+}

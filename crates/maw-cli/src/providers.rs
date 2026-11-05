@@ -35,6 +35,9 @@ pub fn ollama(
         max_pull_params_b: c.max_pull_params_b,
         max_pull_bytes: (c.max_pull_gb * 1e9) as u64,
         binary: c.path.clone().filter(|p| !p.trim().is_empty()),
+        think_budget_leader: c.think_budget_leader,
+        think_budget_worker: c.think_budget_worker,
+        think_budget_other: c.think_budget_other,
         ..Default::default()
     })
 }

@@ -58,6 +58,10 @@ pub struct OllamaSection {
     /// Folder for downloaded models (empty = Ollama's standard folder, e.g. C:/Users/<you>/.ollama/models
     /// for the Windows app). Applies when MAW starts Ollama for you.
     pub models_dir: Option<String>,
+    /// Thinking allowance in tokens before each answer or tool call, per role (0 = no limit).
+    pub think_budget_leader: u32,
+    pub think_budget_worker: u32,
+    pub think_budget_other: u32,
 }
 
 impl Default for OllamaSection {
@@ -75,6 +79,9 @@ impl Default for OllamaSection {
             max_pull_params_b: d.max_pull_params_b,
             max_pull_gb: d.max_pull_bytes as f64 / 1e9,
             models_dir: None,
+            think_budget_leader: d.think_budget_leader,
+            think_budget_worker: d.think_budget_worker,
+            think_budget_other: d.think_budget_other,
         }
     }
 }

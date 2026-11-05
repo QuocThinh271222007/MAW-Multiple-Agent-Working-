@@ -532,10 +532,21 @@ impl AgentProvider for OllamaProvider {
             tools.root().display(),
             cfg.instructions
         );
+        let think = api::think_value(&model, &info, cfg.effort.as_deref());
+        let think_budget = if api::think_budget_applies(&model, &think) {
+            match cfg.role {
+                maw_core::Role::Leader => self.cfg.think_budget_leader,
+                maw_core::Role::Worker => self.cfg.think_budget_worker,
+                _ => self.cfg.think_budget_other,
+            }
+        } else {
+            0
+        };
         let params = SessionParams {
             http: self.http.clone(),
             base_url: base,
-            think: api::think_value(&model, &info, cfg.effort.as_deref()),
+            think,
+            think_budget,
             model,
             num_ctx: if cfg.role == maw_core::Role::Leader {
                 self.cfg.num_ctx_leader.max(self.cfg.num_ctx)

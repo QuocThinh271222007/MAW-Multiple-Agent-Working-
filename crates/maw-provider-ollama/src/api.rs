@@ -361,10 +361,36 @@ pub fn think_value(model: &str, info: &ModelInfo, effort: Option<&str>) -> Optio
     }
 }
 
+/// Whether a thinking allowance can be enforced for this model: the model thinks (plain `true`, not
+/// the levels of gpt-oss) AND asking again with thinking off really gives an answer instead of the
+/// reasoning leaking into it. Measured: `qwen3:4b` (the thinking build) keeps reasoning with
+/// `think: false` and the text ends up in the answer, which is slower than letting it think.
+pub fn think_budget_applies(model: &str, think: &Option<Value>) -> bool {
+    let m = model.to_ascii_lowercase();
+    matches!(think, Some(Value::Bool(true))) && m != "qwen3:4b" && !m.contains("thinking")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_thinking_allowance_is_only_enforced_where_switching_thinking_off_is_clean() {
+        let on = Some(json!(true));
+        assert!(think_budget_applies("lfm3:1.7b", &on));
+        assert!(think_budget_applies("qwen3:1.7b", &on));
+        assert!(
+            !think_budget_applies("qwen3:4b", &on),
+            "leaks reasoning when thinking is off"
+        );
+        assert!(!think_budget_applies("qwen3:4b-thinking-2507-q4_K_M", &on));
+        assert!(
+            !think_budget_applies("gpt-oss:20b", &Some(json!("high"))),
+            "real effort levels"
+        );
+        assert!(!think_budget_applies("llama3.1:8b", &None), "cannot think");
+    }
 
     #[test]
     fn a_tool_call_written_as_text_is_read_only_for_real_tools() {

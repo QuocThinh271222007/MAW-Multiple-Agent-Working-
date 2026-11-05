@@ -32,6 +32,15 @@ pub struct OllamaConfig {
     pub models_dir: Option<std::path::PathBuf>,
     /// Where conversations are kept so an agent can resume after MAW restarts. `None` = not kept.
     pub state_dir: Option<std::path::PathBuf>,
+    /// Most tokens a thinking model may spend reasoning before each answer or tool call, per role
+    /// (0 = no limit). When it runs out MAW stops that request and asks again with thinking off, so
+    /// the model acts on what it has. The Leader mostly makes simple coordination calls and gets the
+    /// smallest allowance. Not applied to `gpt-oss` (it has real effort levels) or to models whose
+    /// thinking cannot be switched off cleanly.
+    pub think_budget_leader: u32,
+    pub think_budget_worker: u32,
+    /// Reviewers and specialists.
+    pub think_budget_other: u32,
 }
 
 impl Default for OllamaConfig {
@@ -50,6 +59,9 @@ impl Default for OllamaConfig {
             max_pull_bytes: 6_500_000_000,
             models_dir: None,
             state_dir: None,
+            think_budget_leader: 400,
+            think_budget_worker: 1500,
+            think_budget_other: 1500,
         }
     }
 }
